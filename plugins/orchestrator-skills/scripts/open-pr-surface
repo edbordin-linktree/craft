@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+#
+# open-pr-surface — Open a GitHub PR in cmux as a browser surface split to
+# the right of the calling pane.
+#
+# Usage:
+#   open-pr-surface <pr-url>
+#
+# Fire-and-forget helper for /work-task Step 9. It is intentionally tolerant:
+# if cmux is unavailable, or placement fails, callers can ignore the non-zero
+# exit without affecting the PR workflow.
+
+set -uo pipefail
+
+URL="${1:?Usage: open-pr-surface <pr-url>}"
+
+command -v cmux >/dev/null || { echo "open-pr-surface: cmux not on PATH" >&2; exit 1; }
+command -v jq >/dev/null || { echo "open-pr-surface: jq not on PATH" >&2; exit 1; }
+
+if ! cmux current-window >/dev/null 2>&1; then
+    echo "open-pr-surface: no active cmux window" >&2
+    exit 1
+fi
+
+TITLE="pr"
+if [[ "$URL" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+    TITLE="pr:${BASH_REMATCH[2]}#${BASH_REMATCH[3]}"
+fi
+
+EXISTING=$(cmux tree --all --json 2>/dev/null \
+    | jq -r --arg u "$URL" '
+        .windows[].workspaces[].panes[].surfaces[]
+        | select(.type == "browser" and (.url // "") == $u)
+        | .ref
+      ' 2>/dev/null \
+    | head -1)
+if [[ -n "$EXISTING" ]]; then
+    cmux rename-tab --surface "$EXISTING" "$TITLE" >/dev/null 2>&1 || true
+    printf 'open-pr-surface.status=reused-existing\n'
+    printf 'open-pr-surface.surface=%s\n' "$EXISTING"
+    printf 'open-pr-surface.url=%s\n' "$URL"
+    exit 0
+fi
+
+CALLER_PANE="$(cmux tree --all --json 2>/dev/null | jq -r '.caller.pane_ref // empty')"
+OUT=""
+
+if [[ -n "$CALLER_PANE" ]]; then
+    SPLIT_OUT=$(cmux new-split right --pane "$CALLER_PANE" 2>&1)
+    SPLIT_SURFACE=$(echo "$SPLIT_OUT" | grep -oE 'surface:[0-9]+' | head -1)
+    SPLIT_PANE=""
+
+    if [[ -n "$SPLIT_SURFACE" ]]; then
+        SPLIT_PANE=$(cmux tree --all --json 2>/dev/null \
+            | jq -r --arg s "$SPLIT_SURFACE" '
+                .windows[].workspaces[].panes[]
+                | select(.surfaces[].ref == $s)
+                | .ref
+              ' 2>/dev/null \
+            | head -1)
+    fi
+
+    if [[ -n "$SPLIT_PANE" ]]; then
+        OUT=$(cmux new-surface --type browser --pane "$SPLIT_PANE" --url "$URL" 2>&1)
+        [[ -n "$SPLIT_SURFACE" ]] && cmux close-surface --surface "$SPLIT_SURFACE" >/dev/null 2>&1 || true
+    else
+        OUT=$(cmux new-surface --type browser --url "$URL" 2>&1)
+    fi
+else
+    OUT=$(cmux new-surface --type browser --url "$URL" 2>&1)
+fi
+
+SID=$(echo "$OUT" | grep -oE 'surface:[0-9]+' | head -1)
+if [[ -n "$SID" ]]; then
+    cmux rename-tab --surface "$SID" "$TITLE" >/dev/null 2>&1 || true
+    printf 'open-pr-surface.surface=%s\n' "$SID"
+fi
+printf 'open-pr-surface.status=created\n'
+printf 'open-pr-surface.url=%s\n' "$URL"

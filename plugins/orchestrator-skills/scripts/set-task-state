@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+#
+# set-task-state — Update a task workspace's cmux sidebar badge so the queue
+# state is visible at a glance. Sets `craft:state=<state>` plus `icon=<sf>`
+# and `color=<hex>` workspace status entries; cmux renders them next to the
+# workspace title in the sidebar.
+#
+# Usage:
+#   set-task-state <task-id> <state> [--project <name>]
+#
+# Recognised states (others pass through unchanged):
+#   in-progress      hammer.fill        #3b82f6   (blue)
+#   diffhub-review   eye.fill           #a855f7   (purple)
+#   waiting          clock.fill         #eab308   (yellow)
+#   blocked          exclamationmark.octagon.fill  #ef4444 (red)
+#   done             checkmark.circle.fill  #22c55e (green)
+#
+# The project name is auto-detected from CRAFT_ROOT / cwd if not given.
+
+set -uo pipefail
+
+[[ $# -ge 2 ]] || { echo "Usage: set-task-state <task-id> <state> [--project <name>]" >&2; exit 2; }
+
+TASK_ID="$1"; shift
+STATE="$1"; shift
+PROJECT=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --project) PROJECT="$2"; shift 2 ;;
+        *) echo "set-task-state: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+# Try to infer project name from cwd (look for `craft.conf` walking up).
+if [[ -z "$PROJECT" ]]; then
+    d="$(pwd)"
+    while [[ "$d" != "/" ]]; do
+        if [[ -f "$d/craft.conf" ]]; then
+            PROJECT="$(basename "$d")"
+            break
+        fi
+        d="$(dirname "$d")"
+    done
+fi
+[[ -n "$PROJECT" ]] || { echo "set-task-state: could not infer --project; pass it explicitly" >&2; exit 2; }
+
+command -v cmux >/dev/null || { echo "set-task-state: cmux not on PATH" >&2; exit 1; }
+
+case "$STATE" in
+    in-progress)     ICON="hammer.fill";                    COLOR="#3b82f6" ;;
+    diffhub-review)  ICON="eye.fill";                       COLOR="#a855f7" ;;
+    waiting)         ICON="clock.fill";                     COLOR="#eab308" ;;
+    blocked)         ICON="exclamationmark.octagon.fill";   COLOR="#ef4444" ;;
+    done)            ICON="checkmark.circle.fill";          COLOR="#22c55e" ;;
+    approved)        ICON="circle";                         COLOR="#6b7280" ;;
+    *)               ICON="questionmark.circle";            COLOR="#6b7280" ;;
+esac
+
+# Find the task workspace via prefix-match on the structured title key. The
+# title may have a human suffix appended after ` · `; bash's _mux_ws_ref
+# tolerates it but we duplicate the logic here to stay shell-only.
+WSPREFIX="craft-${PROJECT}-${TASK_ID}"
+WS_REF=$(cmux tree --all --json 2>/dev/null \
+    | jq -r --arg t "$WSPREFIX" '
+        .windows[].workspaces[]
+        | select(.title == $t
+                 or (.title | startswith($t + " "))
+                 or (.title | startswith($t + "·")))
+        | .ref
+      ' 2>/dev/null \
+    | head -1)
+
+if [[ -z "$WS_REF" ]]; then
+    echo "set-task-state: no cmux workspace for project=$PROJECT task=$TASK_ID" >&2
+    exit 1
+fi
+
+# `cmux set-status <key> <value> [--icon ... --color ...]` writes a single
+# sidebar pill. The key is the namespace ("task_state" here), the value is
+# what cmux renders inside the pill, and --icon/--color control the visual.
+cmux set-status task_state "$STATE" \
+    --icon "$ICON" --color "$COLOR" \
+    --workspace "$WS_REF" >/dev/null 2>&1 || true
+
+printf 'set-task-state: %s/%s → %s (icon=%s color=%s ws=%s)\n' \
+    "$PROJECT" "$TASK_ID" "$STATE" "$ICON" "$COLOR" "$WS_REF"

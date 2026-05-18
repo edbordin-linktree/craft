@@ -37,24 +37,45 @@ provider_flags() {
     esac
 }
 
+# Build the env-setup snippet for an agent spawn. Cmux/tmux surfaces start a
+# fresh shell that does NOT inherit the orchestrator process's env directly, so
+# CRAFT_ROOT and the craft/plugin script dirs need to be re-injected. This
+# makes `craft-mux`, `send-agent`, `watch-pr`, `delegate-to-devin` usable from
+# inside the spawned agent without depending on the operator's shell init.
+#
+# Always emits a syntactically-valid shell expression — falls back to `:`
+# (the no-op builtin) when CRAFT_ROOT is unset, so the surrounding
+# `cd … && ${env} && cmd` template never collapses to `… && && cmd`.
+_provider_env_setup() {
+    local craft_root="${CRAFT_ROOT:-}"
+    if [[ -z "$craft_root" ]]; then
+        printf ':'
+        return
+    fi
+    local scripts_dir="${craft_root}/plugins/orchestrator-skills/scripts"
+    printf "export CRAFT_ROOT='%s' && export PATH='%s/bin:%s:'\$PATH" \
+        "$craft_root" "$craft_root" "$scripts_dir"
+}
+
 # Build the tmux command to launch an agent for a task
 # Usage: provider_task_cmd <provider> <prompt_file> <work_dir>
 provider_task_cmd() {
     local provider="$1" prompt_file="$2" work_dir="$3"
 
-    local flags
+    local flags env
     flags=$(provider_flags "$provider")
+    env=$(_provider_env_setup)
 
     case "$provider" in
         claude)
-            echo "cd '${work_dir}' && claude${flags:+ $flags} \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
+            echo "cd '${work_dir}' && ${env} && claude${flags:+ $flags} \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
             ;;
         codex)
-            echo "cd '${work_dir}' && codex${flags:+ $flags} \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
+            echo "cd '${work_dir}' && ${env} && codex${flags:+ $flags} \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
             ;;
         *)
             # Generic fallback: assume CLI takes prompt as first positional arg
-            echo "cd '${work_dir}' && ${provider}${flags:+ $flags} \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
+            echo "cd '${work_dir}' && ${env} && ${provider}${flags:+ $flags} \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
             ;;
     esac
 }
@@ -64,18 +85,19 @@ provider_task_cmd() {
 provider_architect_cmd() {
     local provider="$1" skill_file="$2" work_dir="$3"
 
-    local flags
+    local flags env
     flags=$(provider_flags "$provider")
+    env=$(_provider_env_setup)
 
     case "$provider" in
         claude)
-            echo "cd '${work_dir}' && claude${flags:+ $flags} \"\$(cat '${skill_file}')\" ; exec \$SHELL"
+            echo "cd '${work_dir}' && ${env} && claude${flags:+ $flags} \"\$(cat '${skill_file}')\" ; exec \$SHELL"
             ;;
         codex)
-            echo "cd '${work_dir}' && codex${flags:+ $flags} \"\$(cat '${skill_file}')\" ; exec \$SHELL"
+            echo "cd '${work_dir}' && ${env} && codex${flags:+ $flags} \"\$(cat '${skill_file}')\" ; exec \$SHELL"
             ;;
         *)
-            echo "cd '${work_dir}' && ${provider}${flags:+ $flags} \"\$(cat '${skill_file}')\" ; exec \$SHELL"
+            echo "cd '${work_dir}' && ${env} && ${provider}${flags:+ $flags} \"\$(cat '${skill_file}')\" ; exec \$SHELL"
             ;;
     esac
 }

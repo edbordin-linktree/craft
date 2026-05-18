@@ -38,6 +38,15 @@ ensure_session() {
     echo "$session"
 }
 
+# ensure_task_session — tmux has no native workspace concept, so per-task
+# isolation collapses into "give the task its own window inside the project
+# session". Return the project session title; spawn_task_pane will then create
+# a window named after the task id, same behaviour as today.
+ensure_task_session() {
+    local project_name="$1"
+    echo "${TMUX_SESSION}-${project_name}"
+}
+
 # Create a new window for a task and run the agent in it
 # Returns the window ID
 spawn_task_pane() {
@@ -86,4 +95,39 @@ update_orchestrator_display() {
     # Write status to a temp file that the orchestrator pane reads
     local status_file="/tmp/craft-${session}-status"
     echo "$status_text" > "$status_file"
+}
+
+# --- Generic primitives for skills (not used by the orchestrator daemon) ---
+
+# Spawn a new tmux window named <name> in <session>, cd into <cwd>, run <cmd>.
+# Idempotent: if the named window already exists, no-op.
+mux_spawn_named_pane() {
+    local session="$1" name="$2" cwd="$3" cmd="$4"
+
+    if tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -q "^${name}$"; then
+        return 0
+    fi
+
+    tmux new-window -t "${session}:" -n "$name" >/dev/null
+    # Start with a shell, then send the command via send-keys so the agent
+    # runs inside an interactive pty (TUI input works for the operator).
+    tmux send-keys -t "${session}:${name}" "cd '$cwd' && $cmd" Enter
+}
+
+# Send text + Enter to the named pane.
+mux_send_to_pane() {
+    local session="$1" name="$2" text="$3"
+    tmux send-keys -t "${session}:${name}" "$text" Enter
+}
+
+# Returns 0 if the named pane exists, 1 otherwise.
+mux_pane_exists() {
+    local session="$1" name="$2"
+    tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -q "^${name}$"
+}
+
+# Kill the named pane.
+mux_kill_named_pane() {
+    local session="$1" name="$2"
+    tmux kill-window -t "${session}:${name}" 2>/dev/null || true
 }

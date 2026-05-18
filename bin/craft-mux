@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+#
+# craft-mux — Skill-facing wrapper for craft's multiplexer abstraction.
+#
+# Lets skills spawn / send-to / check / kill named panes in the current craft
+# project's multiplexer session, without needing to know whether it's tmux or
+# cmux underneath.
+#
+# Usage:
+#   craft-mux spawn <name> <cwd> <cmd...>      Create a named pane running cmd
+#   craft-mux send  <name> <text...>            Send text + Enter to named pane
+#   craft-mux exists <name>                     Exit 0 if pane exists, 1 if not
+#   craft-mux kill  <name>                      Remove a named pane
+#   craft-mux session                           Print the resolved session name
+#
+# Auto-detects the craft project by walking up from $PWD looking for craft.conf.
+
+set -uo pipefail
+
+# --- Locate the craft project ---
+_find_project_dir() {
+    local d="${PWD}"
+    while [[ "$d" != "/" ]]; do
+        if [[ -f "$d/craft.conf" ]]; then echo "$d"; return 0; fi
+        d="$(dirname "$d")"
+    done
+    return 1
+}
+
+PROJECT_DIR="$(_find_project_dir)" || {
+    echo "craft-mux: not inside a craft project (no craft.conf found walking up from $PWD)" >&2
+    exit 2
+}
+export PROJECT_DIR
+
+PROJECT_NAME="$(basename "$PROJECT_DIR")"
+
+# --- Source craft's mux abstraction ---
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/providers.sh"
+load_provider_config "$PROJECT_DIR"   # sets MULTIPLEXER
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/mux.sh"
+
+# Session name follows the same convention used by each backend's ensure_session.
+case "$MULTIPLEXER" in
+    tmux) SESSION="${TMUX_SESSION:-craft}-${PROJECT_NAME}" ;;
+    cmux) SESSION="${CMUX_PREFIX:-craft}-${PROJECT_NAME}" ;;
+    *)
+        echo "craft-mux: unknown MULTIPLEXER='$MULTIPLEXER'" >&2
+        exit 2
+        ;;
+esac
+
+# --- Dispatch ---
+cmd="${1:-}"
+[[ -n "$cmd" ]] || { echo "Usage: $0 spawn|send|exists|kill|session ..." >&2; exit 2; }
+shift
+
+case "$cmd" in
+    spawn)
+        # craft-mux spawn <name> <cwd> <cmd...>
+        name="${1:?name required}"; shift
+        cwd="${1:?cwd required}"; shift
+        full_cmd="$*"
+        [[ -n "$full_cmd" ]] || { echo "craft-mux: cmd required" >&2; exit 2; }
+        mux_spawn_named_pane "$SESSION" "$name" "$cwd" "$full_cmd"
+        ;;
+    send)
+        # craft-mux send <name> <text...>
+        name="${1:?name required}"; shift
+        text="$*"
+        [[ -n "$text" ]] || { echo "craft-mux: text required" >&2; exit 2; }
+        mux_send_to_pane "$SESSION" "$name" "$text"
+        ;;
+    exists)
+        name="${1:?name required}"
+        mux_pane_exists "$SESSION" "$name"
+        ;;
+    kill)
+        name="${1:?name required}"
+        mux_kill_named_pane "$SESSION" "$name"
+        ;;
+    session)
+        echo "$SESSION"
+        ;;
+    *)
+        echo "craft-mux: unknown subcommand '$cmd'" >&2
+        echo "Usage: $0 spawn|send|exists|kill|session ..." >&2
+        exit 2
+        ;;
+esac

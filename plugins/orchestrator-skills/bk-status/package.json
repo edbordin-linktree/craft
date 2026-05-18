@@ -1,0 +1,18 @@
+{
+  "name": "craft-bk-status",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch server.tsx",
+    "start": "bun server.tsx"
+  },
+  "dependencies": {
+    "preact": "^10.22.0",
+    "preact-render-to-string": "^6.5.7"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.4.0"
+  }
+}

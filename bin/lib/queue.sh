@@ -37,6 +37,39 @@ task_type() {
     task_field "$1" "type"
 }
 
+# Derive a short, human-readable title for sidebar display. Priority:
+#   1. Explicit `title:` field in frontmatter
+#   2. First non-blank, non-bullet line of the `## Summary` section
+#   3. Empty string (caller falls back to bare task id)
+# Output is trimmed and capped at 60 chars (with ellipsis if truncated).
+task_human_title() {
+    local file="$1"
+    local raw
+    raw=$(task_field "$file" "title")
+    if [[ -z "$raw" ]]; then
+        raw=$(awk '
+            /^## Summary[[:space:]]*$/ { in_section = 1; next }
+            /^## / && in_section { exit }
+            in_section {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+                if ($0 == "" || /^- / || /^\* / || /^[0-9]+\. /) next
+                print
+                exit
+            }
+        ' "$file")
+    fi
+    # Strip surrounding quotes if explicit title was quoted.
+    raw="${raw#\"}"
+    raw="${raw%\"}"
+    raw="${raw#\'}"
+    raw="${raw%\'}"
+    # Cap length.
+    if (( ${#raw} > 60 )); then
+        raw="${raw:0:57}…"
+    fi
+    printf '%s' "$raw"
+}
+
 # Get depends_on as a space-separated list
 # Handles both inline [a, b] and multi-line - a\n- b YAML formats
 task_depends_on() {

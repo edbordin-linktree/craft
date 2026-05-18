@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# Requires bash 4+ for associative arrays.
+if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
+    echo "orchestrator.sh requires bash 4+ (you have ${BASH_VERSION:-unknown}). On macOS: 'brew install bash' then ensure /opt/homebrew/bin (or /usr/local/bin) is earlier on PATH than /bin." >&2
+    exit 1
+fi
+
+# Self-derive CRAFT_ROOT from this script's path if it isn't already exported.
+# The orchestrator can be re-exec'd into a fresh shell (e.g. cmux/tmux panes)
+# that doesn't inherit the parent process env, so we can't rely on bin/craft's
+# export reaching us.
+if [[ -z "${CRAFT_ROOT:-}" ]]; then
+    _ORCH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    CRAFT_ROOT="$(cd "$_ORCH_SCRIPT_DIR/.." && pwd)"
+    export CRAFT_ROOT
+fi
+
 # orchestrator.sh — Persistent daemon that processes the craft task queue
 #
 # Usage: orchestrator.sh <project-dir> [--max-parallel N]
@@ -62,12 +78,16 @@ fi
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 QUEUE_DIR="$PROJECT_DIR/queue"
 PROJECT_NAME="$(basename "$PROJECT_DIR")"
+# Export for child processes (run-hook.sh, task agents, etc.) — they need to
+# know which project they're operating on.
+export PROJECT_DIR PROJECT_NAME
 
 # Validate project structure
-for dir in approved in-progress done blocked archive waiting; do
+for dir in approved in-progress done blocked archive waiting diffhub-review; do
     mkdir -p "$QUEUE_DIR/$dir"
 done
-mkdir -p "$PROJECT_DIR/worktrees"
+mkdir -p "$PROJECT_DIR/worktrees"   # legacy layout (pre-nested-task-dir tasks)
+mkdir -p "$PROJECT_DIR/tasks"        # new layout: per-task dir holds worktrees + state
 mkdir -p "$PROJECT_DIR/.state/waiting"
 mkdir -p "$PROJECT_DIR/logs"
 
@@ -81,10 +101,11 @@ load_provider_config "$PROJECT_DIR"
 source "$SCRIPT_DIR/lib/mux.sh"
 
 # --- State tracking ---
-declare -A ACTIVE_TASKS=()  # task_id -> tmux window name
-declare -A TASK_AGENTS=()   # task_id -> agent provider (claude, codex, etc.)
-declare -A TASK_PR_URLS=()  # task_id -> PR URL (for merge monitoring)
-declare -A TASK_START=()    # task_id -> epoch timestamp when task started
+declare -A ACTIVE_TASKS=()   # task_id -> pane/window identifier
+declare -A TASK_SESSIONS=()  # task_id -> session/workspace title (per-task under cmux, project session under tmux)
+declare -A TASK_AGENTS=()    # task_id -> agent provider (claude, codex, etc.)
+declare -A TASK_PR_URLS=()   # task_id -> PR URL (for merge monitoring)
+declare -A TASK_START=()     # task_id -> epoch timestamp when task started
 
 # --- Display ---
 RED='\033[0;31m'
@@ -109,16 +130,32 @@ render_dashboard() {
     echo ""
 
     # Counts
-    local n_pending n_approved n_in_progress n_done n_blocked n_waiting
+    local n_pending n_approved n_in_progress n_diffhub_review n_done n_blocked n_waiting
     n_pending=$(count_tasks "$QUEUE_DIR/pending")
     n_approved=$(count_tasks "$QUEUE_DIR/approved")
     n_in_progress=$(count_tasks "$QUEUE_DIR/in-progress")
+    n_diffhub_review=$(count_tasks "$QUEUE_DIR/diffhub-review")
     n_done=$(count_tasks "$QUEUE_DIR/done")
     n_blocked=$(count_tasks "$QUEUE_DIR/blocked")
     n_waiting=$(count_tasks "$QUEUE_DIR/waiting")
 
-    echo -e "  ${BLUE}○${NC} Pending: $n_pending  ${YELLOW}◐${NC} Approved: $n_approved  ${CYAN}●${NC} In Progress: $n_in_progress  ${YELLOW}◉${NC} Waiting: $n_waiting  ${GREEN}✓${NC} Done: $n_done  ${RED}✗${NC} Blocked: $n_blocked"
+    echo -e "  ${BLUE}○${NC} Pending: $n_pending  ${YELLOW}◐${NC} Approved: $n_approved  ${CYAN}●${NC} In Progress: $n_in_progress  ${YELLOW}◈${NC} Diffhub Review: $n_diffhub_review  ${YELLOW}◉${NC} Waiting: $n_waiting  ${GREEN}✓${NC} Done: $n_done  ${RED}✗${NC} Blocked: $n_blocked"
     echo ""
+
+    # Diffhub-review tasks — needs human review locally before PR opens
+    # TODO(dashboard): add a hotkey to create .orchestrator/ready-for-pr on
+    # behalf of the operator so they can advance the task from here. For now
+    # the operator either touches the sentinel file directly or tells the
+    # agent in its pane.
+    if [[ "$n_diffhub_review" -gt 0 ]]; then
+        echo -e "${BOLD}${YELLOW}  ◈ READY FOR LOCAL REVIEW (diffhub):${NC}"
+        for task_file in $(list_tasks "$QUEUE_DIR/diffhub-review"); do
+            local tid
+            tid=$(task_id "$task_file")
+            echo -e "    ${YELLOW}◈${NC} $tid  ${BOLD}touch worktrees/*-$tid/.orchestrator/ready-for-pr to advance${NC}"
+        done
+        echo ""
+    fi
 
     # Waiting tasks — needs operator attention (PR review)
     if [[ "$n_waiting" -gt 0 ]]; then
@@ -152,7 +189,7 @@ render_dashboard() {
         echo -e "${BOLD}  Active Tasks:${NC}"
         for task_id in "${!ACTIVE_TASKS[@]}"; do
             local agent_label="${TASK_AGENTS[$task_id]:-$DEFAULT_AGENT}"
-            echo -e "    ${CYAN}●${NC} $task_id  [${agent_label}] [tmux: ${ACTIVE_TASKS[$task_id]}]"
+            echo -e "    ${CYAN}●${NC} $task_id  [${agent_label}] [${MULTIPLEXER}: ${ACTIVE_TASKS[$task_id]}]"
         done
         echo ""
     fi
@@ -210,7 +247,9 @@ run_task() {
     # Build the prompt file
     # Read the skill template and substitute $ARGUMENTS
     # Prepend a note that the task has already been moved to in-progress by the orchestrator
-    local skill_file="$PROJECT_DIR/.claude/commands/work-task.md"
+    # TASK_SKILL (craft.conf or task frontmatter) selects which slash command runs the task.
+    local skill_name="$(task_field "$new_file" "skill")"
+    local skill_file="$PROJECT_DIR/.claude/commands/${skill_name:-${TASK_SKILL:-work-task}}.md"
     local prompt_file="/tmp/craft-prompt-${tid}.txt"
     {
         echo "NOTE: The orchestrator has already moved this task to queue/in-progress/${filename} and set its status to in-progress. Skip Step 2 (Move Task to In-Progress) — start from Step 1 (read context) then go straight to Step 3 (do the work)."
@@ -222,16 +261,31 @@ run_task() {
     local agent
     agent=$(task_agent "$new_file")
 
-    # Get the tmux session
-    local session
-    session=$(ensure_session "$PROJECT_NAME" "$PROJECT_DIR")
+    # Ensure the project workspace (orchestrator + architect) exists. Idempotent.
+    ensure_session "$PROJECT_NAME" "$PROJECT_DIR" >/dev/null
 
-    # Spawn an agent session in a tmux window
+    # Pre-create the task directory. The agent will create worktrees as
+    # subdirectories of this dir in Step 3 (e.g. tasks/<id>/<repo>/), so the
+    # placeholder dir itself never collides with `git worktree add`.
+    local task_dir="$PROJECT_DIR/tasks/$tid"
+    mkdir -p "$task_dir"
+
+    # Per-task session (cmux: own workspace at task_dir; tmux: project session).
+    # Pull a human-readable title from the task file so the cmux sidebar shows
+    # something more memorable than the bare ID. Falls back to "" (bare id)
+    # if no title/summary is present.
+    local task_human_title
+    task_human_title=$(task_human_title "$new_file")
+    local task_session
+    task_session=$(ensure_task_session "$PROJECT_NAME" "$tid" "$task_dir" "$task_human_title")
+
+    # Spawn the agent in the task workspace, working in the task directory.
     local window
-    window=$(spawn_task_pane "$session" "$tid" "$prompt_file" "$PROJECT_DIR" "$agent")
+    window=$(spawn_task_pane "$task_session" "$tid" "$prompt_file" "$task_dir" "$agent")
 
     # Track it
     ACTIVE_TASKS["$tid"]="$window"
+    TASK_SESSIONS["$tid"]="$task_session"
     TASK_AGENTS["$tid"]="$agent"
     TASK_START["$tid"]="$(date +%s)"
 }
@@ -271,12 +325,15 @@ task_timeout() {
 
 # Check if active tasks have finished or timed out
 check_active_tasks() {
-    local session
-    session="${TMUX_SESSION}-${PROJECT_NAME}"
     local now
     now=$(date +%s)
 
     for tid in "${!ACTIVE_TASKS[@]}"; do
+        # Per-task session (cmux: own workspace; tmux: project session). Fall
+        # back to the project session if the map was never populated for this
+        # task (legacy / edge case).
+        local session="${TASK_SESSIONS[$tid]:-$SESSION}"
+
         # Check for timeout
         local timeout
         timeout=$(task_timeout "$tid")
@@ -296,6 +353,7 @@ check_active_tasks() {
                 notify_blocked "$tid" "Agent timed out after ${elapsed}s"
 
                 unset ACTIVE_TASKS["$tid"]
+                unset TASK_SESSIONS["$tid"]
                 unset TASK_AGENTS["$tid"]
                 unset TASK_START["$tid"]
                 continue
@@ -305,6 +363,7 @@ check_active_tasks() {
         if ! pane_is_running "$session" "$tid"; then
             log "Task $tid session ended"
             unset ACTIVE_TASKS["$tid"]
+            unset TASK_SESSIONS["$tid"]
             unset TASK_AGENTS["$tid"]
             unset TASK_START["$tid"]
 
@@ -322,7 +381,7 @@ check_active_tasks() {
                 log "Task $tid session ended but task not found in done/blocked/waiting"
             fi
 
-            # Clean up the tmux window
+            # Clean up the pane (per-task session for cmux, project session for tmux)
             kill_task_pane "$session" "$tid"
         fi
     done
@@ -407,7 +466,39 @@ if [[ "$MULTIPLEXER" == "tmux" ]] && [[ -n "${TMUX:-}" ]] && [[ -z "${CRAFT_INNE
     unset TMUX
 fi
 
-# Ensure multiplexer session with orchestrator + planner windows
+# Under cmux: if this is the user's first invocation (CRAFT_INNER_SESSION unset),
+# create/find the project's workspace and re-exec the orchestrator into that
+# workspace's initial surface, so the dashboard lives next to the architect.
+# Mirrors the tmux re-exec pattern. The invoking shell exits.
+if [[ "$MULTIPLEXER" == "cmux" ]] && [[ -z "${CRAFT_INNER_SESSION:-}" ]]; then
+    _title="${CMUX_PREFIX:-craft}-${PROJECT_NAME}"
+    _ws_ref="$(_mux_ws_ref "$_title")"
+    if [[ -z "$_ws_ref" ]]; then
+        _raw="$(cmux new-workspace --cwd "$PROJECT_DIR" 2>&1)"
+        _ws_ref="$(echo "$_raw" | grep -oE 'workspace:[0-9]+' | head -1)"
+        if [[ -z "$_ws_ref" ]]; then
+            echo "Failed to create cmux workspace: $_raw" >&2
+            exit 1
+        fi
+        cmux rename-workspace --workspace "$_ws_ref" "$_title" >/dev/null 2>&1 || true
+    fi
+    # Find the workspace's first terminal surface to host the orchestrator.
+    _initial="$(cmux tree --workspace "$_ws_ref" 2>/dev/null | grep -oE 'surface:[0-9]+' | head -1)"
+    if [[ -n "$_initial" ]]; then
+        cmux rename-tab --workspace "$_ws_ref" --surface "$_initial" "orchestrator" >/dev/null 2>&1 || true
+        cmux send --workspace "$_ws_ref" --surface "$_initial" \
+            "CRAFT_INNER_SESSION=1 exec '$0' '$PROJECT_DIR' --max-parallel $MAX_PARALLEL --poll-interval $POLL_INTERVAL" >/dev/null 2>&1
+        cmux send-key --workspace "$_ws_ref" --surface "$_initial" enter >/dev/null 2>&1
+        cmux select-workspace --workspace "$_ws_ref" >/dev/null 2>&1 || true
+        exit 0
+    fi
+    # Fallback: couldn't find an initial surface — keep running in current terminal.
+    echo "cmux: no initial surface found in $_ws_ref; running orchestrator in this terminal" >&2
+fi
+
+# Ensure multiplexer session with orchestrator + planner windows.
+# Under cmux re-exec, we're now running inside the workspace's initial surface;
+# ensure_session will find the existing workspace and add the architect surface.
 SESSION=$(ensure_session "$PROJECT_NAME" "$PROJECT_DIR")
 
 # If nested, set the inner session to use C-b so it doesn't collide with the outer prefix
@@ -422,7 +513,6 @@ if [[ "$MULTIPLEXER" == "tmux" ]]; then
         exec tmux attach -t "$SESSION"
     fi
 fi
-# cmux: no re-exec needed — the orchestrator runs directly in the current terminal
 
 log "Craft orchestrator starting for: $PROJECT_DIR"
 log "Max parallel tasks: $MAX_PARALLEL, Poll interval: ${POLL_INTERVAL}s"
@@ -445,6 +535,13 @@ while true; do
     # Check milestone completion every 4th poll
     if (( poll_count % 4 == 0 )); then
         check_milestone_completion
+    fi
+
+    # Keep cmux project surfaces healthy. This is intentionally idempotent:
+    # for cmux it pins the workspace and starts/reuses the web dashboard tab;
+    # for tmux this would be noisy, so keep it cmux-only.
+    if [[ "$MULTIPLEXER" == "cmux" ]] && (( poll_count % 4 == 0 )); then
+        ensure_session "$PROJECT_NAME" "$PROJECT_DIR" >/dev/null 2>&1 || true
     fi
 
     # Pick up new tasks if we have capacity

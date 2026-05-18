@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+#
+# start-discoverer — Spawn a Claude Opus discovery agent in a new cmux
+# terminal surface inside the current project workspace. The architect uses
+# this to delegate deep investigation of a single problem before drafting an
+# implementation plan; see `.claude/commands/init-discoverer.md` for the
+# discoverer's job description.
+#
+# Usage:
+#   start-discoverer <topic-slug> <one-line-topic> [extra prompt lines...]
+#
+# Args:
+#   <topic-slug>      kebab-case identifier, used in the tab name and the
+#                     discovery report's filename
+#   <one-line-topic>  short title shown to the discoverer
+#   [extra lines...]  optional 2–3 sentences of framing. Concatenated with
+#                     spaces and appended to the prompt.
+#
+# Output:
+#   start-discoverer.surface=<surface-ref>
+#   start-discoverer.tab=discover:<topic-slug>
+#
+# The discoverer writes to `docs/discovery/<topic-slug>.md` in the project
+# directory. The architect can `Read` it once the agent finishes.
+
+set -uo pipefail
+
+if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
+    echo "start-discoverer requires bash 4+" >&2; exit 1
+fi
+command -v cmux >/dev/null || { echo "start-discoverer: cmux not on PATH" >&2; exit 1; }
+
+[[ $# -ge 2 ]] || {
+    echo "Usage: start-discoverer <topic-slug> <one-line-topic> [extra prompt text...]" >&2
+    exit 2
+}
+
+TOPIC_SLUG="$1"; shift
+TOPIC="$1"; shift
+EXTRA="${*:-}"
+
+# Discoverer prompt — concatenate the init-discoverer skill with the
+# architect-provided framing.
+PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
+SKILL="$PROJECT_DIR/.claude/commands/init-discoverer.md"
+if [[ ! -f "$SKILL" ]]; then
+    echo "start-discoverer: missing $SKILL (is this a craft project?)" >&2
+    exit 1
+fi
+
+# Find the project workspace via the structured prefix used by craft's
+# orchestrator. We do not move the discoverer to a different workspace —
+# it lives alongside the architect tab.
+PROJECT_NAME="$(basename "$PROJECT_DIR")"
+WSPREFIX="craft-${PROJECT_NAME}"
+WS_REF=$(cmux tree --all --json 2>/dev/null \
+    | jq -r --arg t "$WSPREFIX" '
+        .windows[].workspaces[]
+        | select(.title == $t
+                 or (.title | startswith($t + " "))
+                 or (.title | startswith($t + "·")))
+        | .ref
+      ' 2>/dev/null \
+    | head -1)
+[[ -n "$WS_REF" ]] || { echo "start-discoverer: no cmux workspace for project '$PROJECT_NAME'" >&2; exit 1; }
+
+# Create the terminal surface and label it.
+RAW=$(cmux new-surface --type terminal --workspace "$WS_REF" 2>&1)
+SID=$(echo "$RAW" | grep -oE 'surface:[0-9]+' | head -1)
+[[ -n "$SID" ]] || { echo "start-discoverer: failed to create surface: $RAW" >&2; exit 1; }
+cmux rename-tab --workspace "$WS_REF" --surface "$SID" "discover:${TOPIC_SLUG}" >/dev/null 2>&1 || true
+
+# Build the claude invocation. The prompt is the skill file content + a
+# short trailing block with the topic and extra framing.
+PROMPT_BODY="$(cat "$SKILL")
+---
+Topic: ${TOPIC}
+Topic slug (for the output filename): ${TOPIC_SLUG}
+Specific framing from the architect: ${EXTRA}"
+
+# Use claude with Opus. --dangerously-skip-permissions so the discoverer
+# can read files freely; it doesn't write anything outside docs/discovery/.
+# heredoc-via-printf so newlines survive `cmux send`.
+TMPFILE="$(mktemp /tmp/start-discoverer.prompt.XXXXXX)"
+printf '%s' "$PROMPT_BODY" > "$TMPFILE"
+
+cmux send --workspace "$WS_REF" --surface "$SID" \
+    "cd '$PROJECT_DIR' && claude --model opus --dangerously-skip-permissions \"\$(cat '$TMPFILE')\" ; rm -f '$TMPFILE'" \
+    >/dev/null 2>&1 || true
+cmux send-key --workspace "$WS_REF" --surface "$SID" enter >/dev/null 2>&1 || true
+
+printf 'start-discoverer.surface=%s\n' "$SID"
+printf 'start-discoverer.tab=discover:%s\n' "$TOPIC_SLUG"

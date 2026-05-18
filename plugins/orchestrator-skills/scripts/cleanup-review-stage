@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# cleanup-review-stage — Tear down everything started by the diffhub-review
+# stage: kill the cross-model reviewer and the comment watcher, then stop
+# diffhub itself + close its cmux surface via teardown-diffhub.
+#
+# Safe to call multiple times; idempotent on missing pid files.
+#
+# Usage:
+#   cleanup-review-stage [--repo <dir>]
+
+set -uo pipefail
+
+REPO="$(pwd)"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo)    REPO="$2"; shift 2 ;;
+        -h|--help) sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) echo "cleanup-review-stage: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+cd "$REPO" || { echo "cleanup-review-stage: repo not accessible: $REPO" >&2; exit 1; }
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Stop the background watchers.
+for name in babysit-diffhub review-pr; do
+    pidfile=".orchestrator/${name}.pid"
+    labelfile=".orchestrator/${name}.label"
+    if [[ -f "$pidfile" ]]; then
+        pid=$(cat "$pidfile" 2>/dev/null || true)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pidfile"
+    fi
+    if [[ -f "$labelfile" ]] && command -v launchctl >/dev/null; then
+        label=$(cat "$labelfile" 2>/dev/null || true)
+        if [[ -n "$label" ]]; then
+            launchctl remove "$label" >/dev/null 2>&1 || true
+        fi
+        rm -f "$labelfile"
+    fi
+done
+
+# Stop diffhub itself + close its cmux surface.
+"$SCRIPT_DIR/teardown-diffhub" --repo "$REPO"

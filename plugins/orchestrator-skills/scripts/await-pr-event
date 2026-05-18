@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+#
+# await-pr-event — Block until either:
+#   - .orchestrator/watch-pr-pending.md has events to process, OR
+#   - .orchestrator/babysit-state.json reports the PR is MERGED or CLOSED.
+#
+# When pending content appears, drains it to stdout and exits 0.
+# When the PR is MERGED, exits 3 (caller should advance to Step 11).
+# When the PR is CLOSED, exits 4 (caller should move task to blocked/).
+#
+# Foreground wake-up loop for the babysit-pr phase. The agent runs it as a
+# single Bash tool call, blocks cheaply on `sleep`, gets back work to do
+# (stdout) or a terminal-state signal (exit 3/4).
+#
+# Usage:
+#   await-pr-event [--repo <dir>] [--interval <seconds>]
+
+set -uo pipefail
+
+command -v jq >/dev/null || { echo "await-pr-event: jq is required" >&2; exit 1; }
+
+REPO="$(pwd)"
+INTERVAL=5
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo)     REPO="$2"; shift 2 ;;
+        --interval) INTERVAL="$2"; shift 2 ;;
+        -h|--help)  sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) echo "await-pr-event: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+cd "$REPO" || { echo "await-pr-event: repo not accessible: $REPO" >&2; exit 1; }
+
+PENDING=".orchestrator/watch-pr-pending.md"
+STATE=".orchestrator/babysit-state.json"
+
+is_terminal() {
+    [[ -f "$STATE" ]] && jq -er '.state | test("MERGED|CLOSED")' "$STATE" >/dev/null 2>&1
+}
+
+until [[ -s "$PENDING" ]] || is_terminal; do
+    sleep "$INTERVAL"
+done
+
+if is_terminal; then
+    state=$(jq -r .state "$STATE" 2>/dev/null || echo "")
+    case "$state" in
+        MERGED) exit 3 ;;
+        CLOSED) exit 4 ;;
+    esac
+fi
+
+cat "$PENDING"
+: > "$PENDING"
+exit 0

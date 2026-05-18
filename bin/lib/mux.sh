@@ -8,6 +8,13 @@
 #     → Create/find a session with orchestrator + architect windows.
 #       Returns the session/workspace identifier.
 #
+#   ensure_task_session <project-name> <task-id> [task-dir]
+#     → Create/find a per-task session/workspace. Under cmux this is a
+#       separate workspace at <CMUX_PREFIX>-<project>-<task-id>, opened with
+#       --cwd=<task-dir>. Under tmux this is the project session (tmux has
+#       no workspace concept; the task gets its own window inside it).
+#       Returns the session/workspace identifier.
+#
 #   spawn_task_pane <session> <task-id> <prompt-file> <work-dir> [agent]
 #     → Create a new pane/surface and run the agent command in it.
 #       Returns a pane/surface identifier.
@@ -17,6 +24,22 @@
 #
 #   kill_task_pane <session> <task-id>
 #     → Clean up a task's pane/surface.
+#
+# Generic primitives (used by skills, not by the orchestrator itself):
+#
+#   mux_spawn_named_pane <session> <name> <cwd> <cmd>
+#     → Create a new pane/surface labeled <name>, cd into <cwd>, run <cmd>.
+#       Idempotent: if a pane with this name already exists, no-op.
+#
+#   mux_send_to_pane <session> <name> <text>
+#     → Send <text> + Enter to the named pane. Used to deliver follow-up
+#       messages to persistent agent sessions (claude --resume, codex resume).
+#
+#   mux_pane_exists <session> <name>
+#     → Returns 0 if the named pane exists, 1 otherwise.
+#
+#   mux_kill_named_pane <session> <name>
+#     → Remove the named pane.
 
 MUX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

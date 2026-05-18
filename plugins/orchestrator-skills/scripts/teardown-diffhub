@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+#
+# teardown-diffhub — Stop the diffhub server and (under cmux) close its
+# browser surface so the operator's view doesn't sit on stale data after the
+# diffhub-review phase ends.
+#
+# Reads .orchestrator/diffhub.pid + .orchestrator/diffhub.surface, ignores
+# missing files. Safe to call multiple times.
+#
+# Usage:
+#   teardown-diffhub [--repo <dir>]
+
+set -uo pipefail
+
+REPO="$(pwd)"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo)    REPO="$2"; shift 2 ;;
+        -h|--help) sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) echo "teardown-diffhub: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+cd "$REPO" || { echo "teardown-diffhub: repo not accessible: $REPO" >&2; exit 1; }
+
+PIDFILE=".orchestrator/diffhub.pid"
+SURFACE_FILE=".orchestrator/diffhub.surface"
+URL_FILE=".orchestrator/diffhub.url"
+LABEL_FILE=".orchestrator/diffhub.label"
+
+if [[ -f "$PIDFILE" ]]; then
+    pid=$(cat "$PIDFILE" 2>/dev/null || true)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        # Give it a beat to exit cleanly; SIGKILL if it lingers.
+        for _ in 1 2 3; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+        done
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+fi
+
+if [[ -f "$LABEL_FILE" ]] && command -v launchctl >/dev/null; then
+    label=$(cat "$LABEL_FILE" 2>/dev/null || true)
+    if [[ -n "$label" ]]; then
+        launchctl remove "$label" >/dev/null 2>&1 || true
+    fi
+    rm -f "$LABEL_FILE"
+fi
+
+if [[ -f "$SURFACE_FILE" ]] && command -v cmux >/dev/null; then
+    sid=$(cat "$SURFACE_FILE" 2>/dev/null || true)
+    if [[ -n "$sid" ]]; then
+        cmux close-surface --surface "$sid" >/dev/null 2>&1 || true
+    fi
+    rm -f "$SURFACE_FILE"
+fi
+
+rm -f "$URL_FILE"
+
+exit 0

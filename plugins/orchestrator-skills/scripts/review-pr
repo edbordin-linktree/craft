@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+#
+# review-pr — Cross-model PR review wrapper.
+#
+# Spawns a reviewer sub-agent (different model than the one that wrote the
+# code) in headless mode, asks it to invoke the local review-pr skill rubric,
+# and writes findings to two places:
+#   1. .orchestrator/handoff/review.md          — for the coding agent to act on
+#   2. .git/diffhub-comments.json                — inline comments visible in
+#                                                   diffhub UI for the human
+#
+# Usage:
+#   review-pr [--base <ref>] [--worktree <abs-path>]
+#             [--reviewer claude|codex|cursor|gemini]
+#             [--model <model>]
+#             [--output <path>]
+#             [--diffhub-comments <path>]
+#             [--tag <tag-string>]
+#
+# Defaults:
+#   --base             auto-detect from origin/HEAD (the repo's default branch)
+#   --worktree         $(pwd)
+#   --reviewer         claude
+#   --model            sonnet (for claude)
+#   --output           <worktree>/.orchestrator/handoff/review.md
+#   --diffhub-comments <worktree>/$(git rev-parse --git-dir)/diffhub-comments.json
+#   --tag              automated-review:<reviewer>-<model> (recorded in body;
+#                      diffhub tag field is restricted to known labels)
+#
+# Reviews the LOCAL branch diff (HEAD vs --base) — not a GitHub PR. The
+# diffhub-review phase runs before the PR is opened, so there is nothing to
+# review on GitHub yet, and `gh pr view` for a re-used branch name can
+# return a stale CLOSED PR and send the reviewer chasing the wrong diff.
+#
+# Requires: bash 4+, gh, jq, uuidgen, plus the chosen reviewer CLI on PATH.
+#
+# TODO: --reviewer is parsed but only `claude` is wired up. Add `codex`,
+#       `cursor`, and `gemini` dispatch so the token load can spread across
+#       providers. Each provider has a different headless invocation:
+#         - codex:  `codex --dangerously-bypass-approvals-and-sandbox <prompt>`
+#                    (but codex is interactive by default — needs a one-shot
+#                     mode; `codex resume` against a fresh session is the
+#                     closest current path).
+#         - cursor: `cursor-agent -p <prompt>` (verify exact flag)
+#         - gemini: `gemini -p <prompt>` (verify exact flag)
+#
+# TODO: support multiple parallel reviewers in one invocation
+#       (--reviewer claude --reviewer codex). Each spawns in parallel via `&`,
+#       writes its findings to a per-reviewer temp file with a distinct
+#       tag value, then this script merges them into the diffhub comments
+#       file in a single atomic-rename write. Sketch:
+#           for r in "${REVIEWERS[@]}"; do
+#               spawn_reviewer "$r" > ".orchestrator/handoff/review.$r.json" &
+#           done
+#           wait
+#           jq -s 'reduce .[] as $f ([]; . + $f.findings)' \
+#               .orchestrator/handoff/review.*.json > merged.json
+#           # ...then build comments + atomic-rename onto diffhub-comments.json
+
+set -uo pipefail
+
+if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
+    echo "review-pr requires bash 4+" >&2; exit 1
+fi
+command -v jq >/dev/null      || { echo "review-pr: jq is required" >&2; exit 1; }
+command -v uuidgen >/dev/null || { echo "review-pr: uuidgen is required" >&2; exit 1; }
+command -v git >/dev/null     || { echo "review-pr: git is required" >&2; exit 1; }
+
+# --- args ---
+BASE=""
+WORKTREE="$(pwd)"
+REVIEWER="claude"
+MODEL=""
+OUTPUT=""
+DH_FILE=""
+TAG=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --base)             BASE="$2"; shift 2 ;;
+        --worktree)         WORKTREE="$2"; shift 2 ;;
+        --reviewer)         REVIEWER="$2"; shift 2 ;;
+        --model)            MODEL="$2"; shift 2 ;;
+        --output)           OUTPUT="$2"; shift 2 ;;
+        --diffhub-comments) DH_FILE="$2"; shift 2 ;;
+        --tag)              TAG="$2"; shift 2 ;;
+        -h|--help)
+            sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'
+            exit 0
+            ;;
+        *) echo "review-pr: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+cd "$WORKTREE" || { echo "review-pr: worktree not accessible: $WORKTREE" >&2; exit 1; }
+
+# Auto-detect base branch from origin/HEAD if not provided.
+if [[ -z "$BASE" ]]; then
+    BASE="$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null)" \
+        || { echo "review-pr: could not auto-detect base branch; pass --base" >&2; exit 1; }
+fi
+
+# Resolve to the merge-base so the diff is exactly "what HEAD adds on top of base".
+MERGE_BASE="$(git merge-base HEAD "$BASE" 2>/dev/null)" \
+    || { echo "review-pr: could not find merge-base of HEAD and $BASE" >&2; exit 1; }
+
+# Defaults that depend on args
+[[ -n "$MODEL" ]]   || case "$REVIEWER" in claude) MODEL="sonnet" ;; esac
+[[ -n "$OUTPUT" ]]  || OUTPUT="$WORKTREE/.orchestrator/handoff/review.md"
+[[ -n "$DH_FILE" ]] || DH_FILE="$(git rev-parse --git-dir)/diffhub-comments.json"
+[[ -n "$TAG" ]]     || TAG="automated-review:${REVIEWER}${MODEL:+-$MODEL}"
+
+mkdir -p "$(dirname "$OUTPUT")"
+
+log() { printf '%s [review-pr] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+log "reviewing HEAD vs $BASE (merge-base=${MERGE_BASE:0:8}) — reviewer=$REVIEWER model=$MODEL tag=$TAG"
+
+# --- build the prompt for the reviewer sub-agent ---
+PROMPT="You are a senior code reviewer. Review the LOCAL branch diff in this worktree:
+HEAD against base \`${BASE}\` (merge-base \`${MERGE_BASE}\`).
+
+DO NOT use \`gh pr ...\` to fetch a diff. There may be no PR yet, or there may
+be a stale closed PR on the same branch name from a previous run — both will
+mislead you. Use git directly.
+
+The repository ships a 'review-pr' skill at .claude/skills/review-pr/SKILL.md
+(also at .codex/skills/review-pr/SKILL.md). Read that skill in full first —
+it defines the review rubric (severity bands, security/performance/correctness
+checklists, what to flag vs ignore). Apply its conventions strictly.
+
+Fetch the diff via: git diff ${MERGE_BASE}...HEAD
+File list:         git diff ${MERGE_BASE}...HEAD --name-only
+Per-file diff:     git diff ${MERGE_BASE}...HEAD -- <path>
+Walk the diff file-by-file.
+
+Only include findings you are HIGH CONFIDENCE about. Suppress nitpicks unless
+objectively wrong. Style preferences without a clear reason should NOT appear.
+
+Output ONLY a JSON object with this exact shape (no preamble, no markdown
+fences, no commentary — start with { and end with }):
+
+{
+  \"summary\": \"<2-3 sentence overall summary>\",
+  \"findings\": [
+    {
+      \"file\": \"<path/from/repo/root>\",
+      \"line\": <integer line number in the new (right) side of the diff>,
+      \"severity\": \"critical|major|minor|nitpick\",
+      \"category\": \"bug|security|performance|correctness|style\",
+      \"message\": \"<one-paragraph description of the issue + a suggested fix>\"
+    }
+  ]
+}
+
+If the diff is clean and you have no findings, return {\"summary\": \"...\", \"findings\": []}.
+"
+
+# --- dispatch to the chosen reviewer ---
+RAW_OUT=""
+case "$REVIEWER" in
+    claude)
+        command -v claude >/dev/null || { echo "review-pr: claude CLI not on PATH" >&2; exit 1; }
+        RAW_OUT="$(claude -p --model "$MODEL" --dangerously-skip-permissions "$PROMPT")" \
+            || { echo "review-pr: claude exited non-zero" >&2; exit 1; }
+        ;;
+    codex|cursor|gemini)
+        echo "review-pr: reviewer '$REVIEWER' is not wired up yet (TODO at top of script)" >&2
+        exit 2
+        ;;
+    *)
+        echo "review-pr: unknown reviewer '$REVIEWER'" >&2; exit 2 ;;
+esac
+
+# --- extract JSON from response (tolerate light wrapping) ---
+JSON=""
+if echo "$RAW_OUT" | jq -e . >/dev/null 2>&1; then
+    JSON="$RAW_OUT"
+else
+    # Try to extract from a fenced ```json block, or first { ... last }
+    JSON="$(printf '%s' "$RAW_OUT" | awk '
+        /^```json/ {capture=1; next}
+        /^```/ && capture {exit}
+        capture {print}
+    ')"
+    if [[ -z "$JSON" ]] || ! echo "$JSON" | jq -e . >/dev/null 2>&1; then
+        JSON="$(printf '%s' "$RAW_OUT" | sed -n '/^[[:space:]]*{/,/^[[:space:]]*}/p')"
+    fi
+fi
+
+if ! echo "$JSON" | jq -e . >/dev/null 2>&1; then
+    log "ERROR: reviewer did not return valid JSON"
+    log "raw output (first 500 chars):"
+    printf '%s\n' "${RAW_OUT:0:500}" >&2
+    exit 1
+fi
+
+FINDINGS_COUNT="$(echo "$JSON" | jq '.findings | length')"
+SUMMARY="$(echo "$JSON" | jq -r '.summary // ""')"
+
+# --- write markdown summary for the coding agent ---
+{
+    echo "# Review by ${REVIEWER}${MODEL:+ ($MODEL)}"
+    echo
+    echo "Generated $(date -u +%Y-%m-%dT%H:%M:%SZ) — tag: \`$TAG\`"
+    echo
+    echo "## Summary"
+    echo
+    echo "$SUMMARY"
+    echo
+    echo "## Findings ($FINDINGS_COUNT)"
+    echo
+    if [[ "$FINDINGS_COUNT" -gt 0 ]]; then
+        echo "$JSON" | jq -r '.findings[] |
+            "### \(.severity) — \(.file):\(.line)  [\(.category)]\n\n\(.message)\n"'
+    else
+        echo "_No findings._"
+    fi
+} > "$OUTPUT"
+log "wrote markdown summary to $OUTPUT"
+
+# --- append findings as diffhub inline comments (atomic rename) ---
+if [[ "$FINDINGS_COUNT" -gt 0 ]]; then
+    NEW_COMMENTS="$(echo "$JSON" | jq --arg source "$TAG" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        [.findings[] | {
+            body: "**\(.severity)** [\(.category)] \($source): \(.message)",
+            file: .file,
+            lineNumber: .line,
+            side: "right",
+            tag: (if .severity == "critical" or .severity == "major" then "[must-fix]"
+                  elif .severity == "nitpick" then "[nit]"
+                  elif .severity == "minor" then "[suggestion]"
+                  else "[suggestion]" end),
+            createdAt: $ts,
+            id: "REPLACE_ID"
+        }]
+    ')"
+    # Replace REPLACE_ID with real uuids (one per comment).
+    PATCHED="$(echo "$NEW_COMMENTS" | jq -c '.[]' | while IFS= read -r line; do
+        echo "$line" | jq --arg id "$(uuidgen)" '.id = $id'
+    done | jq -s '.')"
+
+    EXISTING='[]'
+    if [[ -f "$DH_FILE" ]]; then
+        if jq -e . "$DH_FILE" >/dev/null 2>&1; then
+            EXISTING="$(cat "$DH_FILE")"
+        else
+            log "WARNING: $DH_FILE exists but isn't valid JSON; starting fresh"
+        fi
+    fi
+
+    mkdir -p "$(dirname "$DH_FILE")"
+    MERGED="$(jq -n --argjson existing "$EXISTING" --argjson new "$PATCHED" '$existing + $new')"
+    echo "$MERGED" > "${DH_FILE}.tmp" && mv "${DH_FILE}.tmp" "$DH_FILE"
+    log "appended $FINDINGS_COUNT inline comment(s) to $DH_FILE"
+fi
+
+# --- final stdout summary ---
+printf 'review.findings=%s\n' "$FINDINGS_COUNT"
+printf 'review.output=%s\n' "$OUTPUT"
+printf 'review.diffhub_comments=%s\n' "$DH_FILE"
+printf 'review.tag=%s\n' "$TAG"

@@ -3,6 +3,14 @@
 
 set -euo pipefail
 
+# craft uses bash 4+ features (associative arrays, etc.). macOS ships bash 3.2
+# by default; force-fail with a clear message rather than producing confusing
+# `declare: -A: invalid option` errors deep in the call stack.
+if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
+    echo "craft requires bash 4+ (you have ${BASH_VERSION:-unknown}). On macOS: 'brew install bash' then ensure /opt/homebrew/bin (or /usr/local/bin) is earlier on PATH than /bin." >&2
+    exit 1
+fi
+
 # Resolve CRAFT_ROOT to the repo root, following symlinks
 _resolve_script() {
     local src="$1"
@@ -155,36 +163,41 @@ craft plugin — Manage project plugins
 
 Usage:
   craft plugin list                              Show available plugins
-  craft plugin add <project> <plugin>            Install a plugin
-  craft plugin check <project>                   Validate all plugin dependencies
-  craft plugin set <project> <plugin> <k> <v>    Set a plugin config value
-  craft plugin show <project> <plugin>            Show plugin config
+  craft plugin add <project> <plugin>            Enable a plugin for a project
+  craft plugin check <project>                   Validate enabled plugins
+  craft plugin set <plugin> <key> <value>        Set a plugin config value (shared across projects)
+  craft plugin show <plugin>                     Show plugin config
 
-Plugins hook into task lifecycle events (on_started, on_waiting, on_done,
-on_blocked, on_milestone). They run in subshells so failures don't break
-the orchestrator.
+Plugins are a shared library at $CRAFT_ROOT/plugins/. Enabling a plugin for a
+project adds its name to PLUGINS= in that project's craft.conf and fires the
+plugin's on_install hook. Plugins hook into task lifecycle events
+(on_started, on_waiting, on_done, on_blocked, on_milestone, on_poll, on_install)
+and run in subshells so failures don't break the orchestrator.
+
+Note: plugin.conf is shared across all projects that enable the plugin.
+There are no per-project plugin forks.
 
 Available plugins:
+  orchestrator-skills  Multi-agent supervisor (Devin / Codex / Claude delegation)
   slack-dm-notify      DMs you on Slack when a draft PR is ready
   slack-daily-thread   Posts PR events to a daily Slack channel thread
   linear-sync          Two-way sync with Linear issues
 
 Example — set up Slack notifications:
   craft plugin add my-project slack-dm-notify
-  craft plugin set my-project slack-dm-notify SLACK_BOT_TOKEN xoxb-...
-  craft plugin set my-project slack-dm-notify SLACK_USER_ID U01ABC123
+  craft plugin set slack-dm-notify SLACK_BOT_TOKEN xoxb-...
+  craft plugin set slack-dm-notify SLACK_USER_ID U01ABC123
   craft plugin check my-project
 HELP
             exit 0
             ;;
 
         list)
-            echo "Available plugins (in $CRAFT_ROOT/templates/plugins/):"
-            for d in "$CRAFT_ROOT/templates/plugins"/*/; do
+            echo "Available plugins (in $CRAFT_ROOT/plugins/):"
+            for d in "$CRAFT_ROOT/plugins"/*/; do
                 [[ -d "$d" ]] || continue
                 local name
                 name=$(basename "$d")
-                [[ "$name" == "README.md" ]] && continue
                 local desc=""
                 if [[ -f "$d/hooks.sh" ]]; then
                     desc=$(grep '^#' "$d/hooks.sh" | grep -v '^#!/' | head -1 | sed 's/^# *//')
@@ -204,42 +217,50 @@ HELP
                 echo "Project not found: $project_dir"
                 exit 1
             fi
-            local template_dir="$CRAFT_ROOT/templates/plugins/$plugin_name"
-            if [[ ! -d "$template_dir" ]]; then
-                echo "Plugin not found: $template_dir"
+            local plugin_dir="$CRAFT_ROOT/plugins/$plugin_name"
+            if [[ ! -d "$plugin_dir" ]]; then
+                echo "Plugin not found: $plugin_dir"
                 echo "Run 'craft plugin list' to see available plugins."
                 exit 1
             fi
-            local dest_dir="$project_dir/plugins/$plugin_name"
-            if [[ -d "$dest_dir" ]]; then
-                echo "Plugin '$plugin_name' is already installed in $project_name."
-            else
-                cp -R "$template_dir" "$dest_dir"
-                echo "Installed $plugin_name into $project_name/plugins/."
-            fi
+            # Plugins are a shared library at $CRAFT_ROOT/plugins/. Enabling
+            # the plugin = adding its name to PLUGINS= in this project's
+            # craft.conf. No copying, no symlinking.
             _plugins_enable "$project_dir/craft.conf" "$plugin_name"
             echo "Enabled $plugin_name in $project_name/craft.conf."
+            # Fire the plugin's on_install hook if defined.
+            if [[ -f "$plugin_dir/hooks.sh" ]]; then
+                (
+                    PROJECT_DIR="$project_dir"
+                    export PROJECT_DIR
+                    # shellcheck source=/dev/null
+                    source "$plugin_dir/hooks.sh"
+                    if declare -f on_install > /dev/null 2>&1; then
+                        on_install "$project_dir"
+                    fi
+                )
+            fi
             local conf_keys
-            conf_keys=$(grep '^[A-Z_]*=""' "$dest_dir/plugin.conf" 2>/dev/null | sed 's/=.*//')
+            conf_keys=$(grep '^[A-Z_]*=""' "$plugin_dir/plugin.conf" 2>/dev/null | sed 's/=.*//')
             if [[ -n "$conf_keys" ]]; then
                 echo ""
-                echo "Configure it with:"
+                echo "Configure it with (note: shared across all projects):"
                 while IFS= read -r key; do
-                    echo "  craft plugin set $project_name $plugin_name $key <value>"
+                    echo "  craft plugin set $plugin_name $key <value>"
                 done <<< "$conf_keys"
             fi
             ;;
 
         set)
-            local project_name="${1:-}" plugin_name="${2:-}" key="${3:-}" value="${4:-}"
-            if [[ -z "$project_name" || -z "$plugin_name" || -z "$key" || -z "$value" ]]; then
-                echo "Usage: craft plugin set <project-name> <plugin-name> <key> <value>"
+            local plugin_name="${1:-}" key="${2:-}" value="${3:-}"
+            if [[ -z "$plugin_name" || -z "$key" || -z "$value" ]]; then
+                echo "Usage: craft plugin set <plugin-name> <key> <value>"
+                echo "       (plugin config is shared across all projects)"
                 exit 1
             fi
-            local conf="$CRAFT_PROJECTS/$project_name/plugins/$plugin_name/plugin.conf"
+            local conf="$CRAFT_ROOT/plugins/$plugin_name/plugin.conf"
             if [[ ! -f "$conf" ]]; then
                 echo "Plugin config not found: $conf"
-                echo "Run 'craft plugin add $project_name $plugin_name' first."
                 exit 1
             fi
             if grep -q "^${key}=" "$conf" || grep -q "^# ${key}=" "$conf"; then
@@ -247,21 +268,21 @@ HELP
             else
                 echo "${key}=\"${value}\"" >> "$conf"
             fi
-            echo "Set ${key} in $project_name/$plugin_name."
+            echo "Set ${key} in plugins/$plugin_name/plugin.conf."
             ;;
 
         show)
-            local project_name="${1:-}" plugin_name="${2:-}"
-            if [[ -z "$project_name" || -z "$plugin_name" ]]; then
-                echo "Usage: craft plugin show <project-name> <plugin-name>"
+            local plugin_name="${1:-}"
+            if [[ -z "$plugin_name" ]]; then
+                echo "Usage: craft plugin show <plugin-name>"
                 exit 1
             fi
-            local conf="$CRAFT_PROJECTS/$project_name/plugins/$plugin_name/plugin.conf"
+            local conf="$CRAFT_ROOT/plugins/$plugin_name/plugin.conf"
             if [[ ! -f "$conf" ]]; then
-                echo "Plugin not installed. Run: craft plugin add $project_name $plugin_name"
+                echo "Plugin not found: $conf"
                 exit 1
             fi
-            echo "Config for $project_name/$plugin_name ($conf):"
+            echo "Config for $plugin_name ($conf):"
             grep -v '^#' "$conf" | grep -v '^[[:space:]]*$'
             ;;
 
@@ -289,9 +310,9 @@ HELP
             IFS=',' read -ra plugin_list <<< "$plugins"
             for plugin in "${plugin_list[@]}"; do
                 plugin="$(echo "$plugin" | xargs)"
-                local hooks_file="$project_dir/plugins/$plugin/hooks.sh"
+                local hooks_file="$CRAFT_ROOT/plugins/$plugin/hooks.sh"
                 if [[ ! -f "$hooks_file" ]]; then
-                    echo "✗ $plugin — hooks.sh not found (run: craft plugin add $project_name $plugin)"
+                    echo "✗ $plugin — hooks.sh not found at $hooks_file (was it removed or renamed?)"
                     all_ok=false
                     continue
                 fi

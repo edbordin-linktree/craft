@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+#
+# show-build-status — Open the Buildkite status viewer (craft-bk-status) as a
+# cmux browser surface, split to the RIGHT of the calling pane, pointing at
+# the BK build for a given PR.
+#
+# Need this because cmux's in-app browser can't complete the Okta SSO flow
+# that the Buildkite web UI requires. The craft-bk-status server uses the
+# `bk` CLI (API token auth) instead.
+#
+# Usage:
+#   show-build-status <pr-url-or-number>
+#
+# Behaviour:
+#   1. Ensure the craft-bk-status server is running at $BK_STATUS_URL
+#      (default http://127.0.0.1:27435). Spawn it via launchctl if not.
+#   2. Resolve <pr> → Buildkite build URL by running `gh pr checks <pr> --json`
+#      and finding a check whose link is on buildkite.com.
+#   3. cmux new-split right <calling pane> --type browser --url <server>/build/<org>/<pipeline>/<number>
+#   4. Rename the tab `bk:<pipeline>#<n>`.
+#
+# Designed to be called from the work-task agent's babysit-pr loop when the
+# PR merges and a Buildkite check is present (so the operator can watch the
+# downstream deploys without leaving cmux). Fire-and-forget; cmux closes the
+# tab when the workspace is closed.
+
+set -uo pipefail
+
+if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
+    echo "show-build-status requires bash 4+" >&2; exit 1
+fi
+command -v cmux >/dev/null || { echo "show-build-status: cmux not on PATH" >&2; exit 1; }
+command -v gh   >/dev/null || { echo "show-build-status: gh not on PATH" >&2; exit 1; }
+command -v jq   >/dev/null || { echo "show-build-status: jq not on PATH" >&2; exit 1; }
+
+PR="${1:?Usage: show-build-status <pr-url-or-number>}"
+PORT="${BK_STATUS_PORT:-27435}"
+HOST="${BK_STATUS_HOST:-127.0.0.1}"
+BK_STATUS_URL="http://${HOST}:${PORT}"
+
+# --- 1. ensure server is up ---
+if ! curl -sS -o /dev/null -m 1 "${BK_STATUS_URL}/healthz"; then
+    echo "show-build-status: starting craft-bk-status at ${BK_STATUS_URL}" >&2
+    SERVER_DIR="${CRAFT_ROOT:-/Users/ed/tasks/custom-orchestrator/craft}/plugins/orchestrator-skills/bk-status"
+    [[ -f "$SERVER_DIR/server.tsx" ]] || { echo "show-build-status: $SERVER_DIR/server.tsx missing" >&2; exit 1; }
+
+    if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null; then
+        LABEL="craft.bk-status.$(date +%s).$$"
+        BASH_BIN="$(command -v bash)"
+        LOG="/tmp/craft-bk-status.log"
+        RUNNER="/tmp/craft-bk-status.runner.$$.sh"
+        {
+            printf '#!%s\n' "$BASH_BIN"
+            printf 'set -uo pipefail\n'
+            printf 'export PATH=%q\n' "$PATH"
+            printf 'cd %q || exit 1\n' "$SERVER_DIR"
+            printf 'exec bun server.tsx --port %q --host %q >%q 2>&1 < /dev/null\n' \
+                "$PORT" "$HOST" "$LOG"
+        } > "$RUNNER"
+        chmod +x "$RUNNER"
+        launchctl submit -l "$LABEL" -- "$BASH_BIN" "$RUNNER"
+    else
+        ( cd "$SERVER_DIR" && nohup bun server.tsx --port "$PORT" --host "$HOST" \
+            > /tmp/craft-bk-status.log 2>&1 < /dev/null & )
+    fi
+
+    # Wait up to 10s for it to come up.
+    for _ in $(seq 1 20); do
+        sleep 0.5
+        curl -sS -o /dev/null -m 1 "${BK_STATUS_URL}/healthz" && break
+    done
+fi
+
+# --- 2. resolve PR → owner / repo / number ---
+# Accepts a full PR URL or a bare number. If a bare number, owner/repo are
+# inferred from `gh` in the current working directory.
+if [[ "$PR" =~ ^https?://github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+    OWNER="${BASH_REMATCH[1]}"
+    REPO="${BASH_REMATCH[2]}"
+    NUM="${BASH_REMATCH[3]}"
+else
+    # Bare number — pull owner/repo from `gh` in cwd.
+    NUM="$PR"
+    REPO_NAMEONLY=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+    if [[ -z "$REPO_NAMEONLY" ]]; then
+        echo "show-build-status: pass a full PR url (https://github.com/owner/repo/pull/N) when not in a gh-recognised repo" >&2
+        exit 1
+    fi
+    OWNER="${REPO_NAMEONLY%%/*}"
+    REPO="${REPO_NAMEONLY##*/}"
+fi
+
+# The target URL is PR-centric, NOT build-number-centric. The server
+# re-resolves which build to show on every htmx tick: head commit while the
+# PR is open, merge commit (any pipeline) once it's merged. Stable across
+# pushes, retriggers, and the post-merge deploy.
+TARGET_URL="${BK_STATUS_URL}/pr/${OWNER}/${REPO}/${NUM}"
+
+# --- 3. idempotency: reuse any existing cmux browser surface for this PR ---
+# We don't reuse OTHER PRs' bk-status tabs — each PR can have its own tab
+# in the workspace. Match by exact URL.
+EXISTING=$(cmux tree --all --json 2>/dev/null \
+    | jq -r --arg u "$TARGET_URL" '
+        .windows[].workspaces[].panes[].surfaces[]
+        | select(.type == "browser" and ((.url // "") == $u or (.url // "" | startswith($u + "/") or (.url // "" | startswith($u + "?")))))
+        | .ref
+      ' 2>/dev/null \
+    | head -1)
+if [[ -n "$EXISTING" ]]; then
+    # Tab already open for this PR — nothing to do. (No navigate needed; the
+    # page auto-refreshes via htmx every 5s.)
+    cmux rename-tab --surface "$EXISTING" "bk:${REPO}#${NUM}" >/dev/null 2>&1 || true
+    printf 'show-build-status.status=reused-existing\n'
+    printf 'show-build-status.surface=%s\n' "$EXISTING"
+    printf 'show-build-status.url=%s\n' "$TARGET_URL"
+    exit 0
+fi
+
+# Hint variables for the rest of the script
+PIPELINE="$REPO"   # used only for the tab label fallback; server picks the real pipeline
+NUMBER="$NUM"
+
+# --- 4. open the bk-status tab ---
+#
+# Preferred placement: any pane in this project's workspace that already
+# holds a browser surface (typically the pane with the diffhub or PR tab).
+# We add the new surface as a sibling tab there, so the operator's right-
+# hand pane accumulates browser tabs and the agent terminals stay in the
+# left pane. Only if no such pane exists do we fall back to splitting from
+# the caller.
+PANE_WITH_BROWSER="$(cmux tree --all --json 2>/dev/null \
+    | jq -r '.windows[] | .workspaces[] | .panes[]
+             | select(.surfaces[]? | .type == "browser")
+             | .ref' 2>/dev/null \
+    | head -1)"
+
+if [[ -n "$PANE_WITH_BROWSER" ]]; then
+    OUT=$(cmux new-surface --type browser --pane "$PANE_WITH_BROWSER" --url "$TARGET_URL" 2>&1)
+else
+    # No existing browser pane — split right from the caller (or just create
+    # in current workspace if we can't find the caller).
+    CALLER_PANE="$(cmux tree --all --json 2>/dev/null | jq -r '.caller.pane_ref // empty')"
+    if [[ -n "$CALLER_PANE" ]]; then
+        SPLIT_OUT=$(cmux new-split right --pane "$CALLER_PANE" 2>&1)
+        SPLIT_SURFACE=$(echo "$SPLIT_OUT" | grep -oE 'surface:[0-9]+' | head -1)
+        # new-split returns surface ref; resolve to the new pane via tree.
+        SPLIT_PANE=""
+        if [[ -n "$SPLIT_SURFACE" ]]; then
+            SPLIT_PANE=$(cmux tree --all --json 2>/dev/null \
+                | jq -r --arg s "$SPLIT_SURFACE" '
+                    .windows[].workspaces[].panes[]
+                    | select(.surfaces[].ref == $s)
+                    | .ref' 2>/dev/null \
+                | head -1)
+        fi
+        if [[ -n "$SPLIT_PANE" ]]; then
+            OUT=$(cmux new-surface --type browser --pane "$SPLIT_PANE" --url "$TARGET_URL" 2>&1)
+            # Close the default terminal surface that new-split created.
+            [[ -n "$SPLIT_SURFACE" ]] && cmux close-surface --surface "$SPLIT_SURFACE" >/dev/null 2>&1 || true
+        else
+            OUT=$(cmux new-surface --type browser --url "$TARGET_URL" 2>&1)
+        fi
+    else
+        OUT=$(cmux new-surface --type browser --url "$TARGET_URL" 2>&1)
+    fi
+fi
+
+SID=$(echo "$OUT" | grep -oE 'surface:[0-9]+' | head -1)
+if [[ -n "$SID" ]]; then
+    cmux rename-tab --surface "$SID" "bk:${REPO}#${NUM}" >/dev/null 2>&1 || true
+    printf 'show-build-status.surface=%s\n' "$SID"
+fi
+printf 'show-build-status.status=created\n'
+printf 'show-build-status.url=%s\n' "$TARGET_URL"

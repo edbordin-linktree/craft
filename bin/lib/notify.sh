@@ -4,11 +4,14 @@
 # Dispatches lifecycle events to the plugin system and optionally plays
 # a tmux bell for attention.
 
-# Run a plugin hook, silently skipping if the plugin runner doesn't exist
+# Run a plugin hook. The dispatcher now lives at $CRAFT_ROOT/bin/run-hook.sh
+# (plugins are a shared library at $CRAFT_ROOT/plugins/, not per-project).
 _run_hook() {
-    local hook_runner="$PROJECT_DIR/plugins/run-hook.sh"
+    local notify_dir hook_runner
+    notify_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # $CRAFT_ROOT/bin/lib
+    hook_runner="${notify_dir%/lib}/run-hook.sh"                  # $CRAFT_ROOT/bin/run-hook.sh
     if [[ -x "$hook_runner" ]]; then
-        "$hook_runner" "$@" 2>/dev/null || true
+        "$hook_runner" "$@" --project-dir "$PROJECT_DIR" 2>/dev/null || true
     fi
 }
 

@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+#
+# babysit-diffhub — Fast local watcher for the diffhub-review phase.
+#
+# Watches:
+#   - .git/diffhub-comments.json — every new comment (human OR bot) is treated
+#     equally. No tag filtering: the agent acts on whatever appears in arrival
+#     order. The cross-model reviewer (review-pr) and the human can comment
+#     in parallel; both are equal citizens here.
+#   - .orchestrator/ready-for-pr — sentinel file. Touched by the human, by the
+#     work-task agent on the human's behalf, or eventually by the dashboard.
+#     Its appearance ends the diffhub-review phase.
+#
+# Emits one bullet per transition to .orchestrator/diffhub-pending.md. The
+# work-task agent polls that pending file in a thin bash until-loop and acts.
+#
+# Usage:
+#   babysit-diffhub --worktree <abs-path> [--poll-interval 5]
+#                   [--idle-timeout 7200]   # seconds; 0 disables
+#                   [--state-file <p>] [--pending-file <p>]
+#                   [--comments-file <p>] [--sentinel <p>]
+#
+# Idle-timeout behaviour: if no new comments arrive for <idle-timeout> seconds,
+# the script touches the sentinel file itself (creating .orchestrator/ready-for-pr)
+# and exits. This is intended for overnight runs — the bake-loop gathers any
+# late github-bot or async-reviewer findings, then auto-advances to the PR
+# phase so the human sees a polished PR in the morning instead of a stuck task.
+# Default 7200s (2h); pass --idle-timeout 0 to disable.
+#
+# Exits 0 when the sentinel appears (advance to PR phase), on idle timeout,
+# or after SIGTERM/INT.
+#
+# Requires: bash 4+, jq.
+
+set -uo pipefail
+
+if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
+    echo "babysit-diffhub requires bash 4+" >&2; exit 1
+fi
+command -v jq >/dev/null || { echo "babysit-diffhub: jq is required" >&2; exit 1; }
+
+WORKTREE=""
+POLL_INTERVAL=5
+IDLE_TIMEOUT=7200
+STATE_FILE=""
+PENDING_FILE=""
+COMMENTS_FILE=""
+SENTINEL=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --worktree)        WORKTREE="$2"; shift 2 ;;
+        --poll-interval)   POLL_INTERVAL="$2"; shift 2 ;;
+        --idle-timeout)    IDLE_TIMEOUT="$2"; shift 2 ;;
+        --state-file)      STATE_FILE="$2"; shift 2 ;;
+        --pending-file)    PENDING_FILE="$2"; shift 2 ;;
+        --comments-file)   COMMENTS_FILE="$2"; shift 2 ;;
+        --sentinel)        SENTINEL="$2"; shift 2 ;;
+        -h|--help)         sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *)                 echo "babysit-diffhub: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+[[ -n "$WORKTREE" ]] || { echo "--worktree is required" >&2; exit 2; }
+[[ -d "$WORKTREE" ]] || { echo "worktree not found: $WORKTREE" >&2; exit 1; }
+
+cd "$WORKTREE"
+mkdir -p "$WORKTREE/.orchestrator"
+
+STATE_FILE="${STATE_FILE:-$WORKTREE/.orchestrator/diffhub-state.json}"
+PENDING_FILE="${PENDING_FILE:-$WORKTREE/.orchestrator/diffhub-pending.md}"
+SENTINEL="${SENTINEL:-$WORKTREE/.orchestrator/ready-for-pr}"
+
+# Default comments file: <git-dir>/diffhub-comments.json. Diffhub writes to
+# the per-worktree git dir, which `git rev-parse --git-dir` returns directly
+# (`.git/worktrees/<name>/` inside a worktree, plain `.git/` outside).
+if [[ -z "$COMMENTS_FILE" ]]; then
+    GIT_DIR="$(git rev-parse --git-dir 2>/dev/null || echo "$WORKTREE/.git")"
+    COMMENTS_FILE="$GIT_DIR/diffhub-comments.json"
+fi
+
+log() { printf '%s [babysit-diffhub] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+
+# Read the persisted "what we've already seen" state, normalized so the JSON
+# always has `ids: []` and `by_id: {}` (jq array-subtraction errors out on
+# null, which silently swallowed the diff on first startup and meant any
+# comment that landed BEFORE babysit booted — e.g. review-pr findings written
+# during Step 7 — was treated as "old" forever).
+read_state() {
+    local raw='{}'
+    if [[ -f "$STATE_FILE" ]]; then
+        raw="$(cat "$STATE_FILE")"
+        jq -e . <<<"$raw" >/dev/null 2>&1 || raw='{}'
+    fi
+    jq '{ids: (.ids // []), by_id: (.by_id // {}), last_polled_at: (.last_polled_at // null)}' <<<"$raw"
+}
+
+# Append a transition bullet to the pending file.
+record() {
+    printf -- '- %s\n' "$1" >> "$PENDING_FILE"
+}
+
+# Pull the comment ID set + a small snapshot map (id → {file,line,tag}) from
+# the current comments file. Robust against missing/invalid JSON.
+fetch_snapshot() {
+    if [[ ! -f "$COMMENTS_FILE" ]]; then
+        echo '{"ids": [], "by_id": {}}'
+        return
+    fi
+    if ! jq -e . "$COMMENTS_FILE" >/dev/null 2>&1; then
+        echo '{"ids": [], "by_id": {}}'
+        return
+    fi
+    jq '
+      map(select((.resolved // false) != true and (.staleness // "fresh") != "stale")) as $actionable
+      | {
+          ids: ($actionable | map(.id) | sort),
+          by_id: ($actionable | map({(.id|tostring): {file: .file, lineNumber: .lineNumber, tag: (.tag // ""), body: (.body // "")}}) | add // {})
+        }
+    ' "$COMMENTS_FILE"
+}
+
+diff_snapshot() {
+    local prior="$1" cur="$2"
+    jq -n -r --argjson prior "$prior" --argjson cur "$cur" '
+        ($cur.ids - $prior.ids) as $new_ids
+        | $new_ids[] | . as $id
+        | $cur.by_id[$id]
+        | (if (.tag // "") == "" then "human" else .tag end) as $author
+        | "\($author) comment at \(.file):\(.lineNumber): \(.body | (if length > 200 then .[0:197] + "..." else . end))"
+    '
+}
+
+build_state() {
+    local cur="$1"
+    jq -n --argjson cur "$cur" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        $cur + {last_polled_at: $ts}
+    '
+}
+
+cleanup() { log "exiting"; exit "${1:-0}"; }
+trap 'cleanup 0' INT TERM
+
+if (( IDLE_TIMEOUT > 0 )); then
+    log "watching $COMMENTS_FILE + $SENTINEL (interval=${POLL_INTERVAL}s, idle_timeout=${IDLE_TIMEOUT}s)"
+else
+    log "watching $COMMENTS_FILE + $SENTINEL (interval=${POLL_INTERVAL}s, idle_timeout disabled)"
+fi
+
+prior_state="$(read_state)"
+last_activity=$(date +%s)
+
+while true; do
+    snapshot="$(fetch_snapshot)" || { log "snapshot fetch failed; retry in 10s"; sleep 10; continue; }
+
+    # New comments since last poll.
+    transitions="$(diff_snapshot "$prior_state" "$snapshot" 2>/dev/null || true)"
+    if [[ -n "$transitions" ]]; then
+        log "new comments:"
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            log "  → $line"
+            record "$line"
+        done <<< "$transitions"
+        last_activity=$(date +%s)
+    fi
+
+    # Sentinel check — terminal condition.
+    if [[ -f "$SENTINEL" ]]; then
+        record "human signal: ready-for-pr (sentinel at $SENTINEL)"
+        log "sentinel detected — advancing to PR phase"
+        build_state "$snapshot" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+        exit 0
+    fi
+
+    # Idle-timeout check — touch the sentinel ourselves so the work-task
+    # wake-up loop advances cleanly. Disabled when IDLE_TIMEOUT == 0.
+    if (( IDLE_TIMEOUT > 0 )); then
+        now=$(date +%s)
+        idle=$(( now - last_activity ))
+        if (( idle >= IDLE_TIMEOUT )); then
+            mins=$(( idle / 60 ))
+            record "idle timeout: ${mins} minute(s) without new comments — auto-advancing to PR phase"
+            log "idle timeout (${idle}s ≥ ${IDLE_TIMEOUT}s) — touching $SENTINEL"
+            touch "$SENTINEL"
+            build_state "$snapshot" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+            exit 0
+        fi
+    fi
+
+    build_state "$snapshot" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+    prior_state="$(read_state)"
+
+    sleep "$POLL_INTERVAL"
+done

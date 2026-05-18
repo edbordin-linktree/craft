@@ -40,7 +40,9 @@ echo "Creating project: $PROJECT_NAME"
 # Ensure projects directory exists
 mkdir -p "$PROJECTS_DIR"
 
-# Copy template structure
+# Copy template structure (plugins are NOT under templates/ — they live as a
+# shared library at $CRAFT_ROOT/plugins/ and are referenced from the project's
+# craft.conf via PLUGINS=).
 cp -R "$TEMPLATES_DIR" "$PROJECT_DIR"
 
 # Create additional directories not in templates
@@ -53,10 +55,14 @@ mkdir -p "$PROJECT_DIR/repos"
 DATE=$(date +%Y-%m-%d)
 
 # Resolve operator name: explicit env var > git config > $USER
+# Strip newlines/CRs in case the source emits warnings on stdout — otherwise
+# the downstream sed substitution chokes on "unescaped newline in pattern".
 OPERATOR_NAME="${OPERATOR_NAME:-$(git config user.name 2>/dev/null || echo "${USER:-operator}")}"
+OPERATOR_NAME="$(printf '%s' "$OPERATOR_NAME" | tr -d '\n\r')"
 
 # Resolve GitHub reviewer: explicit env var > gh CLI > empty
 GITHUB_REVIEWER="${GITHUB_REVIEWER:-$(gh api user -q .login 2>/dev/null || echo "")}"
+GITHUB_REVIEWER="$(printf '%s' "$GITHUB_REVIEWER" | tr -d '\n\r')"
 
 # Resolve branch prefix: explicit env var > empty
 BRANCH_PREFIX="${BRANCH_PREFIX:-}"
