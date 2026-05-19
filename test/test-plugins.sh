@@ -112,6 +112,28 @@ assert_false "refuses real-file conflict" plugin_sync_project_assets "$PROJECT_D
 rm "$PROJECT_DIR/.claude/commands/example.md"
 
 echo ""
+echo "orchestrator-skills assets"
+real_project="$TMPDIR/orchestrator-project"
+mkdir -p "$real_project"
+cat > "$real_project/craft.conf" << 'EOF'
+PLUGINS=orchestrator-skills
+EOF
+
+old_craft_root="$CRAFT_ROOT"
+CRAFT_ROOT="$REPO_ROOT"
+assert_true "orchestrator-skills syncs through generic assets" plugin_sync_project_assets "$real_project"
+assert_true "orchestrator work-task command linked" test -L "$real_project/.claude/commands/work-task.md"
+assert_eq "orchestrator work-task target" "$REPO_ROOT/plugins/orchestrator-skills/project/.claude/commands/work-task.md" "$(readlink "$real_project/.claude/commands/work-task.md")"
+assert_true "orchestrator architect command linked" test -L "$real_project/.claude/commands/init-architect.md"
+assert_true "orchestrator discoverer command linked" test -L "$real_project/.claude/commands/init-discoverer.md"
+assert_true "orchestrator claude skill linked" test -L "$real_project/.claude/skills/review-pr"
+assert_true "orchestrator codex skill linked" test -L "$real_project/.codex/skills/review-pr"
+assert_false "orchestrator hooks do not hardcode skill symlinks" grep -E 'ln -s .*skills|cp -R .*skills|skill_list=' "$REPO_ROOT/plugins/orchestrator-skills/hooks.sh"
+orchestrator_states="$(plugin_queue_states "$real_project" | paste -sd, -)"
+assert_eq "orchestrator declares diffhub-review" "pending,approved,in-progress,waiting,done,blocked,archive,diffhub-review" "$orchestrator_states"
+CRAFT_ROOT="$old_craft_root"
+
+echo ""
 echo "plugin_queue_states"
 states="$(plugin_queue_states "$PROJECT_DIR" | paste -sd, -)"
 assert_eq "core plus plugin states" "pending,approved,in-progress,waiting,done,blocked,archive,diffhub-review,custom-review" "$states"

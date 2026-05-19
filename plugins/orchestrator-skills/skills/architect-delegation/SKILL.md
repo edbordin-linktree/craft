@@ -1,6 +1,6 @@
 ---
 name: architect-delegation
-description: Guidance for the project architect on when and how to delegate during planning. Covers using `delegate-to-devin` for cross-repo / async research vs the native Claude Agent tool for lightweight in-context tasks. Also names what the architect must NOT delegate — execution belongs to the per-task agent (`/work-task`), launched by the orchestrator, not to the architect. Activate this skill when you are the architect considering whether to fan out part of a planning task to a sub-agent.
+description: Guidance for the project architect on when and how to delegate during planning. Covers choosing between in-context subagents and optional external research helpers, and names what the architect must NOT delegate: execution belongs to the per-task agent launched by the orchestrator. Activate this skill when you are the architect considering whether to fan out part of a planning task to a sub-agent.
 ---
 
 # architect-delegation
@@ -11,9 +11,9 @@ This skill tells you how to delegate sub-work *during planning*.
 
 ## What you may delegate
 
-Two tools are available to you:
+These delegation mechanisms may be available to you:
 
-### 1. Native Claude `Agent` tool (default for in-context one-shots)
+### 1. In-context subagent tool (default for one-shots)
 
 Best for:
 - Single-repo exploration ("read these files and tell me what `X` does")
@@ -33,14 +33,16 @@ Agent({
 })
 ```
 
-### 2. `delegate-to-devin` (cloud sandbox, async, peekable via URL)
+### 2. External cloud research helper (optional)
 
 Best for:
 - **Cross-repo research** where Devin's repo graph and parallel browsing help
 - Deep dives across multiple codebases
 - Long async investigations you don't want to block on (you can keep planning other things)
 
-Output is written to a local handoff file by the helper; you read it when ready. The Devin session URL is browser-openable for peeking.
+Use a cloud helper only when it is installed and configured for this project
+(for example, a Devin-backed helper). Output should land in a local handoff file
+or another durable reference that a later task can read.
 
 ## What you must NOT delegate
 
@@ -52,12 +54,12 @@ Output is written to a local handoff file by the helper; you read it when ready.
 
 | You want to... | Use |
 |---|---|
-| ...understand X across all our repos | `delegate-to-devin` |
+| ...understand X across many repos and a cloud helper is configured | external cloud helper |
 | ...understand X in *this* repo | `Agent` tool |
 | ...summarise / search / extract / classify, quickly | `Agent` tool (haiku or sonnet) |
-| ...do an async deep dive while you keep planning | `delegate-to-devin` |
+| ...do an async deep dive while you keep planning | external cloud helper |
 | ...decide task scope, decomposition, acceptance criteria | you do that yourself — that's planning |
 
 ## Recording delegations
 
-The architect's delegations are part of planning thought, not part of any task's execution audit trail. If a Devin session you fire produced reusable output, reference it as a link in the "Background" section of the task file you're drafting so the per-task agent can read it later.
+The architect's delegations are part of planning thought, not part of any task's execution audit trail. If an external session produced reusable output, reference it as a link in the "Background" section of the task file you're drafting so the per-task agent can read it later.

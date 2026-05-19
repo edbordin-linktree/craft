@@ -25,17 +25,20 @@ Autonomous PR monitor. Detects the PR from the current worktree, polls on a 2-mi
 
 ## Inputs
 
-When invoked from `/work-task` Step 10, the agent already knows:
+When invoked from `/work-task` Step 10, the caller usually already knows:
 - **PR URL or number** — captured at Step 9 (PR creation) and recorded on the task frontmatter as `pr:`.
 - **Worktree path** — the current directory; `cd` here was done at Step 3 and stays for the lifetime of the task.
 
 If invoked manually outside of work-task, auto-detect the PR from the current branch with `gh pr view --json number`.
 
-## Context: local review precedes this skill
+## Context
 
-By the time this skill runs, the task has already gone through a **local review phase** (work-task Step 8: babysit-diffhub) where the cross-model reviewer (`scripts/review-pr`) wrote findings to `.git/diffhub-comments.json` and the human reviewed locally via diffhub. The agent already addressed those.
+This skill is standalone PR monitoring. It can run after any PR is opened,
+whether or not the branch previously went through local diffhub review.
 
-In practical terms: when this skill is active, most of the comments you'll see on the github PR are CI bots (Vercel deploy previews, codecov, danger, etc.) and any late human review. Initial-review findings have already been worked through locally, so Phase 4 here is usually lighter than it would otherwise be. Don't expect or wait for a long inline review-comment storm — that already happened.
+If a caller did run a local review phase first, some initial-review feedback may
+already be addressed before this skill starts. Do not assume that happened:
+triage the PR's current CI and review state from GitHub.
 
 ## State file
 
@@ -364,9 +367,10 @@ On exit, write a final entry to the Work Log: polls run, fixes applied, conflict
 - Auto-merging without explicit operator opt-in — merge is one-way; never assume.
 - Using `bk` without `bk auth status` first — fall back to `gh pr checks` if auth isn't there.
 
-## Related skills
+## Related tools
 
-- `review-pr` (plugin script) — cross-model PR review run at `work-task` Step 7 *before* this skill fires. Bot-tagged inline comments will appear in diffhub during babysit; treat them the same as human comments in Phase 4 unless they're tagged `automated-review:*`, which means they came from the cross-model reviewer pre-merge and have presumably already been addressed.
+- `plugins/orchestrator-skills/scripts/review-pr` can run a local branch review
+  before PR creation in workflows that choose to use diffhub.
 
 ## Reference files
 
