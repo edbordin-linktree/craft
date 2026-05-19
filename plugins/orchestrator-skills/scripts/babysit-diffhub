@@ -149,7 +149,7 @@ while true; do
         if [[ -f "$SENTINEL" ]]; then
             record "human signal: ready-for-pr (sentinel at $SENTINEL; detected during API failure)"
             log "sentinel detected during snapshot failure — advancing to PR phase"
-            exit 0
+            cleanup 0
         fi
 
         if (( IDLE_TIMEOUT > 0 )); then
@@ -160,7 +160,7 @@ while true; do
                 record "idle timeout: ${mins} minute(s) without new comments — auto-advancing to PR phase"
                 log "idle timeout (${idle}s ≥ ${IDLE_TIMEOUT}s) during snapshot failure — touching $SENTINEL"
                 touch "$SENTINEL"
-                exit 0
+                cleanup 0
             fi
         fi
 
@@ -186,7 +186,7 @@ while true; do
         record "human signal: ready-for-pr (sentinel at $SENTINEL)"
         log "sentinel detected — advancing to PR phase"
         build_state "$snapshot" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
-        exit 0
+        cleanup 0
     fi
 
     # Idle-timeout check — touch the sentinel ourselves so the work-task
@@ -200,7 +200,7 @@ while true; do
             log "idle timeout (${idle}s ≥ ${IDLE_TIMEOUT}s) — touching $SENTINEL"
             touch "$SENTINEL"
             build_state "$snapshot" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
-            exit 0
+            cleanup 0
         fi
     fi
 
