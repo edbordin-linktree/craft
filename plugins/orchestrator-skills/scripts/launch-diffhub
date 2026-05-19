@@ -210,7 +210,10 @@ echo "$URL" > "$URL_FILE"
 # CMUX_WORKSPACE_ID env-var check, which agent subshells often miss.
 SURFACE=""
 if command -v cmux >/dev/null && cmux current-window >/dev/null 2>&1; then
-    CALLER_WORKSPACE="$(cmux identify 2>/dev/null | sed -n '/"caller"/,$s/.*"workspace_ref"[[:space:]]*:[[:space:]]*"\(workspace:[0-9][0-9]*\)".*/\1/p' | head -1)"
+    CALLER_WORKSPACE=""
+    if command -v jq >/dev/null 2>&1; then
+        CALLER_WORKSPACE="$(cmux identify 2>/dev/null | jq -r '.caller.workspace_ref // empty' 2>/dev/null | head -1)"
+    fi
     WORKSPACE_ARGS=()
     if [[ -n "$CALLER_WORKSPACE" ]]; then
         WORKSPACE_ARGS=(--workspace "$CALLER_WORKSPACE")
