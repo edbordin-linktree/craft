@@ -115,14 +115,14 @@ Track whether the PR is still a draft. Initially it will be `isDraft: true`. Tra
 ```bash
 while true; do
   sleep 120
-  gh pr view {number} --json state,isDraft,reviews,comments,mergedAt,statusCheckRollup,title
+  gh pr view {number} --json state,isDraft,reviews,reviewThreads,comments,mergedAt,statusCheckRollup,title
   # ... check conditions below and act on them, then continue the loop
 done
 ```
 
 **On each iteration, check these conditions in order:**
 
-1. Check PR status using `gh pr view {number} --json state,isDraft,reviews,comments,mergedAt,statusCheckRollup,title`
+1. Check PR status using `gh pr view {number} --json state,isDraft,reviews,reviewThreads,comments,mergedAt,statusCheckRollup,title`
 2. If the PR has been **merged** (`state: MERGED`):
    - **Exit the polling loop** — this is the ONLY successful exit condition
    - Proceed to Step 10 (Complete Task)
@@ -143,10 +143,11 @@ done
    - Commit and push with a descriptive conventional commit message
    - Append a work log entry noting the CI failure and your fix
    - **Continue polling** — do NOT exit the loop
-6. If there are **new review comments or PR comments** since last check:
+6. If there are **new unresolved review threads, review comments, or PR comments** since last check:
    - Read and understand the feedback
    - Make the requested changes in the code
    - Commit and push with a descriptive conventional commit message
+   - Resolve fixed inline review threads when possible
    - Append a work log entry noting the review feedback and your response
    - **Continue polling** — do NOT exit the loop
 7. **Continue polling** — sleep and check again. Do not print "waiting" messages or summaries on every iteration.
