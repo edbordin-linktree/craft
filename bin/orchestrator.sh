@@ -552,8 +552,12 @@ while true; do
     for dir in "${QUEUE_STATES[@]}"; do
         mkdir -p "$QUEUE_DIR/$dir"
     done
-    if ! plugin_sync_project_assets "$PROJECT_DIR" 2>/dev/null; then
+    plugin_sync_output=""
+    if ! plugin_sync_output=$(plugin_sync_project_assets "$PROJECT_DIR" 2>&1); then
         log "Plugin project asset sync failed; continuing poll"
+        while IFS= read -r plugin_sync_line; do
+            [[ -n "$plugin_sync_line" ]] && log "  $plugin_sync_line"
+        done <<< "$plugin_sync_output"
     fi
     _run_hook on_poll 2>/dev/null || true
 
