@@ -28,6 +28,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/queue.sh"
+source "$SCRIPT_DIR/lib/plugins.sh"
 source "$SCRIPT_DIR/lib/notify.sh"
 source "$SCRIPT_DIR/lib/providers.sh"
 # Multiplexer loaded after config (needs MULTIPLEXER variable)
@@ -83,7 +84,8 @@ PROJECT_NAME="$(basename "$PROJECT_DIR")"
 export PROJECT_DIR PROJECT_NAME
 
 # Validate project structure
-for dir in approved in-progress done blocked archive waiting diffhub-review; do
+plugin_queue_states_array "$PROJECT_DIR"
+for dir in "${QUEUE_STATES[@]}"; do
     mkdir -p "$QUEUE_DIR/$dir"
 done
 mkdir -p "$PROJECT_DIR/worktrees"   # legacy layout (pre-nested-task-dir tasks)
@@ -130,34 +132,28 @@ render_dashboard() {
     echo ""
 
     # Counts
-    local n_pending n_approved n_in_progress n_diffhub_review n_done n_blocked n_waiting
-    n_pending=$(count_tasks "$QUEUE_DIR/pending")
-    n_approved=$(count_tasks "$QUEUE_DIR/approved")
-    n_in_progress=$(count_tasks "$QUEUE_DIR/in-progress")
-    n_diffhub_review=$(count_tasks "$QUEUE_DIR/diffhub-review")
-    n_done=$(count_tasks "$QUEUE_DIR/done")
-    n_blocked=$(count_tasks "$QUEUE_DIR/blocked")
-    n_waiting=$(count_tasks "$QUEUE_DIR/waiting")
-
-    echo -e "  ${BLUE}○${NC} Pending: $n_pending  ${YELLOW}◐${NC} Approved: $n_approved  ${CYAN}●${NC} In Progress: $n_in_progress  ${YELLOW}◈${NC} Diffhub Review: $n_diffhub_review  ${YELLOW}◉${NC} Waiting: $n_waiting  ${GREEN}✓${NC} Done: $n_done  ${RED}✗${NC} Blocked: $n_blocked"
+    local counts_line="" state count icon color label
+    for state in "${QUEUE_STATES[@]}"; do
+        [[ "$state" == "archive" ]] && continue
+        count=$(count_tasks "$QUEUE_DIR/$state")
+        case "$state" in
+            pending)     icon="○"; color="$BLUE" ;;
+            approved)    icon="◐"; color="$YELLOW" ;;
+            in-progress) icon="●"; color="$CYAN" ;;
+            waiting)     icon="◉"; color="$YELLOW" ;;
+            done)        icon="✓"; color="$GREEN" ;;
+            blocked)     icon="✗"; color="$RED" ;;
+            *)           icon="◇"; color="$YELLOW" ;;
+        esac
+        label=$(queue_state_label "$state")
+        counts_line+="${color}${icon}${NC} ${label}: ${count}  "
+    done
+    echo -e "  ${counts_line%  }"
     echo ""
 
-    # Diffhub-review tasks — needs human review locally before PR opens
-    # TODO(dashboard): add a hotkey to create .orchestrator/ready-for-pr on
-    # behalf of the operator so they can advance the task from here. For now
-    # the operator either touches the sentinel file directly or tells the
-    # agent in its pane.
-    if [[ "$n_diffhub_review" -gt 0 ]]; then
-        echo -e "${BOLD}${YELLOW}  ◈ READY FOR LOCAL REVIEW (diffhub):${NC}"
-        for task_file in $(list_tasks "$QUEUE_DIR/diffhub-review"); do
-            local tid
-            tid=$(task_id "$task_file")
-            echo -e "    ${YELLOW}◈${NC} $tid  ${BOLD}touch worktrees/*-$tid/.orchestrator/ready-for-pr to advance${NC}"
-        done
-        echo ""
-    fi
-
     # Waiting tasks — needs operator attention (PR review)
+    local n_waiting
+    n_waiting=$(count_tasks "$QUEUE_DIR/waiting")
     if [[ "$n_waiting" -gt 0 ]]; then
         echo -e "${BOLD}${YELLOW}  ◉ WAITING FOR REVIEW:${NC}"
         for task_file in $(list_tasks "$QUEUE_DIR/waiting"); do
@@ -173,7 +169,26 @@ render_dashboard() {
         echo ""
     fi
 
+    # Plugin-declared intermediate queue states.
+    for state in "${QUEUE_STATES[@]}"; do
+        case "$state" in
+            pending|approved|in-progress|waiting|done|blocked|archive) continue ;;
+        esac
+        count=$(count_tasks "$QUEUE_DIR/$state")
+        [[ "$count" -gt 0 ]] || continue
+        label=$(queue_state_label "$state")
+        echo -e "${BOLD}${YELLOW}  ◇ ${label}:${NC}"
+        for task_file in $(list_tasks "$QUEUE_DIR/$state"); do
+            local tid
+            tid=$(task_id "$task_file")
+            echo -e "    ${YELLOW}◇${NC} $tid"
+        done
+        echo ""
+    done
+
     # Blocked tasks (important — surface these prominently)
+    local n_blocked
+    n_blocked=$(count_tasks "$QUEUE_DIR/blocked")
     if [[ "$n_blocked" -gt 0 ]]; then
         echo -e "${BOLD}${RED}  ⚠ BLOCKED TASKS:${NC}"
         for task_file in $(list_tasks "$QUEUE_DIR/blocked"); do
@@ -195,6 +210,8 @@ render_dashboard() {
     fi
 
     # Approved tasks queued
+    local n_approved
+    n_approved=$(count_tasks "$QUEUE_DIR/approved")
     if [[ "$n_approved" -gt 0 ]]; then
         echo -e "${BOLD}  Queue (approved):${NC}"
         for task_file in $(list_tasks "$QUEUE_DIR/approved"); do
@@ -211,6 +228,8 @@ render_dashboard() {
     fi
 
     # Recent done
+    local n_done
+    n_done=$(count_tasks "$QUEUE_DIR/done")
     if [[ "$n_done" -gt 0 ]]; then
         echo -e "${BOLD}  Recently Completed:${NC}"
         for task_file in $(list_tasks "$QUEUE_DIR/done" | tail -5); do
@@ -242,8 +261,6 @@ run_task() {
     # Move to in-progress and notify plugins
     local new_file
     new_file=$(move_task "$task_file" "$QUEUE_DIR/in-progress" "in-progress")
-    notify_started "$tid"
-
     # Build the prompt file
     # Read the skill template and substitute $ARGUMENTS
     # Prepend a note that the task has already been moved to in-progress by the orchestrator
@@ -269,6 +286,7 @@ run_task() {
     # placeholder dir itself never collides with `git worktree add`.
     local task_dir="$PROJECT_DIR/tasks/$tid"
     mkdir -p "$task_dir"
+    notify_started "$tid" "$new_file"
 
     # Per-task session (cmux: own workspace at task_dir; tmux: project session).
     # Pull a human-readable title from the task file so the cmux sidebar shows
@@ -350,7 +368,7 @@ check_active_tasks() {
                 fi
 
                 kill_task_pane "$session" "$tid"
-                notify_blocked "$tid" "Agent timed out after ${elapsed}s"
+                notify_blocked "$tid" "Agent timed out after ${elapsed}s" "$task_file"
 
                 unset ACTIVE_TASKS["$tid"]
                 unset TASK_SESSIONS["$tid"]
@@ -368,15 +386,16 @@ check_active_tasks() {
             unset TASK_START["$tid"]
 
             # Check where the task ended up
-            if find_task_in "$QUEUE_DIR/done" "$tid" > /dev/null; then
+            local ended_file
+            if ended_file=$(find_task_in "$QUEUE_DIR/done" "$tid" 2>/dev/null); then
                 log "Task $tid → done"
-                notify_done "$tid" ""
-            elif find_task_in "$QUEUE_DIR/blocked" "$tid" > /dev/null; then
+                notify_done "$tid" "" "$ended_file"
+            elif ended_file=$(find_task_in "$QUEUE_DIR/blocked" "$tid" 2>/dev/null); then
                 log "Task $tid → blocked"
-                notify_blocked "$tid" "Task moved to blocked"
-            elif find_task_in "$QUEUE_DIR/waiting" "$tid" > /dev/null; then
+                notify_blocked "$tid" "Task moved to blocked" "$ended_file"
+            elif ended_file=$(find_task_in "$QUEUE_DIR/waiting" "$tid" 2>/dev/null); then
                 log "Task $tid → waiting"
-                notify_waiting "$tid"
+                notify_waiting "$tid" "$ended_file"
             else
                 log "Task $tid session ended but task not found in done/blocked/waiting"
             fi
@@ -391,16 +410,21 @@ check_active_tasks() {
 check_milestone_completion() {
     # Get all milestones that have tasks
     local milestones
-    milestones=$(for f in "$QUEUE_DIR"/done/*.md "$QUEUE_DIR"/approved/*.md "$QUEUE_DIR"/in-progress/*.md "$QUEUE_DIR"/pending/*.md; do
-        [[ -f "$f" ]] && task_milestone "$f"
-    done | sort -u)
+    milestones=$(
+        for dir in "${QUEUE_STATES[@]}"; do
+            for f in "$QUEUE_DIR/$dir"/*.md; do
+                [[ -f "$f" ]] && task_milestone "$f"
+            done
+        done | sort -u
+    )
 
     for milestone in $milestones; do
         [[ -z "$milestone" ]] && continue
 
         # Check if all tasks for this milestone are done
         local all_done=true
-        for dir in pending approved in-progress blocked; do
+        for dir in "${QUEUE_STATES[@]}"; do
+            [[ "$dir" == "done" || "$dir" == "archive" ]] && continue
             for f in "$QUEUE_DIR/$dir"/*.md; do
                 [[ -f "$f" ]] || continue
                 if [[ "$(task_milestone "$f")" == "$milestone" ]]; then
@@ -440,7 +464,7 @@ check_waiting_tasks() {
         [[ -z "$tid" ]] && continue
         if [[ ! -f "$marker_dir/$tid" ]]; then
             touch "$marker_dir/$tid"
-            notify_waiting "$tid"
+            notify_waiting "$tid" "$task_file"
             log "Task $tid is waiting for review"
         fi
     done
@@ -524,6 +548,13 @@ poll_count=0
 
 while true; do
     # Run plugin poll hooks (e.g. linear-sync inbound)
+    plugin_queue_states_array "$PROJECT_DIR"
+    for dir in "${QUEUE_STATES[@]}"; do
+        mkdir -p "$QUEUE_DIR/$dir"
+    done
+    if ! plugin_sync_project_assets "$PROJECT_DIR" 2>/dev/null; then
+        log "Plugin project asset sync failed; continuing poll"
+    fi
     _run_hook on_poll 2>/dev/null || true
 
     # Check finished tasks

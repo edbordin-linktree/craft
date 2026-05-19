@@ -9,9 +9,21 @@
 _run_hook() {
     local notify_dir hook_runner
     notify_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # $CRAFT_ROOT/bin/lib
-    hook_runner="${notify_dir%/lib}/run-hook.sh"                  # $CRAFT_ROOT/bin/run-hook.sh
+    hook_runner="${CRAFT_HOOK_RUNNER:-${notify_dir%/lib}/run-hook.sh}" # $CRAFT_ROOT/bin/run-hook.sh
     if [[ -x "$hook_runner" ]]; then
-        "$hook_runner" "$@" --project-dir "$PROJECT_DIR" 2>/dev/null || true
+        local args=("$@")
+        local has_project_dir=false
+        local arg
+        for arg in "${args[@]}"; do
+            if [[ "$arg" == "--project-dir" ]]; then
+                has_project_dir=true
+                break
+            fi
+        done
+        if ! $has_project_dir && [[ -n "${PROJECT_DIR:-}" ]]; then
+            args+=(--project-dir "$PROJECT_DIR")
+        fi
+        "$hook_runner" "${args[@]}" 2>/dev/null || true
     fi
 }
 
@@ -28,31 +40,82 @@ _tmux_bell() {
     fi
 }
 
+_find_task_file_for_hook() {
+    local task_id="$1"
+    [[ -n "${QUEUE_DIR:-}" ]] || return 1
+
+    local states=()
+    if declare -p QUEUE_STATES >/dev/null 2>&1; then
+        states=("${QUEUE_STATES[@]}")
+    else
+        states=(pending approved in-progress waiting done blocked archive)
+    fi
+
+    local state task_file
+    for state in "${states[@]}"; do
+        task_file="$QUEUE_DIR/$state/$task_id.md"
+        if [[ -f "$task_file" ]]; then
+            printf '%s\n' "$task_file"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_build_task_hook_args() {
+    local task_id="$1"
+    local task_file="${2:-}"
+    local pr_url="${3:-}"
+
+    if [[ -z "$task_file" ]]; then
+        task_file="$(_find_task_file_for_hook "$task_id" 2>/dev/null || true)"
+    fi
+    if [[ -z "$pr_url" && -n "$task_file" && -f "$task_file" ]]; then
+        pr_url="$(task_field "$task_file" "pr")"
+    fi
+
+    TASK_HOOK_ARGS=(--project-dir "$PROJECT_DIR" --task-id "$task_id")
+    if [[ -n "$task_file" ]]; then
+        TASK_HOOK_ARGS+=(--task-file "$task_file")
+    fi
+    local task_dir="$PROJECT_DIR/tasks/$task_id"
+    if [[ -d "$task_dir" ]]; then
+        TASK_HOOK_ARGS+=(--task-dir "$task_dir")
+    fi
+    if [[ -n "$pr_url" ]]; then
+        TASK_HOOK_ARGS+=(--pr-url "$pr_url")
+    fi
+}
+
 # Notify that a task has started
 notify_started() {
-    local task_id="$1"
-    _run_hook on_started --task-id "$task_id"
+    local task_id="$1" task_file="${2:-}"
+    _build_task_hook_args "$task_id" "$task_file"
+    _run_hook on_started "${TASK_HOOK_ARGS[@]}"
 }
 
 # Notify about a blocked task
 notify_blocked() {
-    local task_id="$1" reason="$2"
+    local task_id="$1" reason="$2" task_file="${3:-}"
     _tmux_bell
-    _run_hook on_blocked --task-id "$task_id" --reason "$reason"
+    _build_task_hook_args "$task_id" "$task_file"
+    _run_hook on_blocked "${TASK_HOOK_ARGS[@]}" --reason "$reason"
 }
 
 # Notify about a completed task
 notify_done() {
-    local task_id="$1" pr_url="$2"
+    local task_id="$1" pr_url="${2:-}" task_file="${3:-}"
     _tmux_bell
-    _run_hook on_done --task-id "$task_id" --pr-url "$pr_url"
+    _build_task_hook_args "$task_id" "$task_file" "$pr_url"
+    _run_hook on_done "${TASK_HOOK_ARGS[@]}"
 }
 
 # Notify about a task waiting for review
 notify_waiting() {
-    local task_id="$1"
+    local task_id="$1" task_file="${2:-}"
     _tmux_bell
-    _run_hook on_waiting --task-id "$task_id"
+    _build_task_hook_args "$task_id" "$task_file"
+    _run_hook on_waiting "${TASK_HOOK_ARGS[@]}"
 }
 
 # Notify about milestone completion

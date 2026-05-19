@@ -28,6 +28,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --project-dir)
             PROJECT_DIR_ARG="$2"
+            FILTERED_ARGS+=("$1" "$2")
             shift 2
             ;;
         *)

@@ -37,6 +37,18 @@ task_type() {
     task_field "$1" "type"
 }
 
+# Human label for a queue state directory name.
+queue_state_label() {
+    local state="$1"
+    local word label=""
+    state="${state//-/ }"
+    state="${state//_/ }"
+    for word in $state; do
+        label+="${word^} "
+    done
+    printf '%s' "${label% }"
+}
+
 # Derive a short, human-readable title for sidebar display. Priority:
 #   1. Explicit `title:` field in frontmatter
 #   2. First non-blank, non-bullet line of the `## Summary` section
