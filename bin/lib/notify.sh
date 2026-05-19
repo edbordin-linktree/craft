@@ -40,36 +40,11 @@ _tmux_bell() {
     fi
 }
 
-_find_task_file_for_hook() {
-    local task_id="$1"
-    [[ -n "${QUEUE_DIR:-}" ]] || return 1
-
-    local states=()
-    if declare -p QUEUE_STATES >/dev/null 2>&1; then
-        states=("${QUEUE_STATES[@]}")
-    else
-        states=(pending approved in-progress waiting done blocked archive)
-    fi
-
-    local state task_file
-    for state in "${states[@]}"; do
-        task_file="$QUEUE_DIR/$state/$task_id.md"
-        if [[ -f "$task_file" ]]; then
-            printf '%s\n' "$task_file"
-            return 0
-        fi
-    done
-    return 1
-}
-
 _build_task_hook_args() {
     local task_id="$1"
     local task_file="${2:-}"
     local pr_url="${3:-}"
 
-    if [[ -z "$task_file" ]]; then
-        task_file="$(_find_task_file_for_hook "$task_id" 2>/dev/null || true)"
-    fi
     if [[ -z "$pr_url" && -n "$task_file" && -f "$task_file" ]]; then
         pr_url="$(task_field "$task_file" "pr")"
     fi

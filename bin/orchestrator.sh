@@ -84,10 +84,11 @@ PROJECT_NAME="$(basename "$PROJECT_DIR")"
 export PROJECT_DIR PROJECT_NAME
 
 # Validate project structure
-plugin_queue_states_array "$PROJECT_DIR"
+mapfile -t QUEUE_STATES < <(plugin_queue_states "$PROJECT_DIR")
 for dir in "${QUEUE_STATES[@]}"; do
     mkdir -p "$QUEUE_DIR/$dir"
 done
+QUEUE_STATES_CONFIG_MTIME="$(date -r "$PROJECT_DIR/craft.conf" '+%s' 2>/dev/null || echo 0)"
 mkdir -p "$PROJECT_DIR/worktrees"   # legacy layout (pre-nested-task-dir tasks)
 mkdir -p "$PROJECT_DIR/tasks"        # new layout: per-task dir holds worktrees + state
 mkdir -p "$PROJECT_DIR/.state/waiting"
@@ -133,9 +134,11 @@ render_dashboard() {
 
     # Counts
     local counts_line="" state count icon color label
+    local -A queue_counts=()
     for state in "${QUEUE_STATES[@]}"; do
         [[ "$state" == "archive" ]] && continue
         count=$(count_tasks "$QUEUE_DIR/$state")
+        queue_counts["$state"]="$count"
         case "$state" in
             pending)     icon="○"; color="$BLUE" ;;
             approved)    icon="◐"; color="$YELLOW" ;;
@@ -152,8 +155,7 @@ render_dashboard() {
     echo ""
 
     # Waiting tasks — needs operator attention (PR review)
-    local n_waiting
-    n_waiting=$(count_tasks "$QUEUE_DIR/waiting")
+    local n_waiting="${queue_counts[waiting]:-0}"
     if [[ "$n_waiting" -gt 0 ]]; then
         echo -e "${BOLD}${YELLOW}  ◉ WAITING FOR REVIEW:${NC}"
         for task_file in $(list_tasks "$QUEUE_DIR/waiting"); do
@@ -174,7 +176,7 @@ render_dashboard() {
         case "$state" in
             pending|approved|in-progress|waiting|done|blocked|archive) continue ;;
         esac
-        count=$(count_tasks "$QUEUE_DIR/$state")
+        count="${queue_counts[$state]:-0}"
         [[ "$count" -gt 0 ]] || continue
         label=$(queue_state_label "$state")
         echo -e "${BOLD}${YELLOW}  ◇ ${label}:${NC}"
@@ -187,8 +189,7 @@ render_dashboard() {
     done
 
     # Blocked tasks (important — surface these prominently)
-    local n_blocked
-    n_blocked=$(count_tasks "$QUEUE_DIR/blocked")
+    local n_blocked="${queue_counts[blocked]:-0}"
     if [[ "$n_blocked" -gt 0 ]]; then
         echo -e "${BOLD}${RED}  ⚠ BLOCKED TASKS:${NC}"
         for task_file in $(list_tasks "$QUEUE_DIR/blocked"); do
@@ -210,8 +211,7 @@ render_dashboard() {
     fi
 
     # Approved tasks queued
-    local n_approved
-    n_approved=$(count_tasks "$QUEUE_DIR/approved")
+    local n_approved="${queue_counts[approved]:-0}"
     if [[ "$n_approved" -gt 0 ]]; then
         echo -e "${BOLD}  Queue (approved):${NC}"
         for task_file in $(list_tasks "$QUEUE_DIR/approved"); do
@@ -228,8 +228,7 @@ render_dashboard() {
     fi
 
     # Recent done
-    local n_done
-    n_done=$(count_tasks "$QUEUE_DIR/done")
+    local n_done="${queue_counts[done]:-0}"
     if [[ "$n_done" -gt 0 ]]; then
         echo -e "${BOLD}  Recently Completed:${NC}"
         for task_file in $(list_tasks "$QUEUE_DIR/done" | tail -5); do
@@ -548,10 +547,14 @@ poll_count=0
 
 while true; do
     # Run plugin poll hooks (e.g. linear-sync inbound)
-    plugin_queue_states_array "$PROJECT_DIR"
-    for dir in "${QUEUE_STATES[@]}"; do
-        mkdir -p "$QUEUE_DIR/$dir"
-    done
+    queue_states_config_mtime="$(date -r "$PROJECT_DIR/craft.conf" '+%s' 2>/dev/null || echo 0)"
+    if [[ "$queue_states_config_mtime" != "$QUEUE_STATES_CONFIG_MTIME" ]]; then
+        mapfile -t QUEUE_STATES < <(plugin_queue_states "$PROJECT_DIR")
+        for dir in "${QUEUE_STATES[@]}"; do
+            mkdir -p "$QUEUE_DIR/$dir"
+        done
+        QUEUE_STATES_CONFIG_MTIME="$queue_states_config_mtime"
+    fi
     plugin_sync_output=""
     if ! plugin_sync_output=$(plugin_sync_project_assets "$PROJECT_DIR" 2>&1); then
         log "Plugin project asset sync failed; continuing poll"

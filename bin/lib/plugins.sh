@@ -8,13 +8,6 @@ fi
 
 BASE_QUEUE_STATES=(pending approved in-progress waiting done blocked archive)
 
-_plugin_trim() {
-    local value="$1"
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    printf '%s' "$value"
-}
-
 plugin_enabled_plugins() {
     local project_dir="$1"
     local config_file="$project_dir/craft.conf"
@@ -26,7 +19,7 @@ plugin_enabled_plugins() {
             printf '%s\n' "${PLUGINS:-}"
         )
     fi | tr ',' '\n' | while IFS= read -r plugin; do
-        plugin="$(_plugin_trim "$plugin")"
+        plugin="$(echo "$plugin" | xargs)"
         [[ -n "$plugin" ]] && printf '%s\n' "$plugin"
     done
 }
@@ -63,7 +56,7 @@ plugin_queue_states() {
         states="$(_plugin_conf_value "$plugin_dir" QUEUE_STATES)"
         [[ -n "$states" ]] || continue
         while IFS= read -r raw_state; do
-            state="$(_plugin_trim "$raw_state")"
+            state="$(echo "$raw_state" | xargs)"
             [[ -n "$state" ]] || continue
             if ! _plugin_valid_queue_state "$state"; then
                 echo "[plugins] Warning: plugin '$plugin' ignored invalid QUEUE_STATES entry '$state'" >&2
@@ -75,11 +68,6 @@ plugin_queue_states() {
             fi
         done < <(printf '%s\n' "$states" | tr ',' '\n')
     done < <(plugin_enabled_plugins "$project_dir")
-}
-
-plugin_queue_states_array() {
-    local project_dir="$1"
-    mapfile -t QUEUE_STATES < <(plugin_queue_states "$project_dir")
 }
 
 _plugin_sync_one_asset() {
