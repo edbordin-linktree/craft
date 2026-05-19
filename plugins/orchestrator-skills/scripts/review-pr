@@ -220,41 +220,48 @@ SUMMARY="$(echo "$JSON" | jq -r '.summary // ""')"
 log "wrote markdown summary to $OUTPUT"
 
 # --- import findings as diffhub inline comments through the REST API ---
+DIFFHUB_IMPORT_STATUS="skipped"
 if [[ "$FINDINGS_COUNT" -gt 0 ]]; then
-    [[ -n "$DH_URL" ]] || {
-        echo "review-pr: diffhub URL unavailable; launch diffhub first or pass --diffhub-url" >&2
-        exit 1
-    }
-    COMMENTS_URL="${DH_URL%/}/api/comments"
-    NEW_COMMENTS="$(echo "$JSON" | jq --arg source "$TAG" '
-        [.findings[] | {
-            body: "**\(.severity)** [\(.category)] \($source): \(.message)",
-            createdBy: $source,
-            externalId: ($source + ":" + .file + ":" + (.line | tostring) + ":" + .severity + ":" + .category + ":" + .message),
-            file: .file,
-            lineNumber: .line,
-            side: "right",
-            tag: (if .severity == "critical" or .severity == "major" then "[must-fix]"
-                  elif .severity == "nitpick" then "[nit]"
-                  elif .severity == "minor" then "[suggestion]"
-                  else "[suggestion]" end),
-        }]
-    ')"
-    IMPORT_RESPONSE="$(jq -n --argjson comments "$NEW_COMMENTS" '{comments: $comments}' |
-        curl -fsS -X POST \
-            -H 'Content-Type: application/json' \
-            --data-binary @- \
-            "$COMMENTS_URL")" || {
-                echo "review-pr: failed to import comments via $COMMENTS_URL" >&2
-                exit 1
-            }
-    IMPORT_CREATED="$(echo "$IMPORT_RESPONSE" | jq -r '.created // 0')"
-    IMPORT_EXISTING="$(echo "$IMPORT_RESPONSE" | jq -r '.existing // 0')"
-    log "imported comments through $COMMENTS_URL (created=$IMPORT_CREATED existing=$IMPORT_EXISTING)"
+    if [[ -z "$DH_URL" ]]; then
+        log "WARNING: diffhub URL unavailable; findings remain in $OUTPUT"
+        printf -- '- automated-review import failed: diffhub URL unavailable; read %s for %s finding(s)\n' "$OUTPUT" "$FINDINGS_COUNT" >> "$WORKTREE/.orchestrator/diffhub-pending.md" 2>/dev/null || true
+        DIFFHUB_IMPORT_STATUS="failed:no-url"
+    else
+        COMMENTS_URL="${DH_URL%/}/api/comments"
+        NEW_COMMENTS="$(echo "$JSON" | jq --arg source "$TAG" '
+            [.findings[] | {
+                body: "**\(.severity)** [\(.category)] \($source): \(.message)",
+                createdBy: $source,
+                externalId: ($source + ":" + .file + ":" + (.line | tostring) + ":" + .severity + ":" + .category + ":" + .message),
+                file: .file,
+                lineNumber: .line,
+                side: "right",
+                tag: (if .severity == "critical" or .severity == "major" then "[must-fix]"
+                      elif .severity == "nitpick" then "[nit]"
+                      elif .severity == "minor" then "[suggestion]"
+                      else "[suggestion]" end),
+            }]
+        ')"
+        if IMPORT_RESPONSE="$(jq -n --argjson comments "$NEW_COMMENTS" '{comments: $comments}' |
+            curl -fsS -X POST \
+                -H 'Content-Type: application/json' \
+                --data-binary @- \
+                "$COMMENTS_URL")"; then
+            IMPORT_CREATED="$(echo "$IMPORT_RESPONSE" | jq -r '.created // 0')"
+            IMPORT_EXISTING="$(echo "$IMPORT_RESPONSE" | jq -r '.existing // 0')"
+            DIFFHUB_IMPORT_STATUS="created=$IMPORT_CREATED existing=$IMPORT_EXISTING"
+            log "imported comments through $COMMENTS_URL ($DIFFHUB_IMPORT_STATUS)"
+        else
+            log "WARNING: failed to import comments via $COMMENTS_URL; findings remain in $OUTPUT"
+            printf -- '- automated-review import failed: read %s for %s finding(s); diffhub_url=%s\n' "$OUTPUT" "$FINDINGS_COUNT" "$DH_URL" >> "$WORKTREE/.orchestrator/diffhub-pending.md" 2>/dev/null || true
+            DIFFHUB_IMPORT_STATUS="failed:post"
+        fi
+    fi
 fi
 
 # --- final stdout summary ---
 printf 'review.findings=%s\n' "$FINDINGS_COUNT"
 printf 'review.output=%s\n' "$OUTPUT"
 printf 'review.diffhub_url=%s\n' "$DH_URL"
+printf 'review.diffhub_import=%s\n' "$DIFFHUB_IMPORT_STATUS"
 printf 'review.tag=%s\n' "$TAG"
