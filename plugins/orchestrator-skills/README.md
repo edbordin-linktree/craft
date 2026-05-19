@@ -41,8 +41,8 @@ Slash commands stay `.claude/`-only (codex has no equivalent feature).
 
 Under `plugins/orchestrator-skills/scripts/`:
 
-- **`review-pr`** — spawns the cross-model reviewer headless. Writes findings to `.git/diffhub-comments.json` (inline, tagged `automated-review:<reviewer>-<model>`) and `.orchestrator/handoff/review.md`. Pluggable: `--reviewer claude|codex|cursor|gemini` (only claude wired up today; TODOs at top for the others + parallel reviewers).
-- **`babysit-diffhub`** — fast local watcher for the diffhub-review phase. Polls `.git/diffhub-comments.json` + the `.orchestrator/ready-for-pr` sentinel; writes transitions to `.orchestrator/diffhub-pending.md`. 2-hour idle timeout auto-touches the sentinel.
+- **`review-pr`** — spawns the cross-model reviewer headless. Writes findings to `.orchestrator/handoff/review.md` and imports inline comments through diffhub's `/api/comments` REST API, tagged in the body as `automated-review:<reviewer>-<model>`. Pluggable: `--reviewer claude|codex|cursor|gemini` (only claude wired up today; TODOs at top for the others + parallel reviewers).
+- **`babysit-diffhub`** — fast local watcher for the diffhub-review phase. Polls diffhub's read-only `/api/comments` endpoint + the `.orchestrator/ready-for-pr` sentinel; writes transitions to `.orchestrator/diffhub-pending.md`. 2-hour idle timeout auto-touches the sentinel.
 - **`watch-pr`** — GitHub PR watcher used by `babysit-pr`. Single GraphQL fetch per poll; captures conflicts, CI failures, new review threads + inline comments, base advances.
 - **`delegate-to-devin`** — Bash helper that round-trips Devin REST API (create session, poll, render `structured_output` to file).
 - **`send-agent`** — generic "send a message to a named agent" dispatcher (spawn fresh, resume existing, or send to live pane). Used in the archived multi-agent flow; retained because `delegate-to-devin` / `architect-delegation` patterns can still benefit from it.
