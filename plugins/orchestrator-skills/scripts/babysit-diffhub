@@ -143,6 +143,7 @@ fi
 
 prior_state="$(read_state)"
 last_activity=$(date +%s)
+last_api_success=$(date +%s)
 
 while true; do
     if ! snapshot="$(fetch_snapshot)"; then
@@ -158,8 +159,10 @@ while true; do
             idle=$(( now - last_activity ))
             if (( idle >= IDLE_TIMEOUT )); then
                 mins=$(( idle / 60 ))
-                record "api-failure idle timeout: ${mins} minute(s) without new comment activity (diffhub API currently unreachable) — auto-advancing to PR phase"
-                log "idle timeout (${idle}s ≥ ${IDLE_TIMEOUT}s) during snapshot failure — touching $SENTINEL"
+                api_failure=$(( now - last_api_success ))
+                api_failure_mins=$(( api_failure / 60 ))
+                record "api-failure idle timeout: ${mins} minute(s) without new comment activity (diffhub API unreachable for ${api_failure_mins} minute(s)) — auto-advancing to PR phase"
+                log "idle timeout (${idle}s ≥ ${IDLE_TIMEOUT}s) during snapshot failure (api_failure=${api_failure}s) — touching $SENTINEL"
                 touch "$SENTINEL"
                 build_state "$prior_state" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
                 cleanup 0
@@ -170,6 +173,7 @@ while true; do
         sleep 10
         continue
     fi
+    last_api_success=$(date +%s)
 
     # New comments since last poll.
     transitions="$(diff_snapshot "$prior_state" "$snapshot" 2>/dev/null || true)"
