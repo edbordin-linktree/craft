@@ -269,7 +269,7 @@ if [[ "$FINDINGS_COUNT" -gt 0 ]]; then
             | $finding | {
                 body: "**\(.severity)** [\(.category)] \($source): \(.message)",
                 createdBy: $source,
-                externalId: ($key + if $same_count > 1 then ":duplicate-\($same_before)" else "" end),
+                externalId: ($key + if $same_count > 1 and $same_before > 0 then ":duplicate-\($same_before)" else "" end),
                 file: .file,
                 lineNumber: .line,
                 side: "right",
