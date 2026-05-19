@@ -119,7 +119,7 @@ diff_snapshot() {
     jq -n -r --argjson prior "$prior" --argjson cur "$cur" '
         ($cur.ids - $prior.ids) as $new_ids
         | $new_ids[] | . as $id
-        | $cur.by_id[$id]
+        | $cur.by_id[($id | tostring)]
         | (if (.tag // "") == "" then "human" else .tag end) as $author
         | "\($author) comment at \(.file):\(.lineNumber): \(.body | (if length > 200 then .[0:197] + "..." else . end))"
     '
