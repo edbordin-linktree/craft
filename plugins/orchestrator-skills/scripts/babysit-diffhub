@@ -158,7 +158,7 @@ while true; do
             idle=$(( now - last_activity ))
             if (( idle >= IDLE_TIMEOUT )); then
                 mins=$(( idle / 60 ))
-                record "api-failure idle timeout: ${mins} minute(s) without successful diffhub API contact — auto-advancing to PR phase"
+                record "api-failure idle timeout: ${mins} minute(s) without new comment activity (diffhub API currently unreachable) — auto-advancing to PR phase"
                 log "idle timeout (${idle}s ≥ ${IDLE_TIMEOUT}s) during snapshot failure — touching $SENTINEL"
                 touch "$SENTINEL"
                 build_state "$prior_state" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
