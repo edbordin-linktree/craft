@@ -127,16 +127,12 @@ printf '{"body":"two"}\n' > "$payload2"
 )
 assert_eq "duplicate wake suppressed" "1" "$(jq '.sent | length' "$FAKE_CMUX_STATE")"
 assert_eq "wake is queue summary" "CRAFT_EVENTS task=task-123 pending=1 counts=pr_review:1 queue=.orchestrator/events/pending" "$(jq -r '.sent[0].text' "$FAKE_CMUX_STATE")"
-counts="$("$REPO_ROOT/bin/craft" event counts task-123 2>/dev/null || true)"
-(
-    cd "$PROJECT_DIR" || exit 1
-    counts="$("$REPO_ROOT/bin/craft" event counts task-123)"
-    assert_eq "event counts" "pending=2 counts=ci_status:1,pr_review:1" "$counts"
-    taken="$("$REPO_ROOT/bin/craft" event take task-123 --type pr_review --limit 1)"
-    assert_eq "take returns one" "1" "$(jq 'length' <<< "$taken")"
-    counts_after="$("$REPO_ROOT/bin/craft" event counts task-123)"
-    assert_eq "take deletes" "pending=1 counts=ci_status:1" "$counts_after"
-)
+counts="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event counts task-123)"
+assert_eq "event counts" "pending=2 counts=ci_status:1,pr_review:1" "$counts"
+taken="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event take task-123 --type pr_review --limit 1)"
+assert_eq "take returns one" "1" "$(jq 'length' <<< "$taken")"
+counts_after="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event counts task-123)"
+assert_eq "take deletes" "pending=1 counts=ci_status:1" "$counts_after"
 
 echo ""
 echo "surface registry and fake cmux"

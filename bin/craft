@@ -135,7 +135,14 @@ cmd_task() {
                     runtime_stage_set "$project_dir" "$task_id" blocked "$reason" blocked >/dev/null
                     ;;
                 complete)
-                    local task_id="${1:?task id required}" reason="${2:-completed}"
+                    local task_id="${1:?task id required}" reason="completed"
+                    shift || true
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --reason) reason="${2:-}"; shift 2 ;;
+                            *) echo "craft task stage complete: unknown arg: $1" >&2; exit 2 ;;
+                        esac
+                    done
                     runtime_stage_set "$project_dir" "$task_id" complete "$reason" complete >/dev/null
                     ;;
                 *)
