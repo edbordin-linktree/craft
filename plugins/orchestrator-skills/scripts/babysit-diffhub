@@ -145,7 +145,29 @@ prior_state="$(read_state)"
 last_activity=$(date +%s)
 
 while true; do
-    snapshot="$(fetch_snapshot)" || { log "snapshot fetch failed; retry in 10s"; sleep 10; continue; }
+    if ! snapshot="$(fetch_snapshot)"; then
+        if [[ -f "$SENTINEL" ]]; then
+            record "human signal: ready-for-pr (sentinel at $SENTINEL; detected during API failure)"
+            log "sentinel detected during snapshot failure — advancing to PR phase"
+            exit 0
+        fi
+
+        if (( IDLE_TIMEOUT > 0 )); then
+            now=$(date +%s)
+            idle=$(( now - last_activity ))
+            if (( idle >= IDLE_TIMEOUT )); then
+                mins=$(( idle / 60 ))
+                record "idle timeout: ${mins} minute(s) without new comments — auto-advancing to PR phase"
+                log "idle timeout (${idle}s ≥ ${IDLE_TIMEOUT}s) during snapshot failure — touching $SENTINEL"
+                touch "$SENTINEL"
+                exit 0
+            fi
+        fi
+
+        log "snapshot fetch failed; retry in 10s"
+        sleep 10
+        continue
+    fi
 
     # New comments since last poll.
     transitions="$(diff_snapshot "$prior_state" "$snapshot" 2>/dev/null || true)"
