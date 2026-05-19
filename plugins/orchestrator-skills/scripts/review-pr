@@ -243,7 +243,7 @@ if [[ "$FINDINGS_COUNT" -gt 0 ]]; then
             }]
         ')"
         if IMPORT_RESPONSE="$(jq -n --argjson comments "$NEW_COMMENTS" '{comments: $comments}' |
-            curl -fsS -X POST \
+            curl -fsS --connect-timeout 5 --max-time 30 -X POST \
                 -H 'Content-Type: application/json' \
                 --data-binary @- \
                 "$COMMENTS_URL")"; then
