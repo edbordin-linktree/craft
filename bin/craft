@@ -29,6 +29,9 @@ CRAFT_ROOT="${CRAFT_ROOT:-$(cd "$(dirname "$(_resolve_script "$0")")/.." && pwd)
 CRAFT_PROJECTS="${CRAFT_PROJECTS:-$CRAFT_ROOT/projects}"
 export CRAFT_ROOT CRAFT_PROJECTS
 
+# shellcheck source=bin/lib/plugins.sh
+source "$CRAFT_ROOT/bin/lib/plugins.sh"
+
 # Version
 if [[ -f "$CRAFT_ROOT/VERSION" ]]; then
     CRAFT_VERSION="$(cat "$CRAFT_ROOT/VERSION")"
@@ -225,9 +228,9 @@ HELP
             fi
             # Plugins are a shared library at $CRAFT_ROOT/plugins/. Enabling
             # the plugin = adding its name to PLUGINS= in this project's
-            # craft.conf. No copying, no symlinking.
+            # craft.conf, firing on_install, then syncing any plugin-owned
+            # project assets.
             _plugins_enable "$project_dir/craft.conf" "$plugin_name"
-            echo "Enabled $plugin_name in $project_name/craft.conf."
             # Fire the plugin's on_install hook if defined.
             if [[ -f "$plugin_dir/hooks.sh" ]]; then
                 (
@@ -240,6 +243,12 @@ HELP
                     fi
                 )
             fi
+            if ! plugin_sync_project_assets "$project_dir" "$plugin_name"; then
+                echo "Enabled $plugin_name in $project_name/craft.conf, but project asset sync failed." >&2
+                echo "Resolve the conflict above and run: craft plugin check $project_name" >&2
+                exit 1
+            fi
+            echo "Enabled $plugin_name in $project_name/craft.conf."
             local conf_keys
             conf_keys=$(grep '^[A-Z_]*=""' "$plugin_dir/plugin.conf" 2>/dev/null | sed 's/=.*//')
             if [[ -n "$conf_keys" ]]; then
@@ -311,6 +320,11 @@ HELP
             for plugin in "${plugin_list[@]}"; do
                 plugin="$(echo "$plugin" | xargs)"
                 local hooks_file="$CRAFT_ROOT/plugins/$plugin/hooks.sh"
+                if ! plugin_sync_project_assets "$project_dir" "$plugin"; then
+                    echo "✗ $plugin — project asset sync failed"
+                    all_ok=false
+                    continue
+                fi
                 if [[ ! -f "$hooks_file" ]]; then
                     echo "✗ $plugin — hooks.sh not found at $hooks_file (was it removed or renamed?)"
                     all_ok=false
@@ -496,25 +510,22 @@ HELP
 
     # Source queue helpers
     source "$CRAFT_ROOT/bin/lib/queue.sh"
-
-    local n_pending n_approved n_in_progress n_waiting n_done n_blocked
-    n_pending=$(count_tasks "$queue_dir/pending" 2>/dev/null || echo 0)
-    n_approved=$(count_tasks "$queue_dir/approved" 2>/dev/null || echo 0)
-    n_in_progress=$(count_tasks "$queue_dir/in-progress" 2>/dev/null || echo 0)
-    n_waiting=$(count_tasks "$queue_dir/waiting" 2>/dev/null || echo 0)
-    n_done=$(count_tasks "$queue_dir/done" 2>/dev/null || echo 0)
-    n_blocked=$(count_tasks "$queue_dir/blocked" 2>/dev/null || echo 0)
+    mapfile -t QUEUE_STATES < <(plugin_queue_states "$project_dir")
 
     echo "craft status: $project_name"
     echo ""
-    printf "  Pending:      %s\n" "$n_pending"
-    printf "  Approved:     %s\n" "$n_approved"
-    printf "  In Progress:  %s\n" "$n_in_progress"
-    printf "  Waiting:      %s\n" "$n_waiting"
-    printf "  Done:         %s\n" "$n_done"
-    printf "  Blocked:      %s\n" "$n_blocked"
+    local state label count
+    local -A queue_counts=()
+    for state in "${QUEUE_STATES[@]}"; do
+        [[ "$state" == "archive" ]] && continue
+        label=$(queue_state_label "$state")
+        count=$(count_tasks "$queue_dir/$state" 2>/dev/null || echo 0)
+        queue_counts["$state"]="$count"
+        printf "  %-13s %s\n" "${label}:" "$count"
+    done
 
     # Show waiting tasks with PR URLs
+    local n_waiting="${queue_counts[waiting]:-0}"
     if [[ "$n_waiting" -gt 0 ]]; then
         echo ""
         echo "Waiting for review:"
@@ -532,6 +543,7 @@ HELP
     fi
 
     # Show blocked tasks
+    local n_blocked="${queue_counts[blocked]:-0}"
     if [[ "$n_blocked" -gt 0 ]]; then
         echo ""
         echo "Blocked:"

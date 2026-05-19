@@ -1,94 +1,14 @@
 # orchestrator-skills/hooks.sh — Lifecycle hooks for the orchestrator-skills plugin
 #
-# Installs the canonical skill set into the project's .claude/ AND .codex/
-# directories (so the discovery works for whichever CLI ends up driving the
-# agent — Claude Code or Codex). Idempotent; safe to run on every poll.
+# Project skills and commands are exposed through this plugin's project/ tree.
+# Craft core syncs those assets into each enabled project as symlinks.
 
 # Resolve this plugin's directory.
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Load plugin.conf
-if [[ -f "$PLUGIN_DIR/plugin.conf" ]]; then
-    # shellcheck source=/dev/null
-    source "$PLUGIN_DIR/plugin.conf"
-fi
-INSTALL_MODE="${INSTALL_MODE:-symlink}"
-
-# Agent-config dirs in the project. $PROJECT_DIR is set by run-hook.sh.
-# Skills go into both. Slash commands stay in .claude/commands/ only (Claude
-# Code feature; codex has no equivalent).
-CLAUDE_DIR="$PROJECT_DIR/.claude"
-CODEX_DIR="$PROJECT_DIR/.codex"
-
 # --- Dependency check ---
 check_deps() {
     return 0
-}
-
-# --- Helpers ---
-
-_install_one() {
-    # Install one source path into one absolute destination path.
-    #   $1 — absolute source path
-    #   $2 — absolute destination path
-    local src="$1"
-    local dst="$2"
-
-    [[ -e "$src" ]] || {
-        echo "[orchestrator-skills] missing source: $src" >&2
-        return 1
-    }
-
-    mkdir -p "$(dirname "$dst")"
-
-    if [[ "$INSTALL_MODE" == "symlink" ]]; then
-        if [[ -L "$dst" ]] && [[ "$(readlink "$dst")" == "$src" ]]; then
-            return 0
-        fi
-        if [[ -e "$dst" ]] || [[ -L "$dst" ]]; then
-            rm -rf "$dst"
-        fi
-        ln -s "$src" "$dst"
-    else
-        if [[ -d "$src" ]]; then
-            mkdir -p "$dst"
-            if command -v rsync >/dev/null; then
-                rsync -a --delete "$src/" "$dst/"
-            else
-                rm -rf "$dst"
-                cp -R "$src" "$dst"
-            fi
-        else
-            cp "$src" "$dst"
-        fi
-    fi
-}
-
-_install_skill() {
-    # Install a skill into BOTH .claude/skills/ and .codex/skills/.
-    #   $1 — path under plugin (e.g. skills/babysit-pr)
-    #   $2 — destination path under each agent-config dir (e.g. skills/babysit-pr)
-    local src="$PLUGIN_DIR/$1"
-    _install_one "$src" "$CLAUDE_DIR/$2"
-    _install_one "$src" "$CODEX_DIR/$2"
-}
-
-_install_command() {
-    # Install a slash command into .claude/commands/ only.
-    local src="$PLUGIN_DIR/$1"
-    _install_one "$src" "$CLAUDE_DIR/$2"
-}
-
-_install_all() {
-    # Skills — installed into both .claude/skills/ and .codex/skills/.
-    _install_skill "skills/delegate-to-devin"    "skills/delegate-to-devin"
-    _install_skill "skills/babysit-pr"           "skills/babysit-pr"      # includes references/
-    _install_skill "skills/review-pr"            "skills/review-pr"       # includes references/ + agents/
-    _install_skill "skills/plan-reviewer"        "skills/plan-reviewer"   # includes references/ (used by architect)
-    _install_skill "skills/architect-delegation" "skills/architect-delegation"
-    _install_skill "skills/cmux"                 "skills/cmux"
-    # delegate-to-claude, delegate-to-codex, multiagent-task, ma-task —
-    # archived under plugins/orchestrator-skills/archive/, NOT installed.
 }
 
 # --- Hooks ---
@@ -164,10 +84,10 @@ on_install() {
     esac
 }
 
-# Called on every orchestrator poll. Cheap and idempotent — verifies the
-# install state and re-syncs anything missing.
+# Called on every orchestrator poll. Project asset syncing is handled by Craft
+# core before this hook runs.
 on_poll() {
-    _install_all
+    return 0
 }
 
 # Called once when a task starts (moves to in-progress). Currently a no-op; the
