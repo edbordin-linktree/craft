@@ -33,7 +33,7 @@ If invoked manually outside of work-task, auto-detect the PR from the current br
 
 ## Context: local review precedes this skill
 
-By the time this skill runs, the task has already gone through a **local review phase** (work-task Step 8: babysit-diffhub) where the cross-model reviewer (`scripts/review-pr`) wrote findings to `.git/diffhub-comments.json` and the human reviewed locally via diffhub. The agent already addressed those.
+By the time this skill runs, the task has already gone through a **local review phase** (work-task Step 8: babysit-diffhub) where the cross-model reviewer (`scripts/review-pr`) imported findings through diffhub's comments API and the human reviewed locally via diffhub. The agent already addressed those.
 
 In practical terms: when this skill is active, most of the comments you'll see on the github PR are CI bots (Vercel deploy previews, codecov, danger, etc.) and any late human review. Initial-review findings have already been worked through locally, so Phase 4 here is usually lighter than it would otherwise be. Don't expect or wait for a long inline review-comment storm — that already happened.
 
