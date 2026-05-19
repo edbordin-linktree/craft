@@ -30,6 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/queue.sh"
 source "$SCRIPT_DIR/lib/plugins.sh"
 source "$SCRIPT_DIR/lib/notify.sh"
+source "$SCRIPT_DIR/lib/runtime.sh"
 source "$SCRIPT_DIR/lib/providers.sh"
 # Multiplexer loaded after config (needs MULTIPLEXER variable)
 
@@ -295,6 +296,9 @@ run_task() {
     task_human_title=$(task_human_title "$new_file")
     local task_session
     task_session=$(ensure_task_session "$PROJECT_NAME" "$tid" "$task_dir" "$task_human_title")
+    local workspace_title="$task_session"
+    [[ -n "$task_human_title" && "$MULTIPLEXER" == "cmux" ]] && workspace_title="${task_session} · ${task_human_title}"
+    runtime_write_task_session "$PROJECT_DIR" "$tid" "$task_session" "$workspace_title" "$task_session" "$tid"
 
     # Spawn the agent in the task workspace, working in the task directory.
     local window

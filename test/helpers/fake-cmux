@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATE="${FAKE_CMUX_STATE:?FAKE_CMUX_STATE required}"
+mkdir -p "$(dirname "$STATE")"
+
+if [[ ! -f "$STATE" ]]; then
+    cat > "$STATE" <<'JSON'
+{
+  "next_workspace": 2,
+  "next_pane": 2,
+  "next_surface": 2,
+  "focused": "",
+  "sent": [],
+  "windows": [
+    {
+      "ref": "window:1",
+      "workspaces": [
+        {
+          "ref": "workspace:1",
+          "title": "craft-project-task-123",
+          "panes": [
+            {
+              "ref": "pane:1",
+              "surfaces": [
+                {"ref": "surface:1", "type": "terminal", "title": "task-123"}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+JSON
+fi
+
+save() {
+    local tmp
+    tmp="$(mktemp)"
+    jq "$@" "$STATE" > "$tmp"
+    mv "$tmp" "$STATE"
+}
+
+workspace_arg() {
+    local prev=""
+    for arg in "$@"; do
+        if [[ "$prev" == "--workspace" ]]; then
+            echo "$arg"
+            return 0
+        fi
+        prev="$arg"
+    done
+    return 1
+}
+
+pane_arg() {
+    local prev=""
+    for arg in "$@"; do
+        if [[ "$prev" == "--pane" ]]; then
+            echo "$arg"
+            return 0
+        fi
+        prev="$arg"
+    done
+    return 1
+}
+
+surface_arg() {
+    local prev=""
+    for arg in "$@"; do
+        if [[ "$prev" == "--surface" ]]; then
+            echo "$arg"
+            return 0
+        fi
+        prev="$arg"
+    done
+    return 1
+}
+
+url_arg() {
+    local prev=""
+    for arg in "$@"; do
+        if [[ "$prev" == "--url" ]]; then
+            echo "$arg"
+            return 0
+        fi
+        prev="$arg"
+    done
+    return 1
+}
+
+case "${1:-}" in
+    tree)
+        cat "$STATE"
+        ;;
+    new-split)
+        ws="$(workspace_arg "$@")"
+        pane="pane:$(jq -r '.next_pane' "$STATE")"
+        surface="surface:$(jq -r '.next_surface' "$STATE")"
+        save --arg ws "$ws" --arg pane "$pane" --arg surface "$surface" '
+            .next_pane += 1
+            | .next_surface += 1
+            | (.windows[].workspaces[] | select(.ref == $ws).panes) +=
+              [{ref: $pane, surfaces: [{ref: $surface, type: "terminal", title: ""}]}]
+        '
+        echo "OK $surface $ws"
+        ;;
+    new-surface)
+        pane="$(pane_arg "$@")"
+        url="$(url_arg "$@")"
+        surface="surface:$(jq -r '.next_surface' "$STATE")"
+        save --arg pane "$pane" --arg surface "$surface" --arg url "$url" '
+            .next_surface += 1
+            | (.windows[].workspaces[].panes[] | select(.ref == $pane).surfaces) +=
+              [{ref: $surface, type: "browser", title: "", url: $url}]
+        '
+        echo "OK $surface"
+        ;;
+    rename-tab)
+        ws="$(workspace_arg "$@")"
+        surface="$(surface_arg "$@")"
+        title="${@: -1}"
+        save --arg ws "$ws" --arg surface "$surface" --arg title "$title" '
+            (.windows[].workspaces[] | select(.ref == $ws).panes[].surfaces[] | select(.ref == $surface).title) = $title
+        '
+        ;;
+    close-surface)
+        surface="$(surface_arg "$@" || true)"
+        [[ -n "$surface" ]] || surface="${2:-}"
+        save --arg surface "$surface" '
+            (.windows[].workspaces[].panes[].surfaces) |= map(select(.ref != $surface))
+        '
+        ;;
+    focus-surface)
+        save --arg surface "${2:-}" '.focused = $surface'
+        ;;
+    browser)
+        surface="${2:-}"
+        sub="${3:-}"
+        if [[ "$sub" == "navigate" ]]; then
+            url="${4:-}"
+            save --arg surface "$surface" --arg url "$url" '
+                (.windows[].workspaces[].panes[].surfaces[] | select(.ref == $surface).url) = $url
+            '
+        fi
+        ;;
+    send)
+        ws="$(workspace_arg "$@")"
+        surface="$(surface_arg "$@")"
+        text="${@: -1}"
+        save --arg ws "$ws" --arg surface "$surface" --arg text "$text" '
+            .sent += [{workspace: $ws, surface: $surface, text: $text}]
+        '
+        ;;
+    send-key|workspace-action|move-workspace-to-window|select-workspace|set-status|clear-status)
+        ;;
+    list-status)
+        ;;
+    *)
+        echo "fake-cmux: unsupported command: $*" >&2
+        exit 2
+        ;;
+esac

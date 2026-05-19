@@ -31,6 +31,8 @@ export CRAFT_ROOT CRAFT_PROJECTS
 
 # shellcheck source=bin/lib/plugins.sh
 source "$CRAFT_ROOT/bin/lib/plugins.sh"
+# shellcheck source=bin/lib/runtime.sh
+source "$CRAFT_ROOT/bin/lib/runtime.sh"
 
 # Version
 if [[ -f "$CRAFT_ROOT/VERSION" ]]; then
@@ -51,6 +53,9 @@ Usage:
   craft metrics <project-name>       Show task performance metrics
   craft config <project> [key] [val] Read or set project config
   craft plugin <subcommand>          Manage plugins
+  craft task stage <subcommand>      Get or mutate a task workflow stage
+  craft event <subcommand>           Manage a task's pending event queue
+  craft surface <subcommand>         Manage task web surfaces
   craft doctor                       Check dependencies
   craft --version                    Show version
 
@@ -60,6 +65,152 @@ Quick start:
   craft init my-project              Create a project
   craft my-project                   Start the orchestrator
 USAGE
+}
+
+_cmd_project_dir() {
+    runtime_project_dir "${PWD}" || {
+        echo "craft: not inside a project (no craft.conf found)" >&2
+        exit 2
+    }
+}
+
+_require_reason() {
+    local reason="$1"
+    [[ -n "$reason" ]] || {
+        echo "craft: --reason is required" >&2
+        exit 2
+    }
+}
+
+cmd_task() {
+    local group="${1:-}"
+    shift || true
+    case "$group" in
+        stage)
+            local subcmd="${1:-}"
+            shift || true
+            local project_dir
+            project_dir="$(_cmd_project_dir)"
+            case "$subcmd" in
+                get)
+                    local task_id="${1:?task id required}"
+                    local task_file
+                    task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; exit 1; }
+                    runtime_task_stage "$task_file"
+                    ;;
+                set)
+                    local task_id="${1:?task id required}" stage="${2:?stage required}" reason=""
+                    shift 2 || true
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --reason) reason="${2:-}"; shift 2 ;;
+                            *) echo "craft task stage set: unknown arg: $1" >&2; exit 2 ;;
+                        esac
+                    done
+                    _require_reason "$reason"
+                    runtime_stage_set "$project_dir" "$task_id" "$stage" "$reason" active >/dev/null
+                    ;;
+                advance)
+                    local task_id="${1:?task id required}" reason=""
+                    shift || true
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --reason) reason="${2:-}"; shift 2 ;;
+                            *) echo "craft task stage advance: unknown arg: $1" >&2; exit 2 ;;
+                        esac
+                    done
+                    _require_reason "$reason"
+                    runtime_stage_advance "$project_dir" "$task_id" "$reason" >/dev/null
+                    ;;
+                block)
+                    local task_id="${1:?task id required}" reason=""
+                    shift || true
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --reason) reason="${2:-}"; shift 2 ;;
+                            *) echo "craft task stage block: unknown arg: $1" >&2; exit 2 ;;
+                        esac
+                    done
+                    _require_reason "$reason"
+                    runtime_stage_set "$project_dir" "$task_id" blocked "$reason" blocked >/dev/null
+                    ;;
+                complete)
+                    local task_id="${1:?task id required}" reason="completed"
+                    shift || true
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --reason) reason="${2:-}"; shift 2 ;;
+                            *) echo "craft task stage complete: unknown arg: $1" >&2; exit 2 ;;
+                        esac
+                    done
+                    runtime_stage_set "$project_dir" "$task_id" complete "$reason" complete >/dev/null
+                    ;;
+                *)
+                    echo "Usage: craft task stage get|set|advance|block|complete ..." >&2
+                    exit 2
+                    ;;
+            esac
+            ;;
+        *)
+            echo "Usage: craft task stage <subcommand>" >&2
+            exit 2
+            ;;
+    esac
+}
+
+cmd_event() {
+    local subcmd="${1:-}"
+    shift || true
+    local project_dir
+    project_dir="$(_cmd_project_dir)"
+    case "$subcmd" in
+        enqueue)
+            local task_id="${1:?task id required}" type="" summary="" payload=""
+            shift || true
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --type) type="${2:-}"; shift 2 ;;
+                    --summary) summary="${2:-}"; shift 2 ;;
+                    --json) payload="${2:-}"; shift 2 ;;
+                    *) echo "craft event enqueue: unknown arg: $1" >&2; exit 2 ;;
+                esac
+            done
+            [[ -n "$type" && -n "$summary" && -n "$payload" ]] || {
+                echo "Usage: craft event enqueue <task-id> --type <type> --summary <text> --json <payload-file>" >&2
+                exit 2
+            }
+            runtime_event_enqueue "$project_dir" "$task_id" "$type" "$summary" "$payload"
+            ;;
+        counts)
+            runtime_event_counts "$project_dir" "${1:?task id required}"
+            ;;
+        take)
+            local task_id="${1:?task id required}" type="" limit=""
+            shift || true
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --type) type="${2:-}"; shift 2 ;;
+                    --limit) limit="${2:-}"; shift 2 ;;
+                    *) echo "craft event take: unknown arg: $1" >&2; exit 2 ;;
+                esac
+            done
+            runtime_event_take "$project_dir" "$task_id" "$type" "$limit"
+            ;;
+        *)
+            echo "Usage: craft event enqueue|counts|take ..." >&2
+            exit 2
+            ;;
+    esac
+}
+
+cmd_surface() {
+    local subcmd="${1:-}"
+    shift || true
+    local project_dir
+    project_dir="$(_cmd_project_dir)"
+    # Surface operations are implemented by craft-mux so provider differences
+    # stay behind the mux abstraction.
+    "$CRAFT_ROOT/bin/craft-mux" "$subcmd" "$@"
 }
 
 # Portable sed -i wrapper (macOS vs GNU)
@@ -91,6 +242,7 @@ Keys:
   GITHUB_REVIEWER  GitHub username for PR reviews
   BRANCH_PREFIX    Prepended to branch names (e.g. "sls/")
   PLUGINS          Comma-separated enabled plugins
+  DASHBOARD_CMD    Optional cmux web dashboard entrypoint command
 
 Examples:
   craft config my-project
@@ -759,6 +911,15 @@ HELP
         ;;
     plugin)
         cmd_plugin "$@"
+        ;;
+    task)
+        cmd_task "$@"
+        ;;
+    event)
+        cmd_event "$@"
+        ;;
+    surface)
+        cmd_surface "$@"
         ;;
     doctor)
         cmd_doctor "$@"

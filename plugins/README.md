@@ -30,6 +30,38 @@ Common asset paths:
 
 Plugins should keep project assets generic and avoid writing project-specific local state into `project/`.
 
+## Workflow Runtime
+
+Craft core exposes a small stage-based runtime for task workflows. The stock stage vocabulary is:
+
+```text
+context -> setup_worktree -> implement -> qa -> local_review -> pr_review -> complete -> blocked -> cleanup
+```
+
+Use `craft task stage ...` to mutate stages. These commands update the task file's YAML frontmatter (`stage:`, `stage_status:`, and `stage_reason:`) and dispatch stage hooks; callers should not invoke stage hooks directly.
+
+```bash
+craft task stage get task-123
+craft task stage set task-123 implement --reason "starting code changes"
+craft task stage advance task-123 --reason "QA passed"
+craft task stage block task-123 --reason "dependency unavailable"
+craft task stage complete task-123
+```
+
+Task agents also get a task-scoped runtime directory under `tasks/<task-id>/.orchestrator/`. Craft writes `task-session.json` before launching the agent so background tools can find the task workspace and canonical task pane without relying on display titles.
+
+The supported agent wake-up path is a pending-only typed event queue:
+
+```bash
+craft event enqueue task-123 --type pr_review --summary "new review thread" --json payload.json
+craft event counts task-123
+craft event take task-123 --type pr_review --limit 5
+```
+
+Each enqueue writes one JSON item under `.orchestrator/events/pending/`. When the queue transitions from empty to non-empty, Craft injects a short task-targeted message such as `CRAFT_EVENTS task=task-123 pending=3 counts=pr_review:2,ci_status:1 queue=.orchestrator/events/pending`. Event bodies stay on disk and are returned by `craft event take`, which deletes consumed pending files.
+
+Generic web surfaces are keyed by stable `surface_id` values and stored in `tasks/<task-id>/.orchestrator/surfaces.json`. `craft surface open` creates or reuses a browser surface in the task workspace; `craft surface focus` only focuses/adopts an existing browser match and returns `surface_not_found` for stale non-browser refs; `craft surface close` closes the cached surface when present.
+
 ## Queue States
 
 Plugins may declare extra queue states in `plugin.conf`:
@@ -61,6 +93,8 @@ Then configure the plugin by editing its `plugin.conf`.
 | `on_done` | Task completed (PR merged) | `--project-dir PATH --task-id ID --task-file PATH --task-dir PATH --pr-url URL` |
 | `on_blocked` | Task blocked | `--project-dir PATH --task-id ID --task-file PATH --task-dir PATH --reason REASON` |
 | `on_milestone` | All tasks in a milestone completed | `--project-dir PATH --milestone ID` |
+| `on_stage_before` | Before `craft task stage ...` mutates a task stage | `--project-dir PATH --stage STAGE --task-id ID --task-file PATH --task-dir PATH --status STATUS --reason REASON` |
+| `on_stage_after` | After `craft task stage ...` mutates a task stage | `--project-dir PATH --stage STAGE --task-id ID --task-file PATH --task-dir PATH --status STATUS --reason REASON` |
 
 Task-related hooks include `--task-file`, `--task-dir`, and `--pr-url` when Craft can derive them from the queue file and project layout. Hook handlers should ignore unknown arguments so this contract can grow without breaking existing plugins.
 

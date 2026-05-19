@@ -131,3 +131,18 @@ mux_kill_named_pane() {
     local session="$1" name="$2"
     tmux kill-window -t "${session}:${name}" 2>/dev/null || true
 }
+
+mux_surface_open() {
+    echo "surface_unsupported: tmux provider does not manage browser surfaces" >&2
+    return 3
+}
+
+mux_surface_focus() {
+    echo "surface_unsupported: tmux provider does not manage browser surfaces" >&2
+    return 3
+}
+
+mux_surface_close() {
+    echo "surface_unsupported: tmux provider does not manage browser surfaces" >&2
+    return 3
+}

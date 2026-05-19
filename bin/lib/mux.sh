@@ -40,6 +40,12 @@
 #
 #   mux_kill_named_pane <session> <name>
 #     → Remove the named pane.
+#
+#   mux_surface_open <project-dir> <task-id> <surface-id> [--url URL ...]
+#   mux_surface_focus <project-dir> <task-id> <surface-id>
+#   mux_surface_close <project-dir> <task-id> <surface-id>
+#     → Manage logical task surfaces. cmux owns browser surfaces; tmux returns
+#       a clean unsupported status.
 
 MUX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
