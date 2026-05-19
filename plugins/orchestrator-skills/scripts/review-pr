@@ -229,17 +229,27 @@ if [[ "$FINDINGS_COUNT" -gt 0 ]]; then
     else
         COMMENTS_URL="${DH_URL%/}/api/comments"
         NEW_COMMENTS="$(echo "$JSON" | jq --arg source "$TAG" '
-            [.findings[] | {
+            def stable_key:
+                [$source, .file, (.line | tostring), .severity, .category] | join(":");
+
+            .findings as $findings
+            | ($findings | map(stable_key)) as $keys
+            | [range(0; ($findings | length)) as $i
+            | $findings[$i] as $finding
+            | ($keys[$i]) as $key
+            | ([range(0; ($keys | length)) | select($keys[.] == $key)] | length) as $same_count
+            | ([range(0; $i) | select($keys[.] == $key)] | length) as $same_before
+            | $finding | {
                 body: "**\(.severity)** [\(.category)] \($source): \(.message)",
                 createdBy: $source,
-                externalId: ([$source, .file, (.line | tostring), .severity, .category] | join(":")),
+                externalId: ($key + if $same_count > 1 then ":duplicate-\($same_before)" else "" end),
                 file: .file,
                 lineNumber: .line,
                 side: "right",
                 tag: (if .severity == "critical" or .severity == "major" then "[must-fix]"
                       elif .severity == "nitpick" then "[nit]"
-                      elif .severity == "minor" then "[suggestion]"
-                      else "[suggestion]" end)
+	                      elif .severity == "minor" then "[suggestion]"
+	                      else "[suggestion]" end)
             }]
         ')"
         if IMPORT_RESPONSE="$(jq -n --argjson comments "$NEW_COMMENTS" '{comments: $comments}' |

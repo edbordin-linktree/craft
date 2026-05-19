@@ -114,9 +114,9 @@ Track whether the PR is still a draft. Initially it will be `isDraft: true`. Tra
 
 ```bash
 while true; do
-  sleep 120
   gh pr view {number} --json state,isDraft,reviews,reviewThreads,comments,mergedAt,statusCheckRollup,title
   # ... check conditions below and act on them, then continue the loop
+  sleep 120
 done
 ```
 
