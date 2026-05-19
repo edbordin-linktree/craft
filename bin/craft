@@ -230,7 +230,11 @@ HELP
             # the plugin = adding its name to PLUGINS= in this project's
             # craft.conf, then syncing any plugin-owned project assets.
             _plugins_enable "$project_dir/craft.conf" "$plugin_name"
-            plugin_sync_project_assets "$project_dir" "$plugin_name"
+            if ! plugin_sync_project_assets "$project_dir" "$plugin_name"; then
+                echo "Enabled $plugin_name in $project_name/craft.conf, but project asset sync failed." >&2
+                echo "Resolve the conflict above and run: craft plugin check $project_name" >&2
+                exit 1
+            fi
             echo "Enabled $plugin_name in $project_name/craft.conf."
             # Fire the plugin's on_install hook if defined.
             if [[ -f "$plugin_dir/hooks.sh" ]]; then
