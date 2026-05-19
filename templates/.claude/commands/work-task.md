@@ -39,11 +39,12 @@ Each task works in its own git worktree to avoid conflicts with other tasks runn
 
 ## Step 4: Do the Work
 
-1. Navigate to the worktree: `worktrees/{repo-name}-{task-id}/`
+1. Navigate to the primary repo worktree: `worktrees/{primary-repo-name}-{task-id}/` (the first entry in `repos:`)
 2. Read existing code to understand the codebase before making changes
 3. Implement the changes described in the task's Summary and Acceptance Criteria
 4. Write clean, well-structured code following the repo's existing conventions
 5. Append progress notes to the Work Log section as you go
+6. For a multi-repo task, switch between sibling worktrees under `worktrees/` as needed, e.g. `cd ../{other-repo-name}-{task-id}/`
 
 ## Step 5: Run QA (per the task's `qa:` spec)
 
