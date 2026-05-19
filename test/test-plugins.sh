@@ -55,7 +55,7 @@ assert_file_contains() {
     fi
 }
 
-assert_file_not_contains_regex() {
+assert_existing_file_not_contains_regex() {
     local label="$1" file="$2" pattern="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
     if [[ ! -f "$file" ]]; then
@@ -140,8 +140,7 @@ assert_true "orchestrator architect command linked" test -L "$real_project/.clau
 assert_true "orchestrator discoverer command linked" test -L "$real_project/.claude/commands/init-discoverer.md"
 assert_true "orchestrator claude skill linked" test -L "$real_project/.claude/skills/review-pr"
 assert_true "orchestrator codex skill linked" test -L "$real_project/.codex/skills/review-pr"
-assert_true "orchestrator hooks file exists" test -f "$REPO_ROOT/plugins/orchestrator-skills/hooks.sh"
-assert_file_not_contains_regex "orchestrator hooks do not hardcode skill symlinks" "$REPO_ROOT/plugins/orchestrator-skills/hooks.sh" 'ln -s .*skills|cp -R .*skills|skill_list='
+assert_existing_file_not_contains_regex "orchestrator hooks file exists and does not hardcode skill symlinks" "$REPO_ROOT/plugins/orchestrator-skills/hooks.sh" 'ln -s .*skills|cp -R .*skills|skill_list='
 orchestrator_states="$(plugin_queue_states "$real_project" | sort | paste -sd, -)"
 expected_orchestrator_states="$(printf '%s\n' pending approved in-progress waiting done blocked archive diffhub-review | sort | paste -sd, -)"
 assert_eq "orchestrator declares diffhub-review" "$expected_orchestrator_states" "$orchestrator_states"
