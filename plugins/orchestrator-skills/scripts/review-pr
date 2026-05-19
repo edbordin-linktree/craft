@@ -239,7 +239,7 @@ if [[ "$FINDINGS_COUNT" -gt 0 ]]; then
                 tag: (if .severity == "critical" or .severity == "major" then "[must-fix]"
                       elif .severity == "nitpick" then "[nit]"
                       elif .severity == "minor" then "[suggestion]"
-                      else "[suggestion]" end),
+                      else "[suggestion]" end)
             }]
         ')"
         if IMPORT_RESPONSE="$(jq -n --argjson comments "$NEW_COMMENTS" '{comments: $comments}' |
