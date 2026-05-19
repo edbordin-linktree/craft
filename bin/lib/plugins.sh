@@ -18,7 +18,6 @@ _plugin_trim() {
 plugin_enabled_plugins() {
     local project_dir="$1"
     local config_file="$project_dir/craft.conf"
-    local plugins=""
 
     if [[ -f "$config_file" ]]; then
         (
