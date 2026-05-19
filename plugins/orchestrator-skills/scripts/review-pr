@@ -110,11 +110,37 @@ MERGE_BASE="$(git merge-base HEAD "$BASE" 2>/dev/null)" \
 [[ -n "$OUTPUT" ]]  || OUTPUT="$WORKTREE/.orchestrator/handoff/review.md"
 [[ -n "$DH_URL" ]]  || DH_URL="$(cat "$WORKTREE/.orchestrator/diffhub.url" 2>/dev/null || true)"
 [[ -n "$TAG" ]]     || TAG="automated-review:${REVIEWER}${MODEL:+-$MODEL}"
+PENDING_FILE="$WORKTREE/.orchestrator/diffhub-pending.md"
+STATUS_FILE="$WORKTREE/.orchestrator/review-pr-status.md"
 
-mkdir -p "$(dirname "$OUTPUT")"
+mkdir -p "$(dirname "$OUTPUT")" "$WORKTREE/.orchestrator"
 
 log() { printf '%s [review-pr] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 log "reviewing HEAD vs $BASE (merge-base=${MERGE_BASE:0:8}) — reviewer=$REVIEWER model=$MODEL tag=$TAG"
+
+write_import_failure_status() {
+    local reason="$1"
+    local detail="$2"
+
+    {
+        printf '### Diffhub Import Failed — %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf -- '- Reason: %s\n' "$reason"
+        printf -- '- Detail: %s\n' "$detail"
+        printf -- '- Findings: %s\n' "$FINDINGS_COUNT"
+        printf -- '- Handoff: %s\n\n' "$OUTPUT"
+    } >> "$STATUS_FILE" 2>/dev/null || true
+}
+
+write_pending_findings() {
+    echo "$JSON" | jq -r --arg source "$TAG" '
+        .findings[] |
+        (if .severity == "critical" or .severity == "major" then "[must-fix]"
+         elif .severity == "nitpick" then "[nit]"
+         elif .severity == "minor" then "[suggestion]"
+         else "[suggestion]" end) as $tag
+        | "- \($tag) comment at \(.file):\(.line): **\(.severity)** [\(.category)] \($source): \(.message | if length > 200 then .[0:197] + "..." else . end)"
+    ' >> "$PENDING_FILE" 2>/dev/null || true
+}
 
 # --- build the prompt for the reviewer sub-agent ---
 PROMPT="You are a senior code reviewer. Review the LOCAL branch diff in this worktree:
@@ -224,7 +250,8 @@ DIFFHUB_IMPORT_STATUS="skipped"
 if [[ "$FINDINGS_COUNT" -gt 0 ]]; then
     if [[ -z "$DH_URL" ]]; then
         log "WARNING: diffhub URL unavailable; findings remain in $OUTPUT"
-        printf -- '- automated-review import failed: diffhub URL unavailable; read %s for %s finding(s)\n' "$OUTPUT" "$FINDINGS_COUNT" >> "$WORKTREE/.orchestrator/diffhub-pending.md" 2>/dev/null || true
+        write_import_failure_status "diffhub URL unavailable" "read $OUTPUT"
+        write_pending_findings
         DIFFHUB_IMPORT_STATUS="failed:no-url"
     else
         COMMENTS_URL="${DH_URL%/}/api/comments"
@@ -248,8 +275,8 @@ if [[ "$FINDINGS_COUNT" -gt 0 ]]; then
                 side: "right",
                 tag: (if .severity == "critical" or .severity == "major" then "[must-fix]"
                       elif .severity == "nitpick" then "[nit]"
-	                      elif .severity == "minor" then "[suggestion]"
-	                      else "[suggestion]" end)
+                      elif .severity == "minor" then "[suggestion]"
+                      else "[suggestion]" end)
             }]
         ')"
         if IMPORT_RESPONSE="$(jq -n --argjson comments "$NEW_COMMENTS" '{comments: $comments}' |
@@ -263,7 +290,8 @@ if [[ "$FINDINGS_COUNT" -gt 0 ]]; then
             log "imported comments through $COMMENTS_URL ($DIFFHUB_IMPORT_STATUS)"
         else
             log "WARNING: failed to import comments via $COMMENTS_URL; findings remain in $OUTPUT"
-            printf -- '- automated-review import failed: read %s for %s finding(s); diffhub_url=%s\n' "$OUTPUT" "$FINDINGS_COUNT" "$DH_URL" >> "$WORKTREE/.orchestrator/diffhub-pending.md" 2>/dev/null || true
+            write_import_failure_status "POST to diffhub comments API failed" "diffhub_url=$DH_URL; read $OUTPUT"
+            write_pending_findings
             DIFFHUB_IMPORT_STATUS="failed:post"
         fi
     fi
