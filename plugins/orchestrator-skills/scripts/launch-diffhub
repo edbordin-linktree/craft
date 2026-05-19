@@ -223,22 +223,6 @@ if command -v cmux >/dev/null && cmux current-window >/dev/null 2>&1; then
         fi
     fi
 
-    if [[ -z "$EXISTING_SURFACE" ]]; then
-        if [[ -n "$CALLER_WORKSPACE" ]]; then
-            TREE_OUTPUT="$(cmux tree --workspace "$CALLER_WORKSPACE" 2>/dev/null || true)"
-        else
-            TREE_OUTPUT="$(cmux tree 2>/dev/null || true)"
-        fi
-        EXISTING_SURFACE="$(printf '%s\n' "$TREE_OUTPUT" | awk -v url="$URL" '
-            $0 ~ /\[browser\]/ && index($0, url) > 0 {
-                if (match($0, /surface:[0-9]+/)) {
-                    print substr($0, RSTART, RLENGTH)
-                    exit
-                }
-            }
-        ')"
-    fi
-
     if [[ -n "$EXISTING_SURFACE" ]] && cmux browser "$EXISTING_SURFACE" navigate "$URL" >/dev/null 2>&1; then
         SURFACE="$EXISTING_SURFACE"
         echo "$SURFACE" > "$SURFACE_FILE"
