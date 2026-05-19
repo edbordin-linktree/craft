@@ -130,8 +130,9 @@ assert_true "orchestrator claude skill linked" test -L "$real_project/.claude/sk
 assert_true "orchestrator codex skill linked" test -L "$real_project/.codex/skills/review-pr"
 assert_true "orchestrator hooks file exists" test -f "$REPO_ROOT/plugins/orchestrator-skills/hooks.sh"
 assert_false "orchestrator hooks do not hardcode skill symlinks" grep -E 'ln -s .*skills|cp -R .*skills|skill_list=' "$REPO_ROOT/plugins/orchestrator-skills/hooks.sh"
-orchestrator_states="$(plugin_queue_states "$real_project" | paste -sd, -)"
-assert_eq "orchestrator declares diffhub-review" "pending,approved,in-progress,waiting,done,blocked,archive,diffhub-review" "$orchestrator_states"
+orchestrator_states="$(plugin_queue_states "$real_project" | sort | paste -sd, -)"
+expected_orchestrator_states="$(printf '%s\n' pending approved in-progress waiting done blocked archive diffhub-review | sort | paste -sd, -)"
+assert_eq "orchestrator declares diffhub-review" "$expected_orchestrator_states" "$orchestrator_states"
 CRAFT_ROOT="$old_craft_root"
 
 echo ""
