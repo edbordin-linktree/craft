@@ -128,6 +128,7 @@ assert_true "orchestrator architect command linked" test -L "$real_project/.clau
 assert_true "orchestrator discoverer command linked" test -L "$real_project/.claude/commands/init-discoverer.md"
 assert_true "orchestrator claude skill linked" test -L "$real_project/.claude/skills/review-pr"
 assert_true "orchestrator codex skill linked" test -L "$real_project/.codex/skills/review-pr"
+assert_true "orchestrator hooks file exists" test -f "$REPO_ROOT/plugins/orchestrator-skills/hooks.sh"
 assert_false "orchestrator hooks do not hardcode skill symlinks" grep -E 'ln -s .*skills|cp -R .*skills|skill_list=' "$REPO_ROOT/plugins/orchestrator-skills/hooks.sh"
 orchestrator_states="$(plugin_queue_states "$real_project" | paste -sd, -)"
 assert_eq "orchestrator declares diffhub-review" "pending,approved,in-progress,waiting,done,blocked,archive,diffhub-review" "$orchestrator_states"
