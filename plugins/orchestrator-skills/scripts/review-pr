@@ -232,7 +232,7 @@ if [[ "$FINDINGS_COUNT" -gt 0 ]]; then
             [.findings[] | {
                 body: "**\(.severity)** [\(.category)] \($source): \(.message)",
                 createdBy: $source,
-                externalId: ($source + ":" + .file + ":" + (.line | tostring) + ":" + .severity + ":" + .category + ":" + .message),
+                externalId: ([$source, .file, (.line | tostring), .severity, .category] | join(":")),
                 file: .file,
                 lineNumber: .line,
                 side: "right",
