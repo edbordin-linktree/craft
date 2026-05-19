@@ -12,6 +12,10 @@
 #   craft-mux exists <name>                     Exit 0 if pane exists, 1 if not
 #   craft-mux kill  <name>                      Remove a named pane
 #   craft-mux session                           Print the resolved session name
+#   craft-mux send-task <task-id> <text...>     Send text to a task's agent pane
+#   craft-mux open <task-id> <surface-id> ...   Open/reuse a task web surface
+#   craft-mux focus <task-id> <surface-id>      Focus a registered task surface
+#   craft-mux close <task-id> <surface-id>      Close a registered task surface
 #
 # Auto-detects the craft project by walking up from $PWD looking for craft.conf.
 
@@ -41,6 +45,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/providers.sh"
 load_provider_config "$PROJECT_DIR"   # sets MULTIPLEXER
 # shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/runtime.sh"
+# shellcheck source=/dev/null
 source "$SCRIPT_DIR/lib/mux.sh"
 
 # Session name follows the same convention used by each backend's ensure_session.
@@ -53,9 +59,17 @@ case "$MULTIPLEXER" in
         ;;
 esac
 
+OVERRIDE_SESSION=""
+if [[ "${1:-}" == "--session" ]]; then
+    OVERRIDE_SESSION="${2:-}"
+    [[ -n "$OVERRIDE_SESSION" ]] || { echo "craft-mux: --session requires a value" >&2; exit 2; }
+    shift 2
+fi
+[[ -n "$OVERRIDE_SESSION" ]] && SESSION="$OVERRIDE_SESSION"
+
 # --- Dispatch ---
 cmd="${1:-}"
-[[ -n "$cmd" ]] || { echo "Usage: $0 spawn|send|exists|kill|session ..." >&2; exit 2; }
+[[ -n "$cmd" ]] || { echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|close ..." >&2; exit 2; }
 shift
 
 case "$cmd" in
@@ -85,9 +99,39 @@ case "$cmd" in
     session)
         echo "$SESSION"
         ;;
+    send-task)
+        task_id="${1:?task id required}"; shift
+        text="$*"
+        [[ -n "$text" ]] || { echo "craft-mux: text required" >&2; exit 2; }
+        task_session="$(runtime_task_session_value "$PROJECT_DIR" "$task_id" session 2>/dev/null || true)"
+        pane_name="$(runtime_task_session_value "$PROJECT_DIR" "$task_id" pane_name 2>/dev/null || true)"
+        if [[ -z "$task_session" ]]; then
+            case "$MULTIPLEXER" in
+                tmux) task_session="$SESSION" ;;
+                cmux) task_session="${CMUX_PREFIX:-craft}-${PROJECT_NAME}-${task_id}" ;;
+            esac
+        fi
+        [[ -n "$pane_name" ]] || pane_name="$task_id"
+        mux_send_to_pane "$task_session" "$pane_name" "$text"
+        ;;
+    open)
+        task_id="${1:?task id required}"; shift
+        surface_id="${1:?surface id required}"; shift
+        mux_surface_open "$PROJECT_DIR" "$task_id" "$surface_id" "$@"
+        ;;
+    focus)
+        task_id="${1:?task id required}"; shift
+        surface_id="${1:?surface id required}"
+        mux_surface_focus "$PROJECT_DIR" "$task_id" "$surface_id"
+        ;;
+    close)
+        task_id="${1:?task id required}"; shift
+        surface_id="${1:?surface id required}"
+        mux_surface_close "$PROJECT_DIR" "$task_id" "$surface_id"
+        ;;
     *)
         echo "craft-mux: unknown subcommand '$cmd'" >&2
-        echo "Usage: $0 spawn|send|exists|kill|session ..." >&2
+        echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|close ..." >&2
         exit 2
         ;;
 esac

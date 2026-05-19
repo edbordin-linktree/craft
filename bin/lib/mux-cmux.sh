@@ -13,6 +13,11 @@ fi
 # Workspace name prefix
 CMUX_PREFIX="craft"
 
+if ! declare -f runtime_task_session_value >/dev/null 2>&1; then
+    # shellcheck source=bin/lib/runtime.sh
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/bin/lib/runtime.sh"
+fi
+
 _cmux_craft_root() {
     if [[ -n "${CRAFT_ROOT:-}" ]]; then
         echo "$CRAFT_ROOT"
@@ -67,16 +72,9 @@ _cmux_ensure_dashboard_server() {
     local port_file="$state_dir/port"
     local url_file="$state_dir/url"
     local log_file="$state_dir/server.log"
-    local craft_root dashboard_dir pid port url
+    local pid port url
 
-    craft_root="$(_cmux_craft_root)"
-    dashboard_dir="$craft_root/plugins/orchestrator-skills/dashboard"
-
-    [[ -f "$dashboard_dir/server.tsx" ]] || return 1
-    command -v bun >/dev/null 2>&1 || {
-        echo "ensure_session: bun not found; skipping web dashboard" >&2
-        return 1
-    }
+    [[ -n "${DASHBOARD_CMD:-}" ]] || return 1
     command -v curl >/dev/null 2>&1 || {
         echo "ensure_session: curl not found; skipping web dashboard readiness check" >&2
         return 1
@@ -100,10 +98,13 @@ _cmux_ensure_dashboard_server() {
 
     # Keep Bun as a direct child of the orchestrator process so the dashboard
     # can still call the cmux CLI for focus actions.
-    pushd "$dashboard_dir" >/dev/null || return 1
-    bun server.tsx --project "$project_dir" --port "$port" >"$log_file" 2>&1 &
+    (
+        export PROJECT_DIR CRAFT_ROOT
+        export CRAFT_DASHBOARD_PORT="$port"
+        export CRAFT_DASHBOARD_URL="$url"
+        bash -lc "$DASHBOARD_CMD"
+    ) >"$log_file" 2>&1 &
     echo "$!" > "$pid_file"
-    popd >/dev/null || return 1
 
     for _ in $(seq 1 30); do
         if _cmux_dashboard_ready "$port"; then
@@ -525,8 +526,17 @@ _mux_lookup_ref() {
     [[ -n "$ws_ref" ]] || return 1
     local key
     key=$(_mux_status_key "$name")
-    cmux list-status --workspace "$ws_ref" 2>/dev/null \
+    local recorded
+    recorded=$(cmux list-status --workspace "$ws_ref" 2>/dev/null \
         | awk -F '=' -v k="$key" '$1==k {print $2; exit}'
+    )
+    if [[ -n "$recorded" ]] && _mux_surface_alive "$session" "$recorded"; then
+        echo "$recorded"
+        return 0
+    fi
+    local by_title
+    by_title=$(_mux_surface_by_tab_title "$ws_ref" "$name")
+    [[ -n "$by_title" ]] && echo "$by_title"
 }
 
 _mux_surface_alive() {
@@ -605,4 +615,188 @@ mux_kill_named_pane() {
         cmux close-surface --workspace "$ws_ref" --surface "$sid" >/dev/null 2>&1 || true
     fi
     cmux clear-status "$(_mux_status_key "$name")" --workspace "$ws_ref" >/dev/null 2>&1 || true
+}
+
+_cmux_surface_alive_in_workspace() {
+    local ws_ref="$1" surface_ref="$2"
+    [[ -n "$surface_ref" ]] || return 1
+    cmux tree --workspace "$ws_ref" --json 2>/dev/null \
+        | jq -e --arg ref "$surface_ref" '
+            .windows[].workspaces[].panes[].surfaces[]
+            | select(.ref == $ref)
+          ' >/dev/null 2>&1
+}
+
+_cmux_browser_surface_by_url() {
+    local ws_ref="$1" url="$2" match="${3:-exact}"
+    cmux tree --workspace "$ws_ref" --json 2>/dev/null \
+        | jq -r --arg url "$url" --arg match "$match" '
+            .windows[].workspaces[].panes[].surfaces[]
+            | select(.type == "browser")
+            | select(
+                if $match == "prefix"
+                then ((.url // "") | startswith($url))
+                else (.url // "") == $url
+                end
+              )
+            | .ref
+          ' 2>/dev/null \
+        | head -1
+}
+
+_cmux_pane_with_browser() {
+    local ws_ref="$1"
+    cmux tree --workspace "$ws_ref" --json 2>/dev/null \
+        | jq -r '
+            .windows[].workspaces[].panes[]
+            | select(.surfaces[]? | .type == "browser")
+            | .ref
+          ' 2>/dev/null \
+        | head -1
+}
+
+_cmux_new_browser_surface_right() {
+    local ws_ref="$1" url="$2"
+    local pane out sid split_surface split_pane
+
+    pane="$(_cmux_pane_with_browser "$ws_ref")"
+    if [[ -n "$pane" ]]; then
+        out="$(cmux new-surface --type browser --pane "$pane" --url "$url" 2>&1)"
+        sid="$(echo "$out" | grep -oE 'surface:[0-9]+' | head -1)"
+        [[ -n "$sid" ]] && { echo "$sid"; return 0; }
+    fi
+
+    out="$(cmux new-split right --workspace "$ws_ref" 2>&1)"
+    split_surface="$(echo "$out" | grep -oE 'surface:[0-9]+' | head -1)"
+    if [[ -n "$split_surface" ]]; then
+        split_pane="$(_cmux_pane_for_surface "$ws_ref" "$split_surface")"
+        if [[ -n "$split_pane" ]]; then
+            out="$(cmux new-surface --type browser --pane "$split_pane" --url "$url" 2>&1)"
+            sid="$(echo "$out" | grep -oE 'surface:[0-9]+' | head -1)"
+            cmux close-surface --workspace "$ws_ref" --surface "$split_surface" >/dev/null 2>&1 || true
+            [[ -n "$sid" ]] && { echo "$sid"; return 0; }
+        fi
+    fi
+
+    out="$(cmux new-surface --type browser --workspace "$ws_ref" --url "$url" 2>&1)"
+    sid="$(echo "$out" | grep -oE 'surface:[0-9]+' | head -1)"
+    [[ -n "$sid" ]] && { echo "$sid"; return 0; }
+    echo "surface_open_failed: $out" >&2
+    return 1
+}
+
+_cmux_task_workspace_id() {
+    local project_dir="$1" task_id="$2"
+    local workspace_id
+    workspace_id="$(runtime_task_session_value "$project_dir" "$task_id" workspace_id 2>/dev/null || true)"
+    [[ -n "$workspace_id" ]] || workspace_id="${CMUX_PREFIX:-craft}-$(basename "$project_dir")-${task_id}"
+    echo "$workspace_id"
+}
+
+mux_surface_open() {
+    local project_dir="$1" task_id="$2" surface_id="$3"
+    shift 3
+    local url="" label="$surface_id" owner="craft" stage="" url_match="exact" kind="browser"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --url) url="${2:-}"; shift 2 ;;
+            --label) label="${2:-}"; shift 2 ;;
+            --owner) owner="${2:-}"; shift 2 ;;
+            --stage) stage="${2:-}"; shift 2 ;;
+            --url-match) url_match="${2:-}"; shift 2 ;;
+            --kind) kind="${2:-}"; shift 2 ;;
+            *) echo "surface open: unknown arg: $1" >&2; return 2 ;;
+        esac
+    done
+    [[ "$kind" == "browser" ]] || { echo "surface_unsupported_kind: $kind" >&2; return 2; }
+    [[ -n "$url" ]] || { echo "surface open: --url is required" >&2; return 2; }
+
+    local workspace_id ws_ref current cached found sid surface_json
+    workspace_id="$(_cmux_task_workspace_id "$project_dir" "$task_id")"
+    ws_ref="$(_mux_ws_ref "$workspace_id")"
+    [[ -n "$ws_ref" ]] || { echo "workspace_not_found: $workspace_id" >&2; return 1; }
+
+    current="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id" 2>/dev/null || true)"
+    cached="$(jq -r '.cached_surface_ref // empty' <<< "${current:-{}}")"
+    if [[ -n "$cached" ]] && _cmux_surface_alive_in_workspace "$ws_ref" "$cached"; then
+        cmux browser "$cached" navigate "$url" >/dev/null 2>&1 || true
+        cmux focus-surface "$cached" >/dev/null 2>&1 || true
+        runtime_surface_patch_ref "$project_dir" "$task_id" "$surface_id" "$cached" open 2>/dev/null || true
+        echo "$cached"
+        return 0
+    fi
+
+    found="$(_cmux_browser_surface_by_url "$ws_ref" "$url" "$url_match")"
+    if [[ -n "$found" ]]; then
+        cmux rename-tab --workspace "$ws_ref" --surface "$found" "$label" >/dev/null 2>&1 || true
+        cmux focus-surface "$found" >/dev/null 2>&1 || true
+        sid="$found"
+    else
+        sid="$(_cmux_new_browser_surface_right "$ws_ref" "$url")" || return 1
+        cmux rename-tab --workspace "$ws_ref" --surface "$sid" "$label" >/dev/null 2>&1 || true
+        cmux focus-surface "$sid" >/dev/null 2>&1 || true
+    fi
+
+    surface_json="$(jq -n \
+        --arg surface_id "$surface_id" \
+        --arg kind "$kind" \
+        --arg label "$label" \
+        --arg owner "$owner" \
+        --arg stage "$stage" \
+        --arg url "$url" \
+        --arg url_match "$url_match" \
+        --arg expected_workspace_id "$workspace_id" \
+        --arg cached_surface_ref "$sid" \
+        '{surface_id:$surface_id, kind:$kind, label:$label, owner:$owner, stage:$stage,
+          url:$url, url_match:$url_match, expected_workspace_id:$expected_workspace_id,
+          cached_surface_ref:$cached_surface_ref, status:"open"}')"
+    runtime_surface_put "$project_dir" "$task_id" "$surface_json"
+    echo "$sid"
+}
+
+mux_surface_focus() {
+    local project_dir="$1" task_id="$2" surface_id="$3"
+    local workspace_id ws_ref surface kind url url_match cached found
+    surface="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id" 2>/dev/null)" || {
+        echo "surface_not_found: $surface_id" >&2
+        return 4
+    }
+    workspace_id="$(jq -r '.expected_workspace_id // empty' <<< "$surface")"
+    [[ -n "$workspace_id" ]] || workspace_id="$(_cmux_task_workspace_id "$project_dir" "$task_id")"
+    ws_ref="$(_mux_ws_ref "$workspace_id")"
+    [[ -n "$ws_ref" ]] || { echo "workspace_not_found: $workspace_id" >&2; return 1; }
+    kind="$(jq -r '.kind // "browser"' <<< "$surface")"
+    cached="$(jq -r '.cached_surface_ref // empty' <<< "$surface")"
+    if [[ -n "$cached" ]] && _cmux_surface_alive_in_workspace "$ws_ref" "$cached"; then
+        cmux focus-surface "$cached" >/dev/null 2>&1 || true
+        echo "$cached"
+        return 0
+    fi
+    if [[ "$kind" == "browser" ]]; then
+        url="$(jq -r '.url // empty' <<< "$surface")"
+        url_match="$(jq -r '.url_match // "exact"' <<< "$surface")"
+        found="$(_cmux_browser_surface_by_url "$ws_ref" "$url" "$url_match")"
+        if [[ -n "$found" ]]; then
+            runtime_surface_patch_ref "$project_dir" "$task_id" "$surface_id" "$found" open
+            cmux focus-surface "$found" >/dev/null 2>&1 || true
+            echo "$found"
+            return 0
+        fi
+    fi
+    echo "surface_not_found: $surface_id" >&2
+    return 4
+}
+
+mux_surface_close() {
+    local project_dir="$1" task_id="$2" surface_id="$3"
+    local surface workspace_id ws_ref cached
+    surface="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id" 2>/dev/null)" || return 0
+    workspace_id="$(jq -r '.expected_workspace_id // empty' <<< "$surface")"
+    [[ -n "$workspace_id" ]] || workspace_id="$(_cmux_task_workspace_id "$project_dir" "$task_id")"
+    ws_ref="$(_mux_ws_ref "$workspace_id")"
+    cached="$(jq -r '.cached_surface_ref // empty' <<< "$surface")"
+    if [[ -n "$ws_ref" && -n "$cached" ]] && _cmux_surface_alive_in_workspace "$ws_ref" "$cached"; then
+        cmux close-surface --workspace "$ws_ref" --surface "$cached" >/dev/null 2>&1 || true
+    fi
+    runtime_surface_patch_ref "$project_dir" "$task_id" "$surface_id" "$cached" closed 2>/dev/null || true
 }

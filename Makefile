@@ -23,3 +23,4 @@ test:
 	@echo "Running tests..."
 	@bash $(CURDIR)/test/test-queue.sh
 	@bash $(CURDIR)/test/test-plugins.sh
+	@bash $(CURDIR)/test/test-runtime.sh

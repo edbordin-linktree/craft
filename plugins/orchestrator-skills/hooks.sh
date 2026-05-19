@@ -31,57 +31,65 @@ on_install() {
 
     if [[ "$current" == "codex" ]]; then
         echo "[orchestrator-skills] DEFAULT_AGENT=codex already set"
-        return 0
-    fi
-
-    # `claude` is craft's template default — treat it as "default, not a
-    # deliberate user choice" so we offer the change with default Y. Anything
-    # else is a real user-set value and we default to leaving it alone.
-    local prompt default
-    if [[ -z "$current" ]] || [[ "$current" == "claude" ]]; then
-        if [[ -z "$current" ]]; then
-            prompt="Set DEFAULT_AGENT=codex so the orchestrator launches Codex as the coding agent? [Y/n]"
+    else
+        # `claude` is craft's template default — treat it as "default, not a
+        # deliberate user choice" so we offer the change with default Y. Anything
+        # else is a real user-set value and we default to leaving it alone.
+        local prompt default
+        if [[ -z "$current" ]] || [[ "$current" == "claude" ]]; then
+            if [[ -z "$current" ]]; then
+                prompt="Set DEFAULT_AGENT=codex so the orchestrator launches Codex as the coding agent? [Y/n]"
+            else
+                prompt="Change DEFAULT_AGENT from 'claude' (default) to 'codex' for the coding agent? [Y/n]"
+            fi
+            default="y"
         else
-            prompt="Change DEFAULT_AGENT from 'claude' (default) to 'codex' for the coding agent? [Y/n]"
+            prompt="Change DEFAULT_AGENT from '$current' to 'codex'? [y/N]"
+            default="n"
         fi
-        default="y"
-    else
-        prompt="Change DEFAULT_AGENT from '$current' to 'codex'? [y/N]"
-        default="n"
-    fi
 
-    local answer
-    if [[ -t 0 ]]; then
-        read -rp "[orchestrator-skills] $prompt " answer
-        answer="${answer:-$default}"
-    else
-        answer="$default"
-        echo "[orchestrator-skills] (non-interactive) defaulting to '$default': $prompt"
-    fi
+        local answer
+        if [[ -t 0 ]]; then
+            read -rp "[orchestrator-skills] $prompt " answer
+            answer="${answer:-$default}"
+        else
+            answer="$default"
+            echo "[orchestrator-skills] (non-interactive) defaulting to '$default': $prompt"
+        fi
 
-    case "${answer,,}" in
-        y|yes)
-            if [[ -n "$current" ]]; then
-                if sed --version 2>/dev/null | grep -q GNU; then
-                    sed -i -E "s|^[[:space:]]*DEFAULT_AGENT=.*$|DEFAULT_AGENT=codex|" "$conf"
+        case "${answer,,}" in
+            y|yes)
+                if [[ -n "$current" ]]; then
+                    if sed --version 2>/dev/null | grep -q GNU; then
+                        sed -i -E "s|^[[:space:]]*DEFAULT_AGENT=.*$|DEFAULT_AGENT=codex|" "$conf"
+                    else
+                        sed -i "" -E "s|^[[:space:]]*DEFAULT_AGENT=.*$|DEFAULT_AGENT=codex|" "$conf"
+                    fi
+                    echo "[orchestrator-skills] updated DEFAULT_AGENT=codex (was '$current')"
                 else
-                    sed -i "" -E "s|^[[:space:]]*DEFAULT_AGENT=.*$|DEFAULT_AGENT=codex|" "$conf"
+                    printf '\n# Added by orchestrator-skills/on_install\nDEFAULT_AGENT=codex\n' >> "$conf"
+                    echo "[orchestrator-skills] appended DEFAULT_AGENT=codex to craft.conf"
                 fi
-                echo "[orchestrator-skills] updated DEFAULT_AGENT=codex (was '$current')"
-            else
-                printf '\n# Added by orchestrator-skills/on_install\nDEFAULT_AGENT=codex\n' >> "$conf"
-                echo "[orchestrator-skills] appended DEFAULT_AGENT=codex to craft.conf"
-            fi
-            ;;
-        *)
-            if [[ -n "$current" ]]; then
-                echo "[orchestrator-skills] keeping DEFAULT_AGENT=$current"
-            else
-                echo "[orchestrator-skills] leaving DEFAULT_AGENT unset — the orchestrator will use 'claude' per the template default"
-                echo "[orchestrator-skills] note: this plugin's work-task flow is designed assuming Codex is the coding agent"
-            fi
-            ;;
-    esac
+                ;;
+            *)
+                if [[ -n "$current" ]]; then
+                    echo "[orchestrator-skills] keeping DEFAULT_AGENT=$current"
+                else
+                    echo "[orchestrator-skills] leaving DEFAULT_AGENT unset — the orchestrator will use 'claude' per the template default"
+                    echo "[orchestrator-skills] note: this plugin's work-task flow is designed assuming Codex is the coding agent"
+                fi
+                ;;
+        esac
+    fi
+
+    if ! grep -qE '^[[:space:]]*DASHBOARD_CMD=' "$conf"; then
+        cat >> "$conf" <<'EOF'
+
+# Added by orchestrator-skills/on_install
+DASHBOARD_CMD='cd "$CRAFT_ROOT/plugins/orchestrator-skills/dashboard" && bun server.tsx --project "$PROJECT_DIR" --port "$CRAFT_DASHBOARD_PORT"'
+EOF
+        echo "[orchestrator-skills] appended DASHBOARD_CMD for the web dashboard"
+    fi
 }
 
 # Called on every orchestrator poll. Project asset syncing is handled by Craft
