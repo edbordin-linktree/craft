@@ -30,14 +30,9 @@ bun start --project /Users/ed/tasks/custom-orchestrator/craft/projects/llm-class
 
 Then open `http://127.0.0.1:27434`.
 
-To open it as a cmux browser surface inside the project workspace (so it sits
-alongside the orchestrator + architect + task terminals):
-
-```bash
-cmux new-surface --type browser \
-    --workspace craft-<project-name> \
-    --url http://127.0.0.1:27434
-```
+When the plugin is installed, `DASHBOARD_CMD` in `craft.conf` is the supported
+entrypoint. Craft starts the command and focuses the configured dashboard
+surface; the dashboard code itself does not create cmux panes.
 
 ## How it works
 
@@ -50,12 +45,10 @@ cmux new-surface --type browser \
    re-renders from the snapshot on every `/` request; htmx polls every 3s
    for fresh markup.
 3. **Cmux focus** (`cmux.ts`):
-   - Task surface: reads the cmux workspace status entry
-     `craft:pane:<task-id>=<surface-ref>` (written by `spawn_task_pane`).
-     Falls back to `cmux select-workspace` if the status entry is missing.
-   - Diffhub surface: reads
-     `tasks/<id>/<repo>/.orchestrator/diffhub.surface` (written by
-     `launch-diffhub`), then `cmux focus-pane --pane <ref>`.
+   - Task surface: finds the task terminal by tab title in the task workspace.
+     Falls back to `cmux select-workspace` if the surface is missing.
+   - Diffhub and PR surfaces: focus Craft-registered stable surface IDs
+     (`diffhub-review`, `github-pr`) through `craft-mux focus`.
 
 ## Routes
 
@@ -66,6 +59,7 @@ cmux new-surface --type browser \
 | GET    | `/snapshot.json`     | `{snapshotTs, taskCount}` (lightweight poll)  |
 | POST   | `/focus/task/:id`    | Focus the agent surface in cmux               |
 | POST   | `/focus/diffhub/:id` | Focus the diffhub browser surface in cmux     |
+| POST   | `/ready/:id`         | Send a `ready_for_pr` event via `craft task signal` |
 
 Binds to `127.0.0.1` by default. Pass `--host 0.0.0.0` to expose, but you
 probably don't want that — `cmux` calls happen on the host the dashboard runs
@@ -92,7 +86,6 @@ git pull
 
 ## Future work (intentionally not in v1)
 
-- Sentinel-touch button ("ready for PR") for diffhub-review tasks.
 - Stream `logs/orchestrator.log` tail into a side panel.
 - Authentication (currently relies on loopback-only binding).
 - Multi-project view.

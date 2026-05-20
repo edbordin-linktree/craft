@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Shared helpers for orchestrator-skills runtime scripts.
+
+orchestrator_script_dir() {
+    cd "$(dirname "${BASH_SOURCE[1]}")" && pwd -P
+}
+
+orchestrator_craft_root() {
+    local script_dir
+    script_dir="$(orchestrator_script_dir)"
+    local script_root
+    script_root="$(cd "$script_dir/../../.." && pwd -P)"
+
+    if [[ -n "${CRAFT_ROOT:-}" ]] && orchestrator_craft_root_has_runtime "$CRAFT_ROOT"; then
+        echo "$CRAFT_ROOT"
+        return 0
+    fi
+    if orchestrator_craft_root_has_runtime "$script_root"; then
+        echo "$script_root"
+        return 0
+    fi
+    if [[ -n "${CRAFT_ROOT:-}" ]]; then
+        echo "$CRAFT_ROOT"
+        return 0
+    fi
+    echo "$script_root"
+}
+
+orchestrator_craft_root_has_runtime() {
+    local root="$1"
+    [[ -x "$root/bin/craft" ]] || return 1
+    grep -q '^[[:space:]]*surface)' "$root/bin/craft" 2>/dev/null || return 1
+    grep -q '^[[:space:]]*event)' "$root/bin/craft" 2>/dev/null || return 1
+}
+
+orchestrator_task_id_from_worktree() {
+    local worktree="$1"
+    if [[ -n "${CRAFT_TASK_ID:-}" ]]; then
+        echo "$CRAFT_TASK_ID"
+        return 0
+    fi
+    basename "$(dirname "$worktree")"
+}
+
+orchestrator_payload_file() {
+    local worktree="$1" prefix="$2"
+    mkdir -p "$worktree/.orchestrator/events/tmp"
+    mktemp "$worktree/.orchestrator/events/tmp/${prefix}.XXXXXX.json"
+}
+
+orchestrator_enqueue_event() {
+    local worktree="$1" task_id="$2" type="$3" summary="$4" payload_file="$5"
+    local craft_root
+    craft_root="$(orchestrator_craft_root)"
+    (
+        cd "$worktree" || exit 1
+        CRAFT_ROOT="$craft_root" "$craft_root/bin/craft" event enqueue "$task_id" --type "$type" --summary "$summary" --json "$payload_file" >/dev/null
+    )
+}
+
+orchestrator_surface_open() {
+    local worktree="$1" task_id="$2" surface_id="$3"
+    shift 3
+    local craft_root
+    craft_root="$(orchestrator_craft_root)"
+    (
+        cd "$worktree" || exit 1
+        CRAFT_ROOT="$craft_root" "$craft_root/bin/craft" surface open "$task_id" "$surface_id" "$@"
+    )
+}
+
+orchestrator_surface_focus() {
+    local worktree="$1" task_id="$2" surface_id="$3"
+    local craft_root
+    craft_root="$(orchestrator_craft_root)"
+    (
+        cd "$worktree" || exit 1
+        CRAFT_ROOT="$craft_root" "$craft_root/bin/craft" surface focus "$task_id" "$surface_id"
+    )
+}
+
+orchestrator_surface_close() {
+    local worktree="$1" task_id="$2" surface_id="$3"
+    local craft_root
+    craft_root="$(orchestrator_craft_root)"
+    (
+        cd "$worktree" || exit 1
+        CRAFT_ROOT="$craft_root" "$craft_root/bin/craft" surface close "$task_id" "$surface_id"
+    )
+}

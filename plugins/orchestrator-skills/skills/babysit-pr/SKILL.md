@@ -42,7 +42,7 @@ triage the PR's current CI and review state from GitHub.
 
 ## State file
 
-`.orchestrator/babysit-state.json` inside the worktree. Holds the previous-poll snapshot so we can diff against it and notify only on transitions. Survives agent restart.
+`.orchestrator/babysit-state.json` inside the worktree. Holds the previous-poll snapshot for the `watch-pr` stage hook so it can diff against the prior GitHub state and enqueue only transitions. Survives agent restart.
 
 ```json
 {
@@ -77,21 +77,11 @@ Copy this to track progress:
 - [ ] Phase 5: Readiness — evaluate merge readiness; notify if state changed
 ```
 
-## Two modes: inline loop vs background watcher
+## Runtime Path
 
-Pick one. They implement the same phase logic; they differ in where the polling happens and how often agent tokens are spent.
+Use Craft's stage lifecycle plus typed event queue. There is one supported path for normal babysitting: entering the `pr_review` stage starts/focuses the PR runtime through plugin hooks, `watch-pr` polls GitHub and enqueues typed payloads through `craft event enqueue`, and Craft injects a compact `CRAFT_EVENTS ... counts=...` wake-up only when the queue transitions from empty to non-empty.
 
-**You MUST run one of these two modes.** Exiting the agent after a state snapshot — relying on the orchestrator daemon to "re-spawn when there's reason to act" — is **not** a supported fallback. The orchestrator daemon only watches the queue directory, not PRs. If you skip the loop, the task silently stalls until the operator notices.
-
-**Default: prefer Mode B (background watcher).** It only needs `gh` and `jq`. `craft-mux` is an optional convenience for cross-pane nudging (archived multi-agent flows) — in the single-agent flow it isn't used; the watcher writes transitions to `.orchestrator/watch-pr-pending.md` and the agent polls that file in its own pane via a thin bash loop.
-
-```bash
-if command -v watch-pr >/dev/null && command -v gh >/dev/null && command -v jq >/dev/null; then
-    # Use Mode B (watch-pr background subprocess)
-else
-    # Use Mode A (inline gh-poll loop) — only as last resort
-fi
-```
+Do not run an inline polling loop and do not inspect event queue files directly. Use `craft event take --type <type> --limit <n>` for every event read so events are drained in bounded, type-filtered batches. If `gh` or `jq` is unavailable, block the task and surface the missing dependency.
 
 ### Topology
 
@@ -99,127 +89,46 @@ A single agent (the one running `/work-task`) is the executor, the babysitter, a
 
 (Earlier versions of this plugin supported a supervisor + execute-author split; that flow is archived under `plugins/orchestrator-skills/archive/` if ever needed.)
 
-### Mode A — Inline `while` loop (default, simple)
+### Runtime Contract
 
-The babysitting agent runs a `while true; do … sleep 120; done` loop inside its own pane. Every iteration the agent diffs state and runs any phases that fired. Floor of 120s on the sleep — going faster burns agent tokens for no-op polls.
+Deterministic runtime mechanics belong to Craft and plugin lifecycle hooks:
 
-```bash
-while true; do
-  snapshot=$(gh pr view "$PR" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,reviews,comments,reviewThreads,statusCheckRollup,reviewDecision)
-  state=$(jq -r .state <<<"$snapshot")
-  case "$state" in
-    MERGED) log "PR merged"; return 0 ;;
-    CLOSED) log "PR closed without merge"; return 1 ;;
-  esac
+- Starting, stopping, and cleaning up `watch-pr`.
+- Opening or focusing the `github-pr` and Buildkite status surfaces.
+- Closing PR, diffhub, and Devin surfaces on `complete`, `blocked`, or `cleanup`.
+- Delivering wake-ups when queued events first become pending.
 
-  phase_1_initialize_or_skip   # idempotent — only does work on first iteration
-  phase_2_conflicts            # if mergeable == CONFLICTING
-  phase_3_ci                   # if any check newly transitioned to failure
-  phase_4_comments             # if new threads since last poll
-  phase_5_readiness            # if green and approved
+The agent's job is only to respond to delivered events:
 
-  write_state_file "$snapshot"
-  sleep 120
-done
-```
-
-Use this when the babysit will likely be short, when `gh`/`jq` aren't available, or when you don't want the extra moving parts. Costs agent tokens per poll (the loop body invokes the agent every 120s) — fine for short PRs, expensive for long ones.
-
-### Mode B — `watch-pr` background script (event-driven)
-
-A bash watcher polls GitHub on a 30s floor without invoking the agent. When it detects a transition, it appends a one-line summary to `.orchestrator/watch-pr-pending.md`. Two delivery flavours:
-
-- **Cross-pane** (with `craft-mux` + a separate pane to nudge): the watcher also fires `craft-mux send` when the pending file flips from empty → non-empty. The target pane stays fully idle between events; the nudge appears as a new turn in that pane's Claude session and wakes it. Use only when there really is a different pane than the one calling watch-pr — i.e. multi-agent setups where the babysitting agent lives elsewhere.
-- **File-only** (default, works for solo agents too): the watcher just writes to the pending file. The babysitting agent in its own pane runs a foreground bash `until` loop that blocks on the pending file. The loop is essentially free (one `[[ -s file ]]` + `sleep 5` per iteration, no agent activity until there's something to do).
-
-Either way, agent token cost is decoupled from polling cadence — the agent only does work on real events.
-
-Use Mode B when the babysit is expected to be long (large PR, slow CI, multi-day review window), or when responsiveness to base-branch advances matters more than simplicity.
-
-**Invocation:**
-
-```bash
-PR_NUMBER=4242
-WORKTREE="$(pwd)"
-
-# Spawn the watcher. Two options:
-
-# (a) File-only mode — works in BOTH solo and multi-agent. Watcher runs as a
-#     background subprocess in the babysitting agent's pane. This is the
-#     default; pick this unless you have a concrete reason to split panes.
-watch-pr --pr "$PR_NUMBER" --worktree "$WORKTREE" \
-    >.orchestrator/watch-pr.log 2>&1 &
-echo $! > .orchestrator/watch-pr.pid
-
-# (b) Cross-pane mode — multi-agent only. The babysitting agent lives in a
-#     different pane and gets nudged by `craft-mux send`. Skip if you ARE the
-#     pane that would receive the nudge — sending a message to your own pane
-#     would create an input-during-tool-use mess.
-# craft-mux spawn "task-<task-id>-watch-pr" "$WORKTREE" \
-#     watch-pr --pr "$PR_NUMBER" --worktree "$WORKTREE" \
-#              --supervisor-pane "<other-pane-running-the-supervisor>"
-```
-
-**Babysitting agent's responsibility while the watcher is running:**
-
-1. **You MUST run a foreground `Bash` tool call that blocks on the pending file.** Without it, the watcher writes to disk and the agent never sees it — nothing else gives the Claude session a new turn. This is non-negotiable in file-only mode:
-
+1. Stay idle until Craft injects a `CRAFT_EVENTS` wake-up.
+2. Drain pending events by type:
    ```bash
-   while true; do
-       # Block (cheap — bash sleeps, agent is not woken) until either:
-       #   - the pending file has at least one transition line, OR
-       #   - the watcher updated the state file with a terminal state.
-       until [[ -s .orchestrator/watch-pr-pending.md ]] || \
-             jq -er '.state | test("MERGED|CLOSED")' .orchestrator/babysit-state.json >/dev/null 2>&1; do
-           sleep 5
-       done
-
-       state=$(jq -r .state .orchestrator/babysit-state.json 2>/dev/null || echo "")
-       case "$state" in
-           MERGED) break ;;
-           CLOSED) return 1 ;;
-       esac
-
-       # Pending file has events — read, drain, hand back to the agent so it
-       # can run the appropriate phase(s). The Bash tool call exits here; the
-       # agent processes the pending text, then re-invokes the loop.
-       cat .orchestrator/watch-pr-pending.md
-       : > .orchestrator/watch-pr-pending.md
-       break   # exit the bash; the agent will re-enter on next pass
-   done
+   craft event take <task-id> --type merge_status --limit 10
+   craft event take <task-id> --type ci_status --limit 10
+   craft event take <task-id> --type review_comment --limit 10
+   craft event take <task-id> --type pr_approval --limit 10
+   craft event take <task-id> --type pr_terminal --limit 10
    ```
+3. Run the matching phase(s) for each event payload.
+4. When `pr_terminal` says the PR merged or closed, move the task to the matching terminal stage (`complete` or `blocked`) so lifecycle hooks perform cleanup.
 
-   In cross-pane mode the equivalent is: stay idle in your pane (don't run a loop), the watcher's `craft-mux send` will appear as a new input message and wake you. Either mechanism is mandatory.
-
-2. When the Bash returns with a non-empty pending block, run the appropriate phase(s) for each bullet (Phase 2 conflicts / Phase 3 CI / Phase 4 comments / Phase 5 readiness).
-
-3. Re-enter the wait loop (step 1) for the next event. Continue until the loop exits on MERGED or CLOSED.
-
-4. When the loop exits, also clean up the watcher:
-   ```bash
-   [[ -f .orchestrator/watch-pr.pid ]] && kill "$(cat .orchestrator/watch-pr.pid)" 2>/dev/null
-   ```
-
-**Transitions the watcher emits** (each becomes a bullet in the pending file):
-- merged / closed (terminal — watcher exits, agent proceeds to completion / blocked)
-- `draft → ready` (re-engages full Phase 4 + Phase 5)
-- `mergeable=CONFLICTING` (Phase 2 — *this is the "another branch merged into main" signal*)
-- `mergeStateStatus=BEHIND` (base moved, no conflict yet — rebase preemptively)
-- base branch SHA advanced (informational; only fires if no conflict)
-- CI check transitioned to FAILURE / ACTION_REQUIRED (Phase 3)
-- CI check recovered to SUCCESS (informational)
-- new review threads (Phase 4)
-- new issue comments
-- review APPROVED / CHANGES_REQUESTED
+**Event types the watcher emits:**
+- `pr_terminal`: merged / closed.
+- `merge_status`: `mergeable=CONFLICTING`, `mergeStateStatus=BEHIND`, or base branch SHA advanced.
+- `ci_status`: CI failure/action-required or recovery.
+- `review_comment`: new review submissions, threads, inline comments, conversation comments, or changes requested.
+- `pr_approval`: human approval.
+- `pr_review`: draft-to-ready and other PR-review status transitions.
 
 **Lifecycle:**
+- The `pr_review` stage hook starts `watch-pr` idempotently and opens/reuses PR visibility surfaces.
 - Watcher exits cleanly on PR merge (return 0) or close (return 1).
-- On SIGTERM/SIGINT (e.g. the agent's pane closing), watcher exits cleanly. The agent's wake-up loop also exits when the watcher's state file shows a terminal state.
+- The `complete`, `blocked`, and `cleanup` stage hooks stop any remaining watcher process and close registered surfaces.
 
 **Why this works:**
 - 30s polling on the GitHub API is well under rate limits (~120 req/hr per PR; limit is 5000/hr authenticated).
+- Event payload details stay on disk and only compact per-type counts are injected into the agent pane.
 - The agent's context grows only on real events, not on every poll — long babysits don't blow the context window from no-op chatter.
-- The agent's wake-up loop polls a local file via bash, which is essentially free in token terms (the agent isn't invoked between sleeps).
 
 ## Phase 1: Initialize
 
@@ -282,7 +191,7 @@ Run when there are new review threads or new issue comments since the last poll 
 
 7. **Phase 4 completion rule — a review thread is not "handled" until GitHub reports `isResolved: true`.** Replying is half the work. Without `isResolved: true`, the reviewer (human or bot) still sees an unresolved thread and will re-engage; you may also see your own reply come back as a new event next iteration and mistake it for a fresh comment.
 
-   For every actionable thread you act on, all five of these MUST happen before re-entering `await-pr-event`:
+   For every actionable thread you act on, all five of these MUST happen before waiting for the next `CRAFT_EVENTS` wake-up:
 
    1. **Make the code change** for the thread (or group of related threads).
    2. **Commit and push it** — capture the resulting `$SHORT_SHA` for the reply text.
@@ -305,7 +214,7 @@ Run when there are new review threads or new issue comments since the last poll 
    - **Threads classified as ignore-with-reason**: post the reason as the reply (step 3), then still do steps 4-5. The audit trail is the same.
    - **API failure on step 4 or 5**: retry once. If it still fails, log the thread id, leave it for the operator, and continue — do not silently move on.
 
-8. **Before re-entering `await-pr-event`, run this checklist:**
+8. **Before returning to idle, run this checklist:**
 
    - [ ] Every actionable thread from this iteration has a reply.
    - [ ] Every actionable thread from this iteration is `isResolved: true` in GitHub.

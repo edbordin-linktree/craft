@@ -20,6 +20,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$REPO" || { echo "cleanup-pr-stage: repo not accessible: $REPO" >&2; exit 1; }
+REPO="$(pwd -P)"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+# shellcheck source=plugins/orchestrator-skills/scripts/runtime-lib
+source "$SCRIPT_DIR/runtime-lib"
+TASK_ID="$(orchestrator_task_id_from_worktree "$REPO")"
 
 pidfile=".orchestrator/watch-pr.pid"
 labelfile=".orchestrator/watch-pr.label"
@@ -37,3 +43,5 @@ if [[ -f "$labelfile" ]] && command -v launchctl >/dev/null; then
     fi
     rm -f "$labelfile"
 fi
+
+orchestrator_surface_close "$REPO" "$TASK_ID" github-pr >/dev/null 2>&1 || true

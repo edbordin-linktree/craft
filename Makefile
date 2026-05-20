@@ -24,3 +24,5 @@ test:
 	@bash $(CURDIR)/test/test-queue.sh
 	@bash $(CURDIR)/test/test-plugins.sh
 	@bash $(CURDIR)/test/test-runtime.sh
+	@bash $(CURDIR)/test/test-orchestrator-runtime.sh
+	@if command -v bun >/dev/null 2>&1; then cd $(CURDIR)/plugins/orchestrator-skills/dashboard && bun install --frozen-lockfile >/dev/null; fi

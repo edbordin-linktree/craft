@@ -4,8 +4,8 @@ A craft plugin that wires together the per-task agent flow:
 
 1. **Codex** does the coding (configurable via `DEFAULT_AGENT`).
 2. **Cross-model review** is delegated to a different agent (default: Claude Sonnet via `claude -p`), so self-review bias is sidestepped. Findings land as inline diffhub comments + a markdown handoff.
-3. A **local review phase** (new `diffhub-review` queue state) lets the human and bot reviewers comment in parallel via diffhub. The agent addresses each comment as it arrives. A 2-hour idle timeout auto-advances overnight runs to the PR phase once chatter dies down.
-4. **`babysit-pr`** then handles the github PR through merge — CI fixes, late human comments, base-branch conflicts.
+3. A **local review phase** lets the human and bot reviewers comment in parallel via diffhub. `craft task state set ... diffhub-review --stage local_review` records the task state and fires the stage hook that starts `babysit-diffhub`.
+4. **`babysit-pr`** then handles the github PR through merge. The `pr_review` stage hook opens PR visibility surfaces and starts `watch-pr`, which enqueues typed events for conflicts, CI, comments, approvals, and terminal merge/close states.
 
 ## Architecture in one diagram
 
@@ -14,13 +14,26 @@ work-task (Codex by default)
   ├── Step 6   push branch (no PR yet)
   ├── Step 7   review-pr → spawns claude sonnet reviewer in background
   │              writes inline diffhub comments + .orchestrator/handoff/review.md
-  ├── Step 8   move to queue/diffhub-review/, run babysit-diffhub loop
-  │              (human + bot comments mingle; address each in arrival order;
-  │               exit on .orchestrator/ready-for-pr sentinel OR 2h idle)
-  ├── Step 9   gh pr create --draft && gh pr ready  →  queue/waiting/
-  ├── Step 10  invoke babysit-pr skill until merge
+  ├── Step 8   craft task state set diffhub-review --stage local_review
+  │              lifecycle hook starts babysit-diffhub
+  │              → craft event enqueue local_review/ready_for_pr/review_timeout
+  ├── Step 9   craft task state set waiting --stage pr_review
+  │              lifecycle hook opens PR surface + starts watch-pr
+  ├── Step 10  craft event enqueue merge_status/ci_status/
+  │              review_comment/pr_approval/pr_terminal until merge
   └── Step 11  queue/done/
 ```
+
+## Runtime architecture
+
+- **Pending-only typed event queue** — watchers call `craft event enqueue`. Agents never inspect queue storage directly; they drain with `craft event take --type ... --limit ...`, which returns batches and deletes consumed files.
+- **Queue-summary wake-ups** — Craft sends a compact task-targeted message only on empty-to-non-empty transitions, for example `CRAFT_EVENTS task=task-123 pending=3 counts=local_review:2,ci_status:1`.
+- **Task state command** — `craft task state set` is the one supported entrypoint for queue movement, frontmatter status/timestamps, stage updates, lifecycle hooks, and timestamped work-log entries.
+- **Stage-owned side effects** — lifecycle hooks own deterministic runtime behavior: starting `babysit-diffhub` on `local_review`, opening/focusing PR surfaces and starting `watch-pr` on `pr_review`, and cleanup on `complete`, `blocked`, or `cleanup`.
+- **Stable browser surfaces** — scripts call `craft surface open|focus|close`, not raw cmux placement. Craft stores stable surface IDs in `tasks/<task-id>/.orchestrator/surfaces.json`; current IDs are `diffhub-review`, `github-pr`, and `devin-session`.
+- **Right-side browser pane reuse** — the cmux provider opens browser tabs in the task workspace's shared right-side browser pane and reuses same-workspace URL matches instead of scanning all workspaces.
+- **Configured dashboard command** — `DASHBOARD_CMD` in `craft.conf` owns launching the dashboard server. Core Craft does not hardcode orchestrator-skills dashboard paths.
+- **Devin visibility** — `delegate-to-devin` opens or reuses `https://app.devin.ai/sessions/<session_id>` as the `devin-session` surface when task context is available. The tab is for operator inspection; structured handoff files remain the source of truth.
 
 ## Plugin assets
 
@@ -52,9 +65,9 @@ for both Claude Code and Codex CLI):
 Under `plugins/orchestrator-skills/scripts/`:
 
 - **`review-pr`** — spawns the cross-model reviewer headless. Writes findings to `.orchestrator/handoff/review.md` and imports inline comments through diffhub's `/api/comments` REST API, tagged in the body as `automated-review:<reviewer>-<model>`. Pluggable: `--reviewer claude|codex|cursor|gemini` (only claude wired up today; TODOs at top for the others + parallel reviewers).
-- **`babysit-diffhub`** — fast local watcher for the diffhub-review phase. Polls diffhub's read-only `/api/comments` endpoint + the `.orchestrator/ready-for-pr` sentinel; writes transitions to `.orchestrator/diffhub-pending.md`. 2-hour idle timeout auto-touches the sentinel.
-- **`watch-pr`** — GitHub PR watcher used by `babysit-pr`. Single GraphQL fetch per poll; captures conflicts, CI failures, new review threads + inline comments, base advances.
-- **`delegate-to-devin`** — Bash helper that round-trips Devin REST API (create session, poll, render `structured_output` to file).
+- **`babysit-diffhub`** — fast local watcher for the diffhub-review phase. Polls diffhub's read-only `/api/comments` endpoint and enqueues `local_review` / `review_timeout` events. Human and dashboard approval use `craft task signal ... ready_for_pr`.
+- **`watch-pr`** — GitHub PR watcher used by `babysit-pr`. Single GraphQL fetch per poll; enqueues `merge_status`, `ci_status`, `review_comment`, `pr_approval`, `pr_review`, and `pr_terminal` events.
+- **`delegate-to-devin`** — Bash helper that round-trips Devin REST API (create session, poll, render `structured_output` to file) and opens the `devin-session` browser surface when task context is available.
 - **`send-agent`** — generic "send a message to a named agent" dispatcher (spawn fresh, resume existing, or send to live pane). Used in the archived multi-agent flow and retained for operators who still want that style of delegation.
 
 ## Configuration
@@ -104,8 +117,5 @@ The orchestrator's `TASK_SKILL` configurability is retained — anyone wanting t
 
 ## Open TODOs
 
-- **Task runtime wakeups and web surfaces** — task 026 migrates the diffhub and
-  PR watcher loops onto Craft's generic event/surface runtime. Until then,
-  these scripts keep using the current `.orchestrator/*` files and cmux helpers.
 - **`review-pr --reviewer codex|cursor|gemini`** — currently stubbed. Wire up real dispatch.
 - **Parallel reviewers** — let `review-pr` spawn multiple models simultaneously, each writing findings with its own tag.

@@ -49,6 +49,17 @@ function cmux(...args: string[]): { stdout: string; stderr: string; ok: boolean 
   };
 }
 
+function craftMux(projectDir: string, ...args: string[]): { stdout: string; stderr: string; ok: boolean } {
+  const craftRoot = process.env.CRAFT_ROOT ?? join(import.meta.dir, "../../..");
+  const bin = join(craftRoot, "bin", "craft-mux");
+  const r = spawnSync(bin, args, { cwd: projectDir, encoding: "utf-8" });
+  return {
+    stdout: (r.stdout ?? "").toString(),
+    stderr: (r.stderr ?? "").toString(),
+    ok: r.status === 0,
+  };
+}
+
 function sleepSyncMs(ms: number): void {
   // Real synchronous sleep via Atomics.wait — blocks the thread without
   // spinning the CPU. Bun's main thread can handle this fine for the short
@@ -442,6 +453,11 @@ export function focusPrSurface(prUrl: string): FocusResult {
 }
 
 export function focusDiffhubSurface(projectDir: string, taskId: string): FocusResult {
+  const registered = craftMux(projectDir, "focus", taskId, "diffhub-review");
+  if (registered.ok) {
+    return { ok: true, surfaceRef: registered.stdout.trim() || undefined };
+  }
+
   const taskDir = join(projectDir, "tasks", taskId);
   if (!existsSync(taskDir)) {
     return { ok: false, error: `no tasks/${taskId}/ directory` };
@@ -480,6 +496,14 @@ export function focusDiffhubSurface(projectDir: string, taskId: string): FocusRe
   return {
     ok: false,
     surfaceRef: sid,
-    error: hint ? `${err} (${hint})` : err,
+    error: hint ? `${err} (${hint}; registry lookup also failed: ${registered.stderr.trim()})` : err,
   };
+}
+
+export function focusRegisteredSurface(projectDir: string, taskId: string, surfaceId: string): FocusResult {
+  const r = craftMux(projectDir, "focus", taskId, surfaceId);
+  if (!r.ok) {
+    return { ok: false, error: r.stderr.trim() || `surface ${surfaceId} not found` };
+  }
+  return { ok: true, surfaceRef: r.stdout.trim() || undefined };
 }
