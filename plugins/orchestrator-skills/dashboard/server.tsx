@@ -15,7 +15,7 @@
  * workspace so it sits alongside the orchestrator + agent terminals.
  */
 
-import { existsSync, readdirSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import chokidar from "chokidar";
@@ -24,7 +24,7 @@ import { Marked, Renderer } from "marked";
 import { render } from "preact-render-to-string";
 import { Dashboard } from "./views";
 import { scanProject, type Task } from "./queue";
-import { focusTaskSurface, focusDiffhubSurface, focusPrSurface, openExternal } from "./cmux";
+import { focusTaskSurface, focusDiffhubSurface, focusPrSurface, focusRegisteredSurface, openExternal } from "./cmux";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),
@@ -256,38 +256,21 @@ function approveTask(projectDir: string, taskId: string) {
   return { ok: true, from: src, to: dst };
 }
 
-/**
- * Touch `tasks/<id>/<repo>/.orchestrator/ready-for-pr` so the agent's
- * `await-diffhub-review` wake-up loop exits and Step 8 advances to PR
- * creation. The agent's wake-up loop watches for this sentinel file —
- * the dashboard touching it is operator-equivalent to typing "lgtm" in the
- * agent's pane.
- */
-function touchReadyForPr(projectDir: string, taskId: string) {
-  const taskDir = join(projectDir, "tasks", taskId);
-  if (!existsSync(taskDir)) {
-    return { ok: false, error: `no tasks/${taskId}/ directory` };
+function signalReadyForPr(projectDir: string, taskId: string) {
+  const craftBin = process.env.CRAFT_ROOT ? join(process.env.CRAFT_ROOT, "bin", "craft") : "craft";
+  const proc = Bun.spawnSync({
+    cmd: [craftBin, "task", "signal", taskId, "ready_for_pr", "--reason", "dashboard ready for PR"],
+    cwd: projectDir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (proc.exitCode !== 0) {
+    return {
+      ok: false,
+      error: new TextDecoder().decode(proc.stderr).trim() || `craft exited ${proc.exitCode}`,
+    };
   }
-  // Find the first repo subdir with an .orchestrator/ — that's where the
-  // agent's wake-up loop is reading from. (For multi-repo tasks the primary
-  // repo is the first one; we touch the sentinel there.)
-  let target: string | null = null;
-  for (const sub of readdirSync(taskDir)) {
-    const orchDir = join(taskDir, sub, ".orchestrator");
-    if (existsSync(orchDir)) {
-      target = join(orchDir, "ready-for-pr");
-      break;
-    }
-  }
-  if (!target) {
-    return { ok: false, error: `no .orchestrator/ subdir under tasks/${taskId}/` };
-  }
-  try {
-    writeFileSync(target, `touched by dashboard at ${new Date().toISOString()}\n`);
-    return { ok: true, sentinel: target };
-  } catch (err) {
-    return { ok: false, error: String(err) };
-  }
+  return { ok: true, event: "ready_for_pr" };
 }
 
 const server = Bun.serve({
@@ -366,6 +349,8 @@ const server = Bun.serve({
       const task = tasks.find(t => t.id === id);
       if (!task) return jsonResponse({ ok: false, error: `task ${id} not in snapshot` }, 404);
       if (!task.pr) return jsonResponse({ ok: false, error: `task ${id} has no pr in frontmatter` }, 400);
+      const registered = focusRegisteredSurface(projectDir, id, "github-pr");
+      if (registered.ok) return jsonResponse(registered);
       const f = focusPrSurface(task.pr);
       if (f.ok) return jsonResponse(f);
       // No cmux browser tab open for this PR — fall back to system browser
@@ -384,7 +369,7 @@ const server = Bun.serve({
 
     if (url.pathname.startsWith("/ready/") && req.method === "POST") {
       const id = decodeURIComponent(url.pathname.slice("/ready/".length));
-      const r = touchReadyForPr(projectDir, id);
+      const r = signalReadyForPr(projectDir, id);
       return jsonResponse(r, r.ok ? 200 : 502);
     }
 

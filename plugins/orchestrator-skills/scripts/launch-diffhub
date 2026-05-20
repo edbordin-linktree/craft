@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # launch-diffhub — Start diffhub as a plain Next.js dev server in the
-# background, wait for it to print its URL, then (if cmux is reachable) open
-# a cmux browser surface pointing at it. Emit URL / PID / surface to stdout
-# and to .orchestrator/.
+# background, wait for it to print its URL, then open/reuse the task's
+# `diffhub-review` browser surface through Craft's surface helper. Emit
+# URL / PID / surface to stdout and to .orchestrator/.
 #
 # Design notes:
 #
@@ -14,16 +14,8 @@
 #     process-tree access check denies the call and the surface is never
 #     created — the user just sees a dead/empty .orchestrator/diffhub.surface.
 #
-#   • We create the cmux browser surface ourselves AFTER diffhub is up,
-#     directly from this script. `launch-diffhub` runs in the caller's
-#     shell context (the agent's bash session, a cmux descendant), so the
-#     `cmux new-surface` call here is authorised. The returned surface ref
-#     is captured deterministically — no log parsing needed.
-#
-#   • cmux capability is probed via `cmux current-window`, NOT via the
-#     CMUX_WORKSPACE_ID env var. Some agent runtimes (codex Bash tool calls)
-#     don't propagate CMUX_* env vars to subshells, so the env-var check
-#     would skip the cmux branch even when cmux is reachable.
+#   • Browser placement is delegated to `craft surface open`, which owns
+#     right-side browser-pane reuse and stable per-task surface registration.
 #
 # Side effects (in the current working directory):
 #   .orchestrator/diffhub.log      — diffhub stdout/stderr
@@ -54,7 +46,9 @@ PORT="${DIFFHUB_PORT:-2047}"
 PORT_WAS_EXPLICIT=0
 SOURCE_DIR="${DIFFHUB_SOURCE_DIR:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-CRAFT_HOME="${CRAFT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}"
+# shellcheck source=plugins/orchestrator-skills/scripts/runtime-lib
+source "$SCRIPT_DIR/runtime-lib"
+CRAFT_HOME="$(orchestrator_craft_root)"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -70,6 +64,7 @@ done
 
 cd "$REPO" || { echo "launch-diffhub: repo not accessible: $REPO" >&2; exit 1; }
 REPO="$(pwd -P)"
+TASK_ID="$(orchestrator_task_id_from_worktree "$REPO")"
 mkdir -p .orchestrator
 
 if [[ -z "$SOURCE_DIR" && -f "$CRAFT_HOME/vendor/diffhub/apps/cli/package.json" ]]; then
@@ -204,45 +199,14 @@ if [[ -z "$READY" ]]; then
 fi
 echo "$URL" > "$URL_FILE"
 
-# --- create the cmux browser surface ourselves (if cmux is reachable) ---
-# `cmux current-window` succeeds only when the caller can talk to the cmux
-# daemon (process-tree auth), so it's a direct capability test — unlike the
-# CMUX_WORKSPACE_ID env-var check, which agent subshells often miss.
+# --- open/reuse the task browser surface through Craft ---
 SURFACE=""
-if command -v cmux >/dev/null && cmux current-window >/dev/null 2>&1; then
-    CALLER_WORKSPACE=""
-    if command -v jq >/dev/null 2>&1; then
-        CALLER_WORKSPACE="$(cmux identify 2>/dev/null | jq -r '.caller.workspace_ref // empty' 2>/dev/null | head -1)"
-    fi
-
-    EXISTING_SURFACE=""
-    if [[ -s "$SURFACE_FILE" ]]; then
-        CANDIDATE_SURFACE="$(cat "$SURFACE_FILE")"
-        if cmux browser "$CANDIDATE_SURFACE" url >/dev/null 2>&1; then
-            EXISTING_SURFACE="$CANDIDATE_SURFACE"
-        fi
-    fi
-
-    if [[ -n "$EXISTING_SURFACE" ]] && cmux browser "$EXISTING_SURFACE" navigate "$URL" >/dev/null 2>&1; then
-        SURFACE="$EXISTING_SURFACE"
-        echo "$SURFACE" > "$SURFACE_FILE"
-        cmux rename-tab --surface "$SURFACE" "diffhub" >/dev/null 2>&1 || true
-    else
-        if [[ -n "$CALLER_WORKSPACE" ]]; then
-            SURFACE_OUTPUT=$(cmux browser open-split "$URL" --workspace "$CALLER_WORKSPACE" 2>&1)
-        else
-            SURFACE_OUTPUT=$(cmux browser open-split "$URL" 2>&1)
-        fi
-        SURFACE=$(printf '%s\n' "$SURFACE_OUTPUT" | grep -oE 'surface:[0-9]+' | head -1)
-        if [[ -n "$SURFACE" ]]; then
-            echo "$SURFACE" > "$SURFACE_FILE"
-            cmux rename-tab --surface "$SURFACE" "diffhub" >/dev/null 2>&1 || true
-        else
-            # Surface this on stderr so the operator can see it (the agent will
-            # log it to .orchestrator/diffhub.log via its caller).
-            printf 'launch-diffhub: cmux browser open-split failed: %s\n' "$SURFACE_OUTPUT" >&2
-        fi
-    fi
+if SURFACE_OUTPUT="$(orchestrator_surface_open "$REPO" "$TASK_ID" diffhub-review \
+        --url "$URL" --label "diffhub" --owner orchestrator-skills --stage local_review --url-match exact 2>&1)"; then
+    SURFACE="$(printf '%s\n' "$SURFACE_OUTPUT" | grep -oE 'surface:[0-9]+' | head -1)"
+    [[ -n "$SURFACE" ]] && echo "$SURFACE" > "$SURFACE_FILE"
+else
+    printf 'launch-diffhub: craft surface open failed: %s\n' "$SURFACE_OUTPUT" >&2
 fi
 
 printf 'diffhub.url=%s\n' "$URL"

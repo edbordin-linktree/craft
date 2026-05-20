@@ -63,8 +63,9 @@ export function scanProject(projectDir: string): Task[] {
       const { data, content } = matter(raw);
       const fm = data as Record<string, unknown>;
 
+      const contentTickets = (content.match(LINEAR_PATTERN) ?? []) as string[];
       const linearTickets = Array.from(
-        new Set((content.match(LINEAR_PATTERN) ?? []).concat(
+        new Set(contentTickets.concat(
           typeof fm.linear === "string" ? [fm.linear as string] : [],
         )),
       );

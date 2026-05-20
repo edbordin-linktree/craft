@@ -94,6 +94,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$WORKTREE" || { echo "review-pr: worktree not accessible: $WORKTREE" >&2; exit 1; }
+WORKTREE="$(pwd -P)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+# shellcheck source=plugins/orchestrator-skills/scripts/runtime-lib
+source "$SCRIPT_DIR/runtime-lib"
+TASK_ID="$(orchestrator_task_id_from_worktree "$WORKTREE")"
 
 # Auto-detect base branch from origin/HEAD if not provided.
 if [[ -z "$BASE" ]]; then
@@ -110,7 +115,6 @@ MERGE_BASE="$(git merge-base HEAD "$BASE" 2>/dev/null)" \
 [[ -n "$OUTPUT" ]]  || OUTPUT="$WORKTREE/.orchestrator/handoff/review.md"
 [[ -n "$DH_URL" ]]  || DH_URL="$(cat "$WORKTREE/.orchestrator/diffhub.url" 2>/dev/null || true)"
 [[ -n "$TAG" ]]     || TAG="automated-review:${REVIEWER}${MODEL:+-$MODEL}"
-PENDING_FILE="$WORKTREE/.orchestrator/diffhub-pending.md"
 STATUS_FILE="$WORKTREE/.orchestrator/review-pr-status.md"
 
 mkdir -p "$(dirname "$OUTPUT")" "$WORKTREE/.orchestrator"
@@ -132,14 +136,19 @@ write_import_failure_status() {
 }
 
 write_pending_findings() {
-    echo "$JSON" | jq -r --arg source "$TAG" '
-        .findings[] |
-        (if .severity == "critical" or .severity == "major" then "[must-fix]"
-         elif .severity == "nitpick" then "[nit]"
-         elif .severity == "minor" then "[suggestion]"
-         else "[suggestion]" end) as $tag
-        | "- \($tag) comment at \(.file):\(.line): **\(.severity)** [\(.category)] \($source): \(.message | if length > 200 then .[0:197] + "..." else . end)"
-    ' >> "$PENDING_FILE" 2>/dev/null || true
+    local payload
+    while IFS= read -r finding; do
+        [[ -n "$finding" ]] || continue
+        payload="$(orchestrator_payload_file "$WORKTREE" "review-pr-finding")"
+        jq -n --arg source "$TAG" --argjson finding "$finding" \
+            '{phase:"local_review", kind:"review_pr_finding", author:$source,
+              file:$finding.file, lineNumber:$finding.line, body:$finding.message,
+              severity:$finding.severity, category:$finding.category}' > "$payload"
+        orchestrator_enqueue_event "$WORKTREE" "$TASK_ID" local_review \
+            "$(jq -r --arg source "$TAG" '"\($source) finding at \(.file):\(.line)"' <<< "$finding")" \
+            "$payload" || true
+        rm -f "$payload"
+    done < <(echo "$JSON" | jq -c '.findings[]')
 }
 
 # --- build the prompt for the reviewer sub-agent ---

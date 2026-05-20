@@ -22,6 +22,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$REPO" || { echo "teardown-diffhub: repo not accessible: $REPO" >&2; exit 1; }
+REPO="$(pwd -P)"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+# shellcheck source=plugins/orchestrator-skills/scripts/runtime-lib
+source "$SCRIPT_DIR/runtime-lib"
+TASK_ID="$(orchestrator_task_id_from_worktree "$REPO")"
 
 PIDFILE=".orchestrator/diffhub.pid"
 SURFACE_FILE=".orchestrator/diffhub.surface"
@@ -50,13 +56,8 @@ if [[ -f "$LABEL_FILE" ]] && command -v launchctl >/dev/null; then
     rm -f "$LABEL_FILE"
 fi
 
-if [[ -f "$SURFACE_FILE" ]] && command -v cmux >/dev/null; then
-    sid=$(cat "$SURFACE_FILE" 2>/dev/null || true)
-    if [[ -n "$sid" ]]; then
-        cmux close-surface --surface "$sid" >/dev/null 2>&1 || true
-    fi
-    rm -f "$SURFACE_FILE"
-fi
+orchestrator_surface_close "$REPO" "$TASK_ID" diffhub-review >/dev/null 2>&1 || true
+rm -f "$SURFACE_FILE"
 
 rm -f "$URL_FILE"
 

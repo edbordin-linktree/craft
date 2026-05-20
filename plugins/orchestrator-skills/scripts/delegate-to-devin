@@ -11,6 +11,7 @@
 #     [--repos repo1,repo2,...] \
 #     [--acu-limit N] \
 #     [--title "Short title"] \
+#     [--task-id task-123] \
 #     [--poll-interval SECONDS] \
 #     [--poll-timeout SECONDS]
 #
@@ -32,6 +33,7 @@ TAG=""
 REPOS=""
 ACU_LIMIT="${DEVIN_ACU_LIMIT:-10}"
 TITLE=""
+TASK_ID_OVERRIDE=""
 POLL_INTERVAL="${DEVIN_POLL_INTERVAL:-20}"
 POLL_TIMEOUT="${DEVIN_POLL_TIMEOUT:-3600}"
 API_BASE="${DEVIN_API_BASE:-https://api.devin.ai}"
@@ -46,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         --repos)         REPOS="$2"; shift 2 ;;
         --acu-limit)     ACU_LIMIT="$2"; shift 2 ;;
         --title)         TITLE="$2"; shift 2 ;;
+        --task-id)       TASK_ID_OVERRIDE="$2"; shift 2 ;;
         --poll-interval) POLL_INTERVAL="$2"; shift 2 ;;
         --poll-timeout)  POLL_TIMEOUT="$2"; shift 2 ;;
         -h|--help)
@@ -140,6 +143,32 @@ if [[ -z "$SESSION_URL" ]]; then
 fi
 
 echo "delegate-to-devin: session $SESSION_ID created — $SESSION_URL" >&2
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+# shellcheck source=plugins/orchestrator-skills/scripts/runtime-lib
+source "$SCRIPT_DIR/runtime-lib"
+
+open_devin_surface() {
+    local cwd task_id output sid
+    cwd="$(pwd -P)"
+    task_id="$TASK_ID_OVERRIDE"
+    if [[ -z "$task_id" ]]; then
+        task_id="$(orchestrator_task_id_from_worktree "$cwd" 2>/dev/null || true)"
+    fi
+    if [[ -z "$task_id" || "$task_id" == "." || "$task_id" == "/" ]]; then
+        echo "delegate-to-devin: no task id available; session URL: $SESSION_URL" >&2
+        return 0
+    fi
+    output="$(orchestrator_surface_open "$cwd" "$task_id" devin-session \
+        --url "$SESSION_URL" --label "devin" --owner orchestrator-skills --stage implement --url-match prefix 2>&1)" || {
+        echo "delegate-to-devin: could not open cmux Devin surface; session URL: $SESSION_URL ($output)" >&2
+        return 0
+    }
+    sid="$(printf '%s\n' "$output" | grep -oE 'surface:[0-9]+' | head -1)"
+    [[ -n "$sid" ]] && echo "delegate-to-devin: opened Devin surface $sid" >&2
+}
+
+open_devin_surface
 
 # --- poll until settled ---
 if [[ -n "${DEVIN_ORG_ID:-}" ]]; then

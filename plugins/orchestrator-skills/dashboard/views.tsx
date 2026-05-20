@@ -3,6 +3,7 @@ import { QUEUE_ORDER } from "./queue";
 
 const LINEAR_ORG = process.env.LINEAR_ORG ?? "linktree";
 const DONE_LIMIT = Number(process.env.DONE_LIMIT ?? "8");
+const inlineClick = (script: string) => ({ onclick: script }) as Record<string, string>;
 
 const statusColor: Record<string, string> = {
   "in-progress": "#2563eb",
@@ -266,7 +267,7 @@ function TaskCard({ task }: { task: Task }) {
       <div class="task-header">
         <span class="task-id">
           <a
-            onclick={`openTaskModal('${task.id}'); return false;`}
+            {...inlineClick(`openTaskModal('${task.id}'); return false;`)}
             href={`/task/${task.id}`}
             title="Open the full task description"
             style={{ cursor: "pointer" }}
@@ -284,7 +285,7 @@ function TaskCard({ task }: { task: Task }) {
               hx-swap="none"
               data-toast={`opening ${t}`}
               data-toast-success={`opened ${t}`}
-              onclick="event.preventDefault()"
+              {...inlineClick("event.preventDefault()")}
               class="linear-pill"
               title={`Open ${t} in your system browser (works around cmux SSO issues)`}
             >{t}</a>
@@ -297,7 +298,7 @@ function TaskCard({ task }: { task: Task }) {
             hx-swap="none"
             data-toast="focusing PR"
             data-toast-success={`focused PR ${prLabel(task.pr)}`}
-            onclick="event.preventDefault()"
+            {...inlineClick("event.preventDefault()")}
             class="pr-pill"
             title={`Focus the cmux PR tab for ${task.pr} (falls back to your system browser if no tab is open)`}
           >PR {prLabel(task.pr)}</a>
@@ -360,8 +361,8 @@ function TaskCard({ task }: { task: Task }) {
                 hx-swap="none"
                 hx-confirm={`Mark ${task.id} ready for PR? This ends the diffhub-review phase.`}
                 data-toast="marked ready"
-                data-toast-success={`${task.id} → ready-for-pr`}
-                title="Touch .orchestrator/ready-for-pr — the agent's wake-up loop will see it and advance to Step 9"
+                data-toast-success={`${task.id} → ready_for_pr`}
+                title="Send a ready_for_pr event"
               >
                 ✓ ready for PR
               </button>
@@ -419,7 +420,7 @@ function TaskCard({ task }: { task: Task }) {
                 hx-swap="none"
                 data-toast="opening yaml"
                 data-toast-success="opened yaml"
-                onclick="event.preventDefault()"
+                {...inlineClick("event.preventDefault()")}
               >{task.filePath.split("/").slice(-2).join("/")}</a>
             </>
           </div>

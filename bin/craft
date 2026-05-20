@@ -53,6 +53,7 @@ Usage:
   craft metrics <project-name>       Show task performance metrics
   craft config <project> [key] [val] Read or set project config
   craft plugin <subcommand>          Manage plugins
+  craft task state set ...           Move a task through queue/runtime state
   craft task stage <subcommand>      Get or mutate a task workflow stage
   craft event <subcommand>           Manage a task's pending event queue
   craft surface <subcommand>         Manage task web surfaces
@@ -86,6 +87,52 @@ cmd_task() {
     local group="${1:-}"
     shift || true
     case "$group" in
+        state)
+            local subcmd="${1:-}"
+            shift || true
+            local project_dir
+            project_dir="$(_cmd_project_dir)"
+            case "$subcmd" in
+                set)
+                    local task_id="${1:?task id required}" status="${2:?queue state required}" reason="" stage="" log_title="" log_body=""
+                    local fields=()
+                    shift 2 || true
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --reason) reason="${2:-}"; shift 2 ;;
+                            --stage) stage="${2:-}"; shift 2 ;;
+                            --set) fields+=("${2:-}"); shift 2 ;;
+                            --log) log_title="${2:-}"; shift 2 ;;
+                            --log-body) log_body="${2:-}"; shift 2 ;;
+                            *) echo "craft task state set: unknown arg: $1" >&2; exit 2 ;;
+                        esac
+                    done
+                    _require_reason "$reason"
+                    runtime_task_state_set "$project_dir" "$task_id" "$status" "$reason" "$stage" "$log_title" "$log_body" "${fields[@]}" >/dev/null
+                    ;;
+                *)
+                    echo "Usage: craft task state set <task-id> <queue-state> --reason <text> [--stage <stage>] [--set key=value] [--log <title>] [--log-body <text>]" >&2
+                    exit 2
+                    ;;
+            esac
+            ;;
+        signal)
+            local task_id="${1:?task id required}" type="${2:?event type required}" reason=""
+            shift 2 || true
+            local project_dir payload
+            project_dir="$(_cmd_project_dir)"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --reason) reason="${2:-}"; shift 2 ;;
+                    *) echo "craft task signal: unknown arg: $1" >&2; exit 2 ;;
+                esac
+            done
+            _require_reason "$reason"
+            payload="$(mktemp)"
+            jq -n --arg type "$type" --arg reason "$reason" '{type:$type, reason:$reason}' > "$payload"
+            runtime_event_enqueue "$project_dir" "$task_id" "$type" "$reason" "$payload" >/dev/null
+            rm -f "$payload"
+            ;;
         stage)
             local subcmd="${1:-}"
             shift || true

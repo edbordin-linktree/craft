@@ -46,7 +46,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 PROJECT_DIR="$TMPDIR/project"
 QUEUE_DIR="$PROJECT_DIR/queue"
-mkdir -p "$QUEUE_DIR"/{pending,approved,in-progress,waiting,done,blocked,archive}
+mkdir -p "$QUEUE_DIR"/{pending,approved,in-progress,waiting,done,blocked,archive,diffhub-review}
 mkdir -p "$PROJECT_DIR/tasks/task-123/.orchestrator"
 
 cat > "$PROJECT_DIR/craft.conf" <<'EOF'
@@ -113,6 +113,28 @@ assert_eq "after hook fired" "1" "$(grep -c '^on_stage_after ' "$hook_log")"
 )
 assert_eq "stage advance" "qa" "$(task_field "$QUEUE_DIR/in-progress/task-123.md" stage)"
 
+(
+    cd "$PROJECT_DIR" || exit 1
+    "$REPO_ROOT/bin/craft" task state set task-123 diffhub-review \
+        --stage local_review \
+        --reason "local review" \
+        --set pr=https://github.com/example/repo/pull/1 \
+        --log "Local Review Started" \
+        --log-body "Branch: refactor/runtime"
+)
+assert_true "task state moved file" test -f "$QUEUE_DIR/diffhub-review/task-123.md"
+assert_eq "task state updates status" "diffhub-review" "$(task_field "$QUEUE_DIR/diffhub-review/task-123.md" status)"
+assert_eq "task state updates stage" "local_review" "$(task_field "$QUEUE_DIR/diffhub-review/task-123.md" stage)"
+assert_eq "task state sets field" "https://github.com/example/repo/pull/1" "$(task_field "$QUEUE_DIR/diffhub-review/task-123.md" pr)"
+assert_true "task state work log" grep -q '^### Local Review Started — ' "$QUEUE_DIR/diffhub-review/task-123.md"
+assert_eq "task state hook fired" "1" "$(grep -c '^on_task_state_after ' "$hook_log")"
+
+(
+    cd "$PROJECT_DIR" || exit 1
+    "$REPO_ROOT/bin/craft" task state set task-123 in-progress --stage implement --reason "resume implementation"
+)
+assert_true "task state returns file" test -f "$QUEUE_DIR/in-progress/task-123.md"
+
 echo ""
 echo "event queue"
 assert_true "craft-mux session override resolves task pane" bash -c "cd '$PROJECT_DIR' && '$REPO_ROOT/bin/craft-mux' --session craft-project-task-123 exists task-123"
@@ -126,13 +148,20 @@ printf '{"body":"two"}\n' > "$payload2"
     "$REPO_ROOT/bin/craft" event enqueue task-123 --type ci_status --summary "ci two" --json "$payload2" >/dev/null
 )
 assert_eq "duplicate wake suppressed" "1" "$(jq '.sent | length' "$FAKE_CMUX_STATE")"
-assert_eq "wake is queue summary" "CRAFT_EVENTS task=task-123 pending=1 counts=pr_review:1 queue=.orchestrator/events/pending" "$(jq -r '.sent[0].text' "$FAKE_CMUX_STATE")"
+assert_eq "wake is queue summary" "CRAFT_EVENTS task=task-123 pending=1 counts=pr_review:1" "$(jq -r '.sent[0].text' "$FAKE_CMUX_STATE")"
 counts="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event counts task-123)"
 assert_eq "event counts" "pending=2 counts=ci_status:1,pr_review:1" "$counts"
 taken="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event take task-123 --type pr_review --limit 1)"
 assert_eq "take returns one" "1" "$(jq 'length' <<< "$taken")"
 counts_after="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event counts task-123)"
 assert_eq "take deletes" "pending=1 counts=ci_status:1" "$counts_after"
+(
+    cd "$PROJECT_DIR" || exit 1
+    "$REPO_ROOT/bin/craft" task signal task-123 ready_for_pr --reason "operator requested PR" >/dev/null
+)
+signalled="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event take task-123 --type ready_for_pr --limit 1)"
+assert_eq "task signal enqueues event" "ready_for_pr" "$(jq -r '.[0].type' <<< "$signalled")"
+assert_eq "task signal reason" "operator requested PR" "$(jq -r '.[0].payload.reason' <<< "$signalled")"
 
 echo ""
 echo "surface registry and fake cmux"

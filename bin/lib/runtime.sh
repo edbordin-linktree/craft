@@ -98,6 +98,20 @@ runtime_set_task_field() {
     mv "$tmp" "$file"
 }
 
+runtime_append_work_log() {
+    local file="$1" title="$2" body="${3:-}"
+    local timestamp
+    timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    {
+        echo
+        printf '### %s — %s\n' "$title" "$timestamp"
+        if [[ -n "$body" ]]; then
+            echo
+            printf '%s\n' "$body"
+        fi
+    } >> "$file"
+}
+
 runtime_hook() {
     local project_dir="$1" hook="$2"
     shift 2
@@ -127,6 +141,90 @@ runtime_stage_set() {
         --task-dir "$task_dir" --status "$status" --reason "$reason"
 
     echo "$stage"
+}
+
+runtime_default_stage_for_status() {
+    local status="$1"
+    case "$status" in
+        diffhub-review) echo "local_review" ;;
+        waiting) echo "pr_review" ;;
+        done) echo "complete" ;;
+        blocked) echo "blocked" ;;
+        in-progress) echo "implement" ;;
+        *) echo "" ;;
+    esac
+}
+
+runtime_timestamp_field_for_status() {
+    local status="$1"
+    case "$status" in
+        in-progress) echo "started" ;;
+        diffhub-review) echo "diffhub_review_started" ;;
+        waiting) echo "waiting" ;;
+        done) echo "done" ;;
+        blocked) echo "blocked" ;;
+        *) echo "" ;;
+    esac
+}
+
+runtime_task_state_set() {
+    local project_dir="$1" task_id="$2" status="$3" reason="$4" stage="${5:-}" log_title="${6:-}" log_body="${7:-}"
+    shift 7 || true
+    local task_file task_dir queue_dir target_dir target timestamp_field timestamp current_value set_pair key value stage_to_set stage_status
+    task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; return 1; }
+    task_dir="$(runtime_task_dir "$project_dir" "$task_id")"
+    queue_dir="$project_dir/queue"
+    target_dir="$queue_dir/$status"
+    [[ -d "$target_dir" ]] || { echo "queue_state_not_found: $status" >&2; return 2; }
+
+    runtime_hook "$project_dir" on_task_state_before \
+        --task-id "$task_id" --task-file "$task_file" --task-dir "$task_dir" \
+        --status "$status" --reason "$reason"
+
+    runtime_set_task_field "$task_file" status "$status"
+    timestamp_field="$(runtime_timestamp_field_for_status "$status")"
+    if [[ -n "$timestamp_field" ]]; then
+        timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        current_value="$(task_field "$task_file" "$timestamp_field" || true)"
+        if [[ "$status" != "in-progress" || -z "$current_value" ]]; then
+            runtime_set_task_field "$task_file" "$timestamp_field" "$timestamp"
+        fi
+    fi
+    if [[ "$status" == "blocked" ]]; then
+        runtime_set_task_field "$task_file" one_shot false
+    fi
+
+    for set_pair in "$@"; do
+        key="${set_pair%%=*}"
+        value="${set_pair#*=}"
+        [[ -n "$key" && "$key" != "$set_pair" ]] || { echo "invalid_field_assignment: $set_pair" >&2; return 2; }
+        runtime_set_task_field "$task_file" "$key" "$value"
+    done
+
+    stage_to_set="$stage"
+    [[ -n "$stage_to_set" ]] || stage_to_set="$(runtime_default_stage_for_status "$status")"
+    if [[ -n "$stage_to_set" ]]; then
+        stage_status="active"
+        [[ "$status" == "done" ]] && stage_status="complete"
+        [[ "$status" == "blocked" ]] && stage_status="blocked"
+        runtime_stage_set "$project_dir" "$task_id" "$stage_to_set" "$reason" "$stage_status" >/dev/null
+    fi
+
+    target="$target_dir/$(basename "$task_file")"
+    if [[ "$task_file" != "$target" ]]; then
+        mv "$task_file" "$target"
+        task_file="$target"
+    fi
+
+    if [[ -n "$log_title" ]]; then
+        runtime_append_work_log "$task_file" "$log_title" "$log_body"
+    fi
+
+    runtime_hook "$project_dir" on_task_state_after \
+        --task-id "$task_id" --task-file "$task_file" --task-dir "$task_dir" \
+        --status "$status" --reason "$reason"
+
+    echo "$task_file"
 }
 
 runtime_stage_advance() {
@@ -208,7 +306,7 @@ runtime_event_counts_text() {
 
 runtime_event_enqueue() {
     local project_dir="$1" task_id="$2" type="$3" summary="$4" payload_file="$5"
-    local pending_dir before file now rel_queue counts pending_after msg
+    local pending_dir before file now counts pending_after msg
     [[ -f "$payload_file" ]] || { echo "payload_not_found: $payload_file" >&2; return 1; }
     pending_dir="$(runtime_event_pending_dir "$project_dir" "$task_id")"
     mkdir -p "$pending_dir"
@@ -225,9 +323,8 @@ runtime_event_enqueue() {
 
     pending_after="$(runtime_event_count_total "$pending_dir")"
     counts="$(runtime_event_counts_text "$pending_dir")"
-    rel_queue=".orchestrator/events/pending"
     if [[ "$before" == "0" ]]; then
-        msg="CRAFT_EVENTS task=$task_id pending=$pending_after counts=$counts queue=$rel_queue"
+        msg="CRAFT_EVENTS task=$task_id pending=$pending_after counts=$counts"
         if command -v craft-mux >/dev/null 2>&1; then
             craft-mux send-task "$task_id" "$msg" >/dev/null 2>&1 || true
         elif [[ -x "$CRAFT_ROOT/bin/craft-mux" ]]; then

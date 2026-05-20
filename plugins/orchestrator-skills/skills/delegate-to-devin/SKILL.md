@@ -25,6 +25,7 @@ Until someone provisions a `cog_` service-user key in Devin Settings → Service
 - `curl` and `jq` on `PATH`.
 - Handoff dirs: `.orchestrator/handoff/` and `.orchestrator/schemas/` (created on demand).
 - The `delegate-to-devin` helper at `plugins/orchestrator-skills/scripts/delegate-to-devin` for the initial-spawn case.
+- When run inside Craft with a task worktree (or with `--task-id`), the helper opens or reuses a cmux browser tab for `https://app.devin.ai/sessions/<session_id>` through Craft's `devin-session` surface. Outside Craft, or when cmux/task context is unavailable, it degrades to printing the session URL.
 
 ## Workflow A — initial delegation
 
@@ -66,6 +67,7 @@ Until someone provisions a `cog_` service-user key in Devin Settings → Service
      --tag         <task-id> \
      [--repos repo1,repo2,...] \
      [--acu-limit N] \
+     [--task-id <task-id>] \
      [--title "Short session title"] \
      [--poll-timeout 60]   # short timeout if you want to ScheduleWakeup yourself rather than block
    ```
@@ -102,6 +104,8 @@ Until someone provisions a `cog_` service-user key in Devin Settings → Service
      output_ref: .orchestrator/handoff/0X-<stage>.md
      status: pending
    ```
+
+6. **Operator visibility.** If the helper opened a `devin-session` surface in cmux, treat it as read-only operator inspection. The structured output file and recorded session metadata remain the source of truth for follow-up.
 
 ## Workflow B — follow-up question to an existing session
 
