@@ -210,15 +210,38 @@ echo "$URL" > "$URL_FILE"
 # CMUX_WORKSPACE_ID env-var check, which agent subshells often miss.
 SURFACE=""
 if command -v cmux >/dev/null && cmux current-window >/dev/null 2>&1; then
-    SURFACE_OUTPUT=$(cmux browser open-split "$URL" 2>&1)
-    SURFACE=$(printf '%s\n' "$SURFACE_OUTPUT" | grep -oE 'surface:[0-9]+' | head -1)
-    if [[ -n "$SURFACE" ]]; then
+    CALLER_WORKSPACE=""
+    if command -v jq >/dev/null 2>&1; then
+        CALLER_WORKSPACE="$(cmux identify 2>/dev/null | jq -r '.caller.workspace_ref // empty' 2>/dev/null | head -1)"
+    fi
+
+    EXISTING_SURFACE=""
+    if [[ -s "$SURFACE_FILE" ]]; then
+        CANDIDATE_SURFACE="$(cat "$SURFACE_FILE")"
+        if cmux browser "$CANDIDATE_SURFACE" url >/dev/null 2>&1; then
+            EXISTING_SURFACE="$CANDIDATE_SURFACE"
+        fi
+    fi
+
+    if [[ -n "$EXISTING_SURFACE" ]] && cmux browser "$EXISTING_SURFACE" navigate "$URL" >/dev/null 2>&1; then
+        SURFACE="$EXISTING_SURFACE"
         echo "$SURFACE" > "$SURFACE_FILE"
         cmux rename-tab --surface "$SURFACE" "diffhub" >/dev/null 2>&1 || true
     else
-        # Surface this on stderr so the operator can see it (the agent will
-        # log it to .orchestrator/diffhub.log via its caller).
-        printf 'launch-diffhub: cmux browser open-split failed: %s\n' "$SURFACE_OUTPUT" >&2
+        if [[ -n "$CALLER_WORKSPACE" ]]; then
+            SURFACE_OUTPUT=$(cmux browser open-split "$URL" --workspace "$CALLER_WORKSPACE" 2>&1)
+        else
+            SURFACE_OUTPUT=$(cmux browser open-split "$URL" 2>&1)
+        fi
+        SURFACE=$(printf '%s\n' "$SURFACE_OUTPUT" | grep -oE 'surface:[0-9]+' | head -1)
+        if [[ -n "$SURFACE" ]]; then
+            echo "$SURFACE" > "$SURFACE_FILE"
+            cmux rename-tab --surface "$SURFACE" "diffhub" >/dev/null 2>&1 || true
+        else
+            # Surface this on stderr so the operator can see it (the agent will
+            # log it to .orchestrator/diffhub.log via its caller).
+            printf 'launch-diffhub: cmux browser open-split failed: %s\n' "$SURFACE_OUTPUT" >&2
+        fi
     fi
 fi
 

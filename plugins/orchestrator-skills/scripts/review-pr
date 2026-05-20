@@ -6,7 +6,7 @@
 # code) in headless mode, asks it to invoke the local review-pr skill rubric,
 # and writes findings to two places:
 #   1. .orchestrator/handoff/review.md          — for the coding agent to act on
-#   2. .git/diffhub-comments.json                — inline comments visible in
+#   2. diffhub's /api/comments REST API          — inline comments visible in
 #                                                   diffhub UI for the human
 #
 # Usage:
@@ -14,7 +14,7 @@
 #             [--reviewer claude|codex|cursor|gemini]
 #             [--model <model>]
 #             [--output <path>]
-#             [--diffhub-comments <path>]
+#             [--diffhub-url <url>]
 #             [--tag <tag-string>]
 #
 # Defaults:
@@ -23,7 +23,7 @@
 #   --reviewer         claude
 #   --model            sonnet (for claude)
 #   --output           <worktree>/.orchestrator/handoff/review.md
-#   --diffhub-comments <worktree>/$(git rev-parse --git-dir)/diffhub-comments.json
+#   --diffhub-url      value from <worktree>/.orchestrator/diffhub.url
 #   --tag              automated-review:<reviewer>-<model> (recorded in body;
 #                      diffhub tag field is restricted to known labels)
 #
@@ -32,7 +32,7 @@
 # review on GitHub yet, and `gh pr view` for a re-used branch name can
 # return a stale CLOSED PR and send the reviewer chasing the wrong diff.
 #
-# Requires: bash 4+, gh, jq, uuidgen, plus the chosen reviewer CLI on PATH.
+# Requires: bash 4+, gh, jq, curl, plus the chosen reviewer CLI on PATH.
 #
 # TODO: --reviewer is parsed but only `claude` is wired up. Add `codex`,
 #       `cursor`, and `gemini` dispatch so the token load can spread across
@@ -47,24 +47,24 @@
 # TODO: support multiple parallel reviewers in one invocation
 #       (--reviewer claude --reviewer codex). Each spawns in parallel via `&`,
 #       writes its findings to a per-reviewer temp file with a distinct
-#       tag value, then this script merges them into the diffhub comments
-#       file in a single atomic-rename write. Sketch:
+#       tag value, then this script imports them through diffhub's comments
+#       API in one request. Sketch:
 #           for r in "${REVIEWERS[@]}"; do
 #               spawn_reviewer "$r" > ".orchestrator/handoff/review.$r.json" &
 #           done
 #           wait
 #           jq -s 'reduce .[] as $f ([]; . + $f.findings)' \
 #               .orchestrator/handoff/review.*.json > merged.json
-#           # ...then build comments + atomic-rename onto diffhub-comments.json
+#           # ...then build comments and POST {comments:[...]} to /api/comments
 
 set -uo pipefail
 
 if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
     echo "review-pr requires bash 4+" >&2; exit 1
 fi
-command -v jq >/dev/null      || { echo "review-pr: jq is required" >&2; exit 1; }
-command -v uuidgen >/dev/null || { echo "review-pr: uuidgen is required" >&2; exit 1; }
-command -v git >/dev/null     || { echo "review-pr: git is required" >&2; exit 1; }
+command -v jq >/dev/null   || { echo "review-pr: jq is required" >&2; exit 1; }
+command -v curl >/dev/null || { echo "review-pr: curl is required" >&2; exit 1; }
+command -v git >/dev/null  || { echo "review-pr: git is required" >&2; exit 1; }
 
 # --- args ---
 BASE=""
@@ -72,7 +72,7 @@ WORKTREE="$(pwd)"
 REVIEWER="claude"
 MODEL=""
 OUTPUT=""
-DH_FILE=""
+DH_URL=""
 TAG=""
 
 while [[ $# -gt 0 ]]; do
@@ -82,7 +82,8 @@ while [[ $# -gt 0 ]]; do
         --reviewer)         REVIEWER="$2"; shift 2 ;;
         --model)            MODEL="$2"; shift 2 ;;
         --output)           OUTPUT="$2"; shift 2 ;;
-        --diffhub-comments) DH_FILE="$2"; shift 2 ;;
+        --diffhub-url)      DH_URL="$2"; shift 2 ;;
+        --diffhub-comments) echo "review-pr: --diffhub-comments is no longer supported; use --diffhub-url" >&2; exit 2 ;;
         --tag)              TAG="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'
@@ -107,13 +108,39 @@ MERGE_BASE="$(git merge-base HEAD "$BASE" 2>/dev/null)" \
 # Defaults that depend on args
 [[ -n "$MODEL" ]]   || case "$REVIEWER" in claude) MODEL="sonnet" ;; esac
 [[ -n "$OUTPUT" ]]  || OUTPUT="$WORKTREE/.orchestrator/handoff/review.md"
-[[ -n "$DH_FILE" ]] || DH_FILE="$(git rev-parse --git-dir)/diffhub-comments.json"
+[[ -n "$DH_URL" ]]  || DH_URL="$(cat "$WORKTREE/.orchestrator/diffhub.url" 2>/dev/null || true)"
 [[ -n "$TAG" ]]     || TAG="automated-review:${REVIEWER}${MODEL:+-$MODEL}"
+PENDING_FILE="$WORKTREE/.orchestrator/diffhub-pending.md"
+STATUS_FILE="$WORKTREE/.orchestrator/review-pr-status.md"
 
-mkdir -p "$(dirname "$OUTPUT")"
+mkdir -p "$(dirname "$OUTPUT")" "$WORKTREE/.orchestrator"
 
 log() { printf '%s [review-pr] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 log "reviewing HEAD vs $BASE (merge-base=${MERGE_BASE:0:8}) — reviewer=$REVIEWER model=$MODEL tag=$TAG"
+
+write_import_failure_status() {
+    local reason="$1"
+    local detail="$2"
+
+    {
+        printf '### Diffhub Import Failed — %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf -- '- Reason: %s\n' "$reason"
+        printf -- '- Detail: %s\n' "$detail"
+        printf -- '- Findings: %s\n' "$FINDINGS_COUNT"
+        printf -- '- Handoff: %s\n\n' "$OUTPUT"
+    } >> "$STATUS_FILE" 2>/dev/null || true
+}
+
+write_pending_findings() {
+    echo "$JSON" | jq -r --arg source "$TAG" '
+        .findings[] |
+        (if .severity == "critical" or .severity == "major" then "[must-fix]"
+         elif .severity == "nitpick" then "[nit]"
+         elif .severity == "minor" then "[suggestion]"
+         else "[suggestion]" end) as $tag
+        | "- \($tag) comment at \(.file):\(.line): **\(.severity)** [\(.category)] \($source): \(.message | if length > 200 then .[0:197] + "..." else . end)"
+    ' >> "$PENDING_FILE" 2>/dev/null || true
+}
 
 # --- build the prompt for the reviewer sub-agent ---
 PROMPT="You are a senior code reviewer. Review the LOCAL branch diff in this worktree:
@@ -218,44 +245,61 @@ SUMMARY="$(echo "$JSON" | jq -r '.summary // ""')"
 } > "$OUTPUT"
 log "wrote markdown summary to $OUTPUT"
 
-# --- append findings as diffhub inline comments (atomic rename) ---
+# --- import findings as diffhub inline comments through the REST API ---
+DIFFHUB_IMPORT_STATUS="skipped"
 if [[ "$FINDINGS_COUNT" -gt 0 ]]; then
-    NEW_COMMENTS="$(echo "$JSON" | jq --arg source "$TAG" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-        [.findings[] | {
-            body: "**\(.severity)** [\(.category)] \($source): \(.message)",
-            file: .file,
-            lineNumber: .line,
-            side: "right",
-            tag: (if .severity == "critical" or .severity == "major" then "[must-fix]"
-                  elif .severity == "nitpick" then "[nit]"
-                  elif .severity == "minor" then "[suggestion]"
-                  else "[suggestion]" end),
-            createdAt: $ts,
-            id: "REPLACE_ID"
-        }]
-    ')"
-    # Replace REPLACE_ID with real uuids (one per comment).
-    PATCHED="$(echo "$NEW_COMMENTS" | jq -c '.[]' | while IFS= read -r line; do
-        echo "$line" | jq --arg id "$(uuidgen)" '.id = $id'
-    done | jq -s '.')"
+    if [[ -z "$DH_URL" ]]; then
+        log "WARNING: diffhub URL unavailable; findings remain in $OUTPUT"
+        write_import_failure_status "diffhub URL unavailable" "read $OUTPUT"
+        write_pending_findings
+        DIFFHUB_IMPORT_STATUS="failed:no-url"
+    else
+        COMMENTS_URL="${DH_URL%/}/api/comments"
+        NEW_COMMENTS="$(echo "$JSON" | jq --arg source "$TAG" '
+            def stable_key:
+                [$source, .file, (.line | tostring), .severity, .category] | join(":");
 
-    EXISTING='[]'
-    if [[ -f "$DH_FILE" ]]; then
-        if jq -e . "$DH_FILE" >/dev/null 2>&1; then
-            EXISTING="$(cat "$DH_FILE")"
+            .findings as $findings
+            | ($findings | map(stable_key)) as $keys
+            | [range(0; ($findings | length)) as $i
+            | $findings[$i] as $finding
+            | ($keys[$i]) as $key
+            | ([range(0; ($keys | length)) | select($keys[.] == $key)] | length) as $same_count
+            | ([range(0; $i) | select($keys[.] == $key)] | length) as $same_before
+            | $finding | {
+                body: "**\(.severity)** [\(.category)] \($source): \(.message)",
+                createdBy: $source,
+                externalId: ($key + if $same_count > 1 and $same_before > 0 then ":duplicate-\($same_before)" else "" end),
+                file: .file,
+                lineNumber: .line,
+                side: "right",
+                tag: (if .severity == "critical" or .severity == "major" then "[must-fix]"
+                      elif .severity == "nitpick" then "[nit]"
+                      elif .severity == "minor" then "[suggestion]"
+                      else "[suggestion]" end)
+            }]
+        ')"
+        if IMPORT_RESPONSE="$(jq -n --argjson comments "$NEW_COMMENTS" '{comments: $comments}' |
+            curl -fsS --connect-timeout 5 --max-time 30 -X POST \
+                -H 'Content-Type: application/json' \
+                --data-binary @- \
+                "$COMMENTS_URL")"; then
+            IMPORT_CREATED="$(echo "$IMPORT_RESPONSE" | jq -r '.created // 0')"
+            IMPORT_EXISTING="$(echo "$IMPORT_RESPONSE" | jq -r '.existing // 0')"
+            DIFFHUB_IMPORT_STATUS="created=$IMPORT_CREATED existing=$IMPORT_EXISTING"
+            log "imported comments through $COMMENTS_URL ($DIFFHUB_IMPORT_STATUS)"
         else
-            log "WARNING: $DH_FILE exists but isn't valid JSON; starting fresh"
+            log "WARNING: failed to import comments via $COMMENTS_URL; findings remain in $OUTPUT"
+            write_import_failure_status "POST to diffhub comments API failed" "diffhub_url=$DH_URL; read $OUTPUT"
+            write_pending_findings
+            DIFFHUB_IMPORT_STATUS="failed:post"
         fi
     fi
-
-    mkdir -p "$(dirname "$DH_FILE")"
-    MERGED="$(jq -n --argjson existing "$EXISTING" --argjson new "$PATCHED" '$existing + $new')"
-    echo "$MERGED" > "${DH_FILE}.tmp" && mv "${DH_FILE}.tmp" "$DH_FILE"
-    log "appended $FINDINGS_COUNT inline comment(s) to $DH_FILE"
 fi
 
 # --- final stdout summary ---
 printf 'review.findings=%s\n' "$FINDINGS_COUNT"
 printf 'review.output=%s\n' "$OUTPUT"
-printf 'review.diffhub_comments=%s\n' "$DH_FILE"
+printf 'review.diffhub_url=%s\n' "$DH_URL"
+printf 'review.diffhub_import=%s\n' "$DIFFHUB_IMPORT_STATUS"
 printf 'review.tag=%s\n' "$TAG"

@@ -1,0 +1,1 @@
+../../../commands/init-architect.md

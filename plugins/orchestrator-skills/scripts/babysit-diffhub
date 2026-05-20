@@ -3,10 +3,10 @@
 # babysit-diffhub — Fast local watcher for the diffhub-review phase.
 #
 # Watches:
-#   - .git/diffhub-comments.json — every new comment (human OR bot) is treated
-#     equally. No tag filtering: the agent acts on whatever appears in arrival
-#     order. The cross-model reviewer (review-pr) and the human can comment
-#     in parallel; both are equal citizens here.
+#   - diffhub's /api/comments REST API — every new comment (human OR bot) is
+#     treated equally. No tag filtering: the agent acts on whatever appears in
+#     arrival order. The cross-model reviewer (review-pr) and the human can
+#     comment in parallel; both are equal citizens here.
 #   - .orchestrator/ready-for-pr — sentinel file. Touched by the human, by the
 #     work-task agent on the human's behalf, or eventually by the dashboard.
 #     Its appearance ends the diffhub-review phase.
@@ -18,7 +18,7 @@
 #   babysit-diffhub --worktree <abs-path> [--poll-interval 5]
 #                   [--idle-timeout 7200]   # seconds; 0 disables
 #                   [--state-file <p>] [--pending-file <p>]
-#                   [--comments-file <p>] [--sentinel <p>]
+#                   [--diffhub-url <url>] [--sentinel <p>]
 #
 # Idle-timeout behaviour: if no new comments arrive for <idle-timeout> seconds,
 # the script touches the sentinel file itself (creating .orchestrator/ready-for-pr)
@@ -30,21 +30,22 @@
 # Exits 0 when the sentinel appears (advance to PR phase), on idle timeout,
 # or after SIGTERM/INT.
 #
-# Requires: bash 4+, jq.
+# Requires: bash 4+, jq, curl.
 
 set -uo pipefail
 
 if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
     echo "babysit-diffhub requires bash 4+" >&2; exit 1
 fi
-command -v jq >/dev/null || { echo "babysit-diffhub: jq is required" >&2; exit 1; }
+command -v jq >/dev/null   || { echo "babysit-diffhub: jq is required" >&2; exit 1; }
+command -v curl >/dev/null || { echo "babysit-diffhub: curl is required" >&2; exit 1; }
 
 WORKTREE=""
 POLL_INTERVAL=5
 IDLE_TIMEOUT=7200
 STATE_FILE=""
 PENDING_FILE=""
-COMMENTS_FILE=""
+DIFFHUB_URL=""
 SENTINEL=""
 
 while [[ $# -gt 0 ]]; do
@@ -54,7 +55,8 @@ while [[ $# -gt 0 ]]; do
         --idle-timeout)    IDLE_TIMEOUT="$2"; shift 2 ;;
         --state-file)      STATE_FILE="$2"; shift 2 ;;
         --pending-file)    PENDING_FILE="$2"; shift 2 ;;
-        --comments-file)   COMMENTS_FILE="$2"; shift 2 ;;
+        --diffhub-url)     DIFFHUB_URL="$2"; shift 2 ;;
+        --comments-file)   echo "babysit-diffhub: --comments-file is no longer supported; use --diffhub-url" >&2; exit 2 ;;
         --sentinel)        SENTINEL="$2"; shift 2 ;;
         -h|--help)         sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *)                 echo "babysit-diffhub: unknown arg: $1" >&2; exit 2 ;;
@@ -67,17 +69,16 @@ done
 cd "$WORKTREE"
 mkdir -p "$WORKTREE/.orchestrator"
 
+# This watcher intentionally keeps its own local snapshot/pending files for
+# task-025. Migrating watcher wakeups onto Craft's runtime event/state
+# primitives belongs with the task-026 runtime migration, not this asset-boundary
+# cleanup.
 STATE_FILE="${STATE_FILE:-$WORKTREE/.orchestrator/diffhub-state.json}"
 PENDING_FILE="${PENDING_FILE:-$WORKTREE/.orchestrator/diffhub-pending.md}"
 SENTINEL="${SENTINEL:-$WORKTREE/.orchestrator/ready-for-pr}"
-
-# Default comments file: <git-dir>/diffhub-comments.json. Diffhub writes to
-# the per-worktree git dir, which `git rev-parse --git-dir` returns directly
-# (`.git/worktrees/<name>/` inside a worktree, plain `.git/` outside).
-if [[ -z "$COMMENTS_FILE" ]]; then
-    GIT_DIR="$(git rev-parse --git-dir 2>/dev/null || echo "$WORKTREE/.git")"
-    COMMENTS_FILE="$GIT_DIR/diffhub-comments.json"
-fi
+DIFFHUB_URL="${DIFFHUB_URL:-$(cat "$WORKTREE/.orchestrator/diffhub.url" 2>/dev/null || true)}"
+[[ -n "$DIFFHUB_URL" ]] || { echo "babysit-diffhub: diffhub URL unavailable; launch diffhub first or pass --diffhub-url" >&2; exit 1; }
+COMMENTS_API_URL="${DIFFHUB_URL%/}/api/comments?readonly=1"
 
 log() { printf '%s [babysit-diffhub] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 
@@ -101,23 +102,20 @@ record() {
 }
 
 # Pull the comment ID set + a small snapshot map (id → {file,line,tag}) from
-# the current comments file. Robust against missing/invalid JSON.
+# diffhub's comments API. Robust against transient HTTP/JSON failures: callers
+# retry without replacing prior state, so a server blip cannot look like all
+# comments disappeared.
 fetch_snapshot() {
-    if [[ ! -f "$COMMENTS_FILE" ]]; then
-        echo '{"ids": [], "by_id": {}}'
-        return
-    fi
-    if ! jq -e . "$COMMENTS_FILE" >/dev/null 2>&1; then
-        echo '{"ids": [], "by_id": {}}'
-        return
-    fi
+    local raw
+    raw="$(curl -fsS --max-time 10 "$COMMENTS_API_URL")" || return 1
+    jq -e 'type == "array"' <<<"$raw" >/dev/null 2>&1 || return 1
     jq '
       map(select((.resolved // false) != true and (.staleness // "fresh") != "stale")) as $actionable
       | {
           ids: ($actionable | map(.id) | sort),
           by_id: ($actionable | map({(.id|tostring): {file: .file, lineNumber: .lineNumber, tag: (.tag // ""), body: (.body // "")}}) | add // {})
         }
-    ' "$COMMENTS_FILE"
+    ' <<<"$raw"
 }
 
 diff_snapshot() {
@@ -125,7 +123,7 @@ diff_snapshot() {
     jq -n -r --argjson prior "$prior" --argjson cur "$cur" '
         ($cur.ids - $prior.ids) as $new_ids
         | $new_ids[] | . as $id
-        | $cur.by_id[$id]
+        | $cur.by_id[($id | tostring)]
         | (if (.tag // "") == "" then "human" else .tag end) as $author
         | "\($author) comment at \(.file):\(.lineNumber): \(.body | (if length > 200 then .[0:197] + "..." else . end))"
     '
@@ -142,16 +140,44 @@ cleanup() { log "exiting"; exit "${1:-0}"; }
 trap 'cleanup 0' INT TERM
 
 if (( IDLE_TIMEOUT > 0 )); then
-    log "watching $COMMENTS_FILE + $SENTINEL (interval=${POLL_INTERVAL}s, idle_timeout=${IDLE_TIMEOUT}s)"
+    log "watching $COMMENTS_API_URL + $SENTINEL (interval=${POLL_INTERVAL}s, idle_timeout=${IDLE_TIMEOUT}s)"
 else
-    log "watching $COMMENTS_FILE + $SENTINEL (interval=${POLL_INTERVAL}s, idle_timeout disabled)"
+    log "watching $COMMENTS_API_URL + $SENTINEL (interval=${POLL_INTERVAL}s, idle_timeout disabled)"
 fi
 
 prior_state="$(read_state)"
 last_activity=$(date +%s)
+last_api_success=$(date +%s)
 
 while true; do
-    snapshot="$(fetch_snapshot)" || { log "snapshot fetch failed; retry in 10s"; sleep 10; continue; }
+    if ! snapshot="$(fetch_snapshot)"; then
+        if [[ -f "$SENTINEL" ]]; then
+            record "human signal: ready-for-pr (sentinel at $SENTINEL; detected during API failure)"
+            log "sentinel detected during snapshot failure — advancing to PR phase"
+            build_state "$prior_state" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+            cleanup 0
+        fi
+
+        if (( IDLE_TIMEOUT > 0 )); then
+            now=$(date +%s)
+            idle=$(( now - last_activity ))
+            if (( idle >= IDLE_TIMEOUT )); then
+                mins=$(( idle / 60 ))
+                api_failure=$(( now - last_api_success ))
+                api_failure_mins=$(( api_failure / 60 ))
+                record "api-failure idle timeout: ${mins} minute(s) without new comment activity (diffhub API unreachable for ${api_failure_mins} minute(s)) — auto-advancing to PR phase"
+                log "idle timeout (${idle}s ≥ ${IDLE_TIMEOUT}s) during snapshot failure (api_failure=${api_failure}s) — touching $SENTINEL"
+                touch "$SENTINEL"
+                build_state "$prior_state" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+                cleanup 0
+            fi
+        fi
+
+        log "snapshot fetch failed; retry in 10s"
+        sleep 10
+        continue
+    fi
+    last_api_success=$(date +%s)
 
     # New comments since last poll.
     transitions="$(diff_snapshot "$prior_state" "$snapshot" 2>/dev/null || true)"
@@ -170,7 +196,7 @@ while true; do
         record "human signal: ready-for-pr (sentinel at $SENTINEL)"
         log "sentinel detected — advancing to PR phase"
         build_state "$snapshot" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
-        exit 0
+        cleanup 0
     fi
 
     # Idle-timeout check — touch the sentinel ourselves so the work-task
@@ -184,7 +210,7 @@ while true; do
             log "idle timeout (${idle}s ≥ ${IDLE_TIMEOUT}s) — touching $SENTINEL"
             touch "$SENTINEL"
             build_state "$snapshot" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
-            exit 0
+            cleanup 0
         fi
     fi
 

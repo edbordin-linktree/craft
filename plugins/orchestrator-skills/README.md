@@ -22,30 +22,40 @@ work-task (Codex by default)
   └── Step 11  queue/done/
 ```
 
-## What it installs into each project
+## Plugin assets
 
-Into both `.claude/skills/` and `.codex/skills/` (so discovery works for both
-Claude Code and Codex CLI):
+Craft core syncs `plugins/orchestrator-skills/project/` into each enabled
+project as symlinks. The plugin owns the Ed-specific command layer and skills;
+the base Craft templates stay generic.
+
+Installed `.claude/commands/` assets:
+
+| Command | Purpose |
+|---|---|
+| `work-task` | Enhanced work-task flow: local diffhub review, cross-model review, PR babysitting |
+| `init-architect` | Architect workflow with discoverer delegation guidance |
+| `init-discoverer` | Discoverer workflow for scoping implementation tasks |
+
+Installed into both `.claude/skills/` and `.codex/skills/` (so discovery works
+for both Claude Code and Codex CLI):
 
 | Skill | Used by | Purpose |
 |---|---|---|
 | `delegate-to-devin` | Architect | Cross-repo research via the Devin REST API |
 | `architect-delegation` | Architect | When/how the architect may delegate during planning |
 | `review-pr` | Reviewer sub-agent | Rubric for the local review (severity bands, security/perf checklists, comment conventions). Adapted from [mblode/agent-skills](https://github.com/mblode/agent-skills) (MIT) |
-| `babysit-pr` | Work-task agent (Step 10) | Phase-split github PR babysitter with watch-pr background script |
+| `babysit-pr` | Work-task agent or manual PR babysitter | Phase-split github PR babysitter with watch-pr background script |
 | `cmux` | Reference | cmux CLI + socket API reference |
-
-Slash commands stay `.claude/`-only (codex has no equivalent feature).
 
 ## Scripts (invoked by path, not auto-installed)
 
 Under `plugins/orchestrator-skills/scripts/`:
 
-- **`review-pr`** — spawns the cross-model reviewer headless. Writes findings to `.git/diffhub-comments.json` (inline, tagged `automated-review:<reviewer>-<model>`) and `.orchestrator/handoff/review.md`. Pluggable: `--reviewer claude|codex|cursor|gemini` (only claude wired up today; TODOs at top for the others + parallel reviewers).
-- **`babysit-diffhub`** — fast local watcher for the diffhub-review phase. Polls `.git/diffhub-comments.json` + the `.orchestrator/ready-for-pr` sentinel; writes transitions to `.orchestrator/diffhub-pending.md`. 2-hour idle timeout auto-touches the sentinel.
+- **`review-pr`** — spawns the cross-model reviewer headless. Writes findings to `.orchestrator/handoff/review.md` and imports inline comments through diffhub's `/api/comments` REST API, tagged in the body as `automated-review:<reviewer>-<model>`. Pluggable: `--reviewer claude|codex|cursor|gemini` (only claude wired up today; TODOs at top for the others + parallel reviewers).
+- **`babysit-diffhub`** — fast local watcher for the diffhub-review phase. Polls diffhub's read-only `/api/comments` endpoint + the `.orchestrator/ready-for-pr` sentinel; writes transitions to `.orchestrator/diffhub-pending.md`. 2-hour idle timeout auto-touches the sentinel.
 - **`watch-pr`** — GitHub PR watcher used by `babysit-pr`. Single GraphQL fetch per poll; captures conflicts, CI failures, new review threads + inline comments, base advances.
 - **`delegate-to-devin`** — Bash helper that round-trips Devin REST API (create session, poll, render `structured_output` to file).
-- **`send-agent`** — generic "send a message to a named agent" dispatcher (spawn fresh, resume existing, or send to live pane). Used in the archived multi-agent flow; retained because `delegate-to-devin` / `architect-delegation` patterns can still benefit from it.
+- **`send-agent`** — generic "send a message to a named agent" dispatcher (spawn fresh, resume existing, or send to live pane). Used in the archived multi-agent flow and retained for operators who still want that style of delegation.
 
 ## Configuration
 
@@ -61,7 +71,8 @@ Under `plugins/orchestrator-skills/scripts/`:
 
 ### Plugin-level configuration
 
-`plugin.conf` next to this README has tunables (install mode, Devin API key + ACU limit).
+`plugin.conf` next to this README declares `QUEUE_STATES=diffhub-review` and
+has Devin API tunables. Craft core creates/renders the extra queue state.
 
 ## Enabling
 
@@ -69,14 +80,18 @@ Under `plugins/orchestrator-skills/scripts/`:
 craft plugin add <project-name> orchestrator-skills
 ```
 
-`craft plugin add` symlinks the plugin from `$CRAFT_ROOT/plugins/` into the project, then fires `on_install` which interactively offers to set `DEFAULT_AGENT=codex` if it isn't already.
+`craft plugin add` enables the plugin in the project, fires `on_install`, then
+uses Craft's generic project-asset sync to symlink commands and skills into the
+project. `on_install` interactively offers to set `DEFAULT_AGENT=codex` if it
+isn't already.
 
 ## Architect access
 
-`init-architect.md` (the craft default) doesn't need editing. The architect picks up the right delegation behaviour automatically via two channels:
+`init-architect.md` is plugin-owned once this plugin is enabled. The architect
+picks up delegation behaviour from installed skills:
 
-- **`architect-delegation` skill** (auto-discovered) — names which tools the architect may delegate to (Devin via skill, Claude via native `Agent` tool) and what's off-limits (`/work-task`, the execution-side scripts).
-- **`delegate-to-devin` skill** (auto-discovered) — mechanics for firing a Devin session during research.
+- **`architect-delegation` skill** (auto-discovered) — explains when planning work can be delegated and what remains off-limits to the architect.
+- **`delegate-to-devin` skill** (auto-discovered) — optional mechanics for firing a Devin session during research when the helper is configured.
 
 ## Archived
 
@@ -89,6 +104,8 @@ The orchestrator's `TASK_SKILL` configurability is retained — anyone wanting t
 
 ## Open TODOs
 
-- **Dashboard "approve" hotkey** in `bin/orchestrator.sh`: let the operator advance a task from `diffhub-review` → PR phase by hitting a key in the dashboard, which would `touch <worktree>/.orchestrator/ready-for-pr`. Today the human runs `touch` manually or tells the agent to.
+- **Task runtime wakeups and web surfaces** — task 026 migrates the diffhub and
+  PR watcher loops onto Craft's generic event/surface runtime. Until then,
+  these scripts keep using the current `.orchestrator/*` files and cmux helpers.
 - **`review-pr --reviewer codex|cursor|gemini`** — currently stubbed. Wire up real dispatch.
 - **Parallel reviewers** — let `review-pr` spawn multiple models simultaneously, each writing findings with its own tag.

@@ -55,6 +55,18 @@ assert_file_contains() {
     fi
 }
 
+assert_existing_file_not_contains_regex() {
+    local label="$1" file="$2" pattern="$3"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [[ ! -f "$file" ]]; then
+        fail "$label" "missing file: $file"
+    elif grep -Eq -- "$pattern" "$file" 2>/dev/null; then
+        fail "$label" "unexpected match for '$pattern' in $file"
+    else
+        pass "$label"
+    fi
+}
+
 # --- Setup ---
 
 TMPDIR=$(mktemp -d)
@@ -110,6 +122,29 @@ rm "$PROJECT_DIR/.claude/commands/example.md"
 echo "local file" > "$PROJECT_DIR/.claude/commands/example.md"
 assert_false "refuses real-file conflict" plugin_sync_project_assets "$PROJECT_DIR"
 rm "$PROJECT_DIR/.claude/commands/example.md"
+
+echo ""
+echo "orchestrator-skills assets"
+real_project="$TMPDIR/orchestrator-project"
+mkdir -p "$real_project"
+cat > "$real_project/craft.conf" << 'EOF'
+PLUGINS=orchestrator-skills
+EOF
+
+old_craft_root="$CRAFT_ROOT"
+CRAFT_ROOT="$REPO_ROOT"
+assert_true "orchestrator-skills syncs through generic assets" plugin_sync_project_assets "$real_project"
+assert_true "orchestrator work-task command linked" test -L "$real_project/.claude/commands/work-task.md"
+assert_eq "orchestrator work-task target" "$REPO_ROOT/plugins/orchestrator-skills/project/.claude/commands/work-task.md" "$(readlink "$real_project/.claude/commands/work-task.md")"
+assert_true "orchestrator architect command linked" test -L "$real_project/.claude/commands/init-architect.md"
+assert_true "orchestrator discoverer command linked" test -L "$real_project/.claude/commands/init-discoverer.md"
+assert_true "orchestrator claude skill linked" test -L "$real_project/.claude/skills/review-pr"
+assert_true "orchestrator codex skill linked" test -L "$real_project/.codex/skills/review-pr"
+assert_existing_file_not_contains_regex "orchestrator hooks file exists and does not hardcode skill symlinks" "$REPO_ROOT/plugins/orchestrator-skills/hooks.sh" 'ln -s .*skills|cp -R .*skills|skill_list='
+orchestrator_states="$(plugin_queue_states "$real_project" | sort | paste -sd, -)"
+expected_orchestrator_states="$(printf '%s\n' pending approved in-progress waiting done blocked archive diffhub-review | sort | paste -sd, -)"
+assert_eq "orchestrator declares diffhub-review" "$expected_orchestrator_states" "$orchestrator_states"
+CRAFT_ROOT="$old_craft_root"
 
 echo ""
 echo "plugin_queue_states"

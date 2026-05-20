@@ -24,7 +24,7 @@ Run it before `/done` when a coding session produced changes worth checking.
 - Secondary target: current branch diff against base when the working tree is clean or the user asks for branch review
 - Explicit PR requests are secondary: keep the same review criteria, but treat them as a handoff path rather than the main workflow
 - Keep the skill focused on concrete bugs, missing validation/tests that clearly matter, and repository instruction-file compliance
-- Do not use this skill for inbound PR comments or thread resolution; use `pr-comments` for that
+- Do not use this skill for inbound PR comments or thread resolution; use the repository's PR-review workflow or a dedicated PR babysitter instead
 
 ## Workflow
 
@@ -62,7 +62,7 @@ Review progress:
    - Default output: a local review report in chat
    - Organize findings into `Must fix before push`, `Should fix soon`, and `Ready for handoff`
    - Do not post inline comments, resolve threads, or handle inbound review feedback from this skill
-   - Hand off inbound PR feedback to `pr-comments`
+   - Hand off inbound PR feedback to the repository's PR-review workflow
 
 ## High signal only
 
@@ -137,10 +137,5 @@ If the user explicitly points at an existing PR, adapt the same validated findin
 - "This might cause issues" -> "Variable `x` is undefined at `src/foo.ts:45`, causing `ReferenceError` at runtime."
 - "Consider refactoring" -> "Violates instruction-file rule '<quoted rule>' in scoped file `src/foo.ts`."
 - Multiple comments for the same root cause -> one comment linking all affected locations
-
-## Related skills
-
-- `done` for session capture after the review is complete
-- `babysit-pr` for triaging and resolving inbound review threads after feedback has been left
 
 Every flagged issue should be something a senior engineer would catch.
