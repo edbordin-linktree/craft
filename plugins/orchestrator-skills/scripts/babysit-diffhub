@@ -69,6 +69,10 @@ done
 cd "$WORKTREE"
 mkdir -p "$WORKTREE/.orchestrator"
 
+# This watcher intentionally keeps its own local snapshot/pending files for
+# task-025. Migrating watcher wakeups onto Craft's runtime event/state
+# primitives belongs with the task-026 runtime migration, not this asset-boundary
+# cleanup.
 STATE_FILE="${STATE_FILE:-$WORKTREE/.orchestrator/diffhub-state.json}"
 PENDING_FILE="${PENDING_FILE:-$WORKTREE/.orchestrator/diffhub-pending.md}"
 SENTINEL="${SENTINEL:-$WORKTREE/.orchestrator/ready-for-pr}"
