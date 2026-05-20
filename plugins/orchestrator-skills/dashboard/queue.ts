@@ -6,6 +6,11 @@ export interface Task {
   id: string;
   status: string;
   type?: string;
+  title?: string;
+  parent?: string;
+  workflow?: string;
+  waitingOn?: string;
+  waitingReason?: string;
   branch?: string;
   repos: string[];
   depends_on: string[];
@@ -27,6 +32,7 @@ export interface Task {
 }
 
 const QUEUE_DIRS = [
+  "drafts",
   "in-progress",
   "diffhub-review",
   "waiting",
@@ -42,7 +48,7 @@ const LINEAR_PATTERN = /\b(TRU|LIN|ENG)-\d+\b/g;
 
 export function scanProject(projectDir: string): Task[] {
   const tasks: Task[] = [];
-  for (const dir of QUEUE_DIRS) {
+  for (const dir of discoverQueueDirs(projectDir)) {
     const dirPath = join(projectDir, "queue", dir);
     if (!existsSync(dirPath)) continue;
     let entries: string[];
@@ -76,9 +82,14 @@ export function scanProject(projectDir: string): Task[] {
         id: (fm.id as string) ?? file.replace(/\.md$/, ""),
         status: (fm.status as string) ?? dir,
         type: fm.type as string | undefined,
+        title: fm.title as string | undefined,
+        parent: fm.parent as string | undefined,
+        workflow: (fm.workflow as string | undefined) ?? "standard-pr",
+        waitingOn: fm.waiting_on as string | undefined,
+        waitingReason: fm.waiting_reason as string | undefined,
         branch: fm.branch as string | undefined,
-        repos: (fm.repos as string[]) ?? [],
-        depends_on: (fm.depends_on as string[]) ?? [],
+        repos: stringArray(fm.repos),
+        depends_on: stringArray(fm.depends_on),
         unmetDeps: [], // populated after the full scan below
         milestone: fm.milestone as string | undefined,
         pr: fm.pr as string | undefined,
@@ -104,11 +115,46 @@ export function scanProject(projectDir: string): Task[] {
 
   // Sort: by queueDir order, then most recently modified first inside each.
   return tasks.sort((a, b) => {
-    const da = QUEUE_DIRS.indexOf(a.queueDir as typeof QUEUE_DIRS[number]);
-    const db = QUEUE_DIRS.indexOf(b.queueDir as typeof QUEUE_DIRS[number]);
+    const da = queueRank(a.queueDir);
+    const db = queueRank(b.queueDir);
     if (da !== db) return da - db;
+    const aw = Boolean(a.waitingOn || a.waitingReason);
+    const bw = Boolean(b.waitingOn || b.waitingReason);
+    if (aw !== bw) return aw ? 1 : -1;
     return b.modifiedAt.getTime() - a.modifiedAt.getTime();
   });
+}
+
+function discoverQueueDirs(projectDir: string): string[] {
+  const queueRoot = join(projectDir, "queue");
+  const found = new Set<string>();
+  for (const dir of QUEUE_DIRS) {
+    if (existsSync(join(queueRoot, dir))) found.add(dir);
+  }
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(queueRoot);
+  } catch {
+    return [...found];
+  }
+  for (const entry of entries) {
+    if (entry === "archive") continue;
+    let stat;
+    try { stat = statSync(join(queueRoot, entry)); } catch { continue; }
+    if (stat.isDirectory()) found.add(entry);
+  }
+  return [...found].sort((a, b) => queueRank(a) - queueRank(b) || a.localeCompare(b));
+}
+
+function queueRank(queueDir: string): number {
+  const idx = QUEUE_DIRS.indexOf(queueDir as typeof QUEUE_DIRS[number]);
+  return idx === -1 ? 100 : idx;
+}
+
+function stringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  return [];
 }
 
 /**

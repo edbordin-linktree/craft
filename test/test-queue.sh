@@ -55,7 +55,7 @@ TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 QUEUE_DIR="$TMPDIR/queue"
-mkdir -p "$QUEUE_DIR"/{pending,approved,in-progress,done,blocked,archive}
+mkdir -p "$QUEUE_DIR"/{drafts,pending,approved,in-progress,done,blocked,archive}
 
 # Create test task files
 cat > "$QUEUE_DIR/pending/task-001.md" << 'EOF'
@@ -126,6 +126,36 @@ branch: feat/optimize
 # Optimize queries
 EOF
 
+cat > "$QUEUE_DIR/approved/task-007.md" << 'EOF'
+---
+id: task-007
+type: plan
+title: Parent Plan
+milestone: m1-foundation
+status: approved
+depends_on: []
+repos: []
+branch: plan/parent
+---
+
+# Parent plan
+EOF
+
+cat > "$QUEUE_DIR/drafts/task-008.md" << 'EOF'
+---
+id: task-008
+type: pr
+milestone: m1-foundation
+status: draft
+parent: task-007
+depends_on: []
+repos: [my-repo]
+branch: feat/child
+---
+
+# Child draft
+EOF
+
 # --- Tests ---
 
 echo "task_field"
@@ -147,6 +177,7 @@ echo ""
 echo "task_depends_on"
 assert_eq "empty deps" "" "$(task_depends_on "$QUEUE_DIR/pending/task-001.md")"
 assert_eq "has deps" "task-001" "$(task_depends_on "$QUEUE_DIR/pending/task-002.md")"
+assert_eq "parent does not count as dep" "" "$(task_depends_on "$QUEUE_DIR/drafts/task-008.md")"
 
 echo ""
 echo "task_deps_met"
@@ -163,7 +194,7 @@ rm "$QUEUE_DIR/done/task-001.md"
 echo ""
 echo "count_tasks"
 assert_eq "pending count" "2" "$(count_tasks "$QUEUE_DIR/pending")"
-assert_eq "approved count" "2" "$(count_tasks "$QUEUE_DIR/approved")"
+assert_eq "approved count" "3" "$(count_tasks "$QUEUE_DIR/approved")"
 assert_eq "done count" "0" "$(count_tasks "$QUEUE_DIR/done")"
 assert_eq "empty dir count" "0" "$(count_tasks "$QUEUE_DIR/blocked")"
 
@@ -184,17 +215,40 @@ rm "$QUEUE_DIR/approved/task-003.md"
 next=$(next_ready_task "$QUEUE_DIR")
 assert_eq "picks task after dep met" "task-004" "$(task_id "$next")"
 
+rm "$QUEUE_DIR/approved/task-004.md"
+next=$(next_ready_task "$QUEUE_DIR" || true)
+assert_eq "skips plan tasks" "" "$next"
+
+echo ""
+echo "promote_draft_task"
+promoted=$(promote_draft_task "$QUEUE_DIR" task-008)
+assert_eq "promotes draft path" "$QUEUE_DIR/pending/task-008.md" "$promoted"
+assert_eq "promotes draft status" "pending" "$(task_status "$promoted")"
+
 echo ""
 echo "move_task"
-new_file=$(move_task "$QUEUE_DIR/approved/task-004.md" "$QUEUE_DIR/in-progress" "in-progress")
-assert_eq "moves file" "$QUEUE_DIR/in-progress/task-004.md" "$new_file"
+cat > "$QUEUE_DIR/approved/task-009.md" << 'EOF'
+---
+id: task-009
+type: pr
+milestone: m1-foundation
+status: approved
+depends_on: []
+repos: [my-repo]
+branch: feat/move
+---
+
+# Move fixture
+EOF
+new_file=$(move_task "$QUEUE_DIR/approved/task-009.md" "$QUEUE_DIR/in-progress" "in-progress")
+assert_eq "moves file" "$QUEUE_DIR/in-progress/task-009.md" "$new_file"
 assert_eq "updates status" "in-progress" "$(task_status "$new_file")"
-assert_eq "approved now empty" "0" "$(count_tasks "$QUEUE_DIR/approved")"
+assert_eq "approved keeps plan only" "1" "$(count_tasks "$QUEUE_DIR/approved")"
 
 echo ""
 echo "append_work_log"
-append_work_log "$QUEUE_DIR/in-progress/task-004.md" "Test log entry"
-assert_eq "appends to file" "1" "$(grep -c 'Test log entry' "$QUEUE_DIR/in-progress/task-004.md")"
+append_work_log "$QUEUE_DIR/in-progress/task-009.md" "Test log entry"
+assert_eq "appends to file" "1" "$(grep -c 'Test log entry' "$QUEUE_DIR/in-progress/task-009.md")"
 
 echo ""
 echo "move_task timestamps"

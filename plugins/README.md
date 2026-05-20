@@ -32,13 +32,15 @@ Plugins should keep project assets generic and avoid writing project-specific lo
 
 ## Workflow Runtime
 
-Craft core exposes a small stage-based runtime for task workflows. The stock stage vocabulary is:
+Craft core exposes a small stage-based runtime for task workflows. The stock `standard-pr` happy path is:
 
 ```text
-context -> setup_worktree -> implement -> qa -> local_review -> pr_review -> complete -> blocked -> cleanup
+implement -> qa -> pr_review -> complete
 ```
 
-Use `craft task stage ...` to mutate stages. These commands update the task file's YAML frontmatter (`stage:`, `stage_status:`, and `stage_reason:`) and dispatch stage hooks; callers should not invoke stage hooks directly.
+Context loading and worktree setup are executor/orchestrator responsibilities, not workflow stages. `blocked` is an explicit terminal escape, not part of happy-path `advance`.
+
+Use `craft task stage ...` to mutate stages. These commands update the task file's YAML frontmatter (`stage:`, `stage_status:`, and `stage_reason:`), dispatch stage lifecycle hooks, and publish a `stage.changed` event; callers should not invoke stage hooks directly.
 
 ```bash
 craft task stage get task-123
@@ -49,6 +51,38 @@ craft task stage complete task-123
 ```
 
 Task agents also get a task-scoped runtime directory under `tasks/<task-id>/.orchestrator/`. Craft writes `task-session.json` before launching the agent so background tools can find the task workspace and canonical task pane without relying on display titles.
+
+The default workflow preset is core-bundled at `workflows/standard-pr/`. Tasks without `workflow:` use `standard-pr`. Tasks with `skill:` bypass workflow rendering and keep the legacy direct command dispatch behavior.
+
+Workflow prompt fragments and deterministic hooks are deliberately separate:
+
+- Prompt fragments tell the agent what to do.
+- Script hooks do side effects such as opening surfaces, starting watchers, or notifying external systems.
+
+Plugins can append prompt text to a stage by adding:
+
+```text
+plugins/<plugin>/fragments/stages/<stage>.md
+```
+
+Fragments concatenate after the stage's base prompt in `PLUGINS` order.
+
+Plugins can also contribute a stage by adding a stage file:
+
+```text
+plugins/<plugin>/stages/watching_prod_deploy.md
+```
+
+The stage file's frontmatter declares placement:
+
+```yaml
+---
+insert: after:pr_review
+events: buildkite.build_ready
+---
+```
+
+Stage and event IDs come from filenames. `stages/qa.md` defines `qa`; `plugins/buildkite/fragments/stages/qa.md` extends it. Event definitions live in `events/<event>.md` or `plugins/<plugin>/events/<event>.md`, with fragments in `plugins/<plugin>/fragments/events/<event>.md`.
 
 The supported agent wake-up path is a pending-only typed event queue:
 
@@ -70,7 +104,7 @@ Plugins may declare extra queue states in `plugin.conf`:
 QUEUE_STATES=diffhub-review,custom-review
 ```
 
-Craft always provides the core states `pending`, `approved`, `in-progress`, `waiting`, `done`, `blocked`, and `archive`. Plugin states are created under `queue/`, included in orchestrator counts and milestone scans, and rendered generically in the terminal dashboard.
+Craft always provides the core states `drafts`, `pending`, `approved`, `in-progress`, `waiting`, `done`, `blocked`, and `archive`. Plugin states are created under `queue/`, included in orchestrator counts and milestone scans, and rendered generically in the terminal dashboard.
 
 ## Enabling Plugins
 
@@ -93,8 +127,8 @@ Then configure the plugin by editing its `plugin.conf`.
 | `on_done` | Task completed (PR merged) | `--project-dir PATH --task-id ID --task-file PATH --task-dir PATH --pr-url URL` |
 | `on_blocked` | Task blocked | `--project-dir PATH --task-id ID --task-file PATH --task-dir PATH --reason REASON` |
 | `on_milestone` | All tasks in a milestone completed | `--project-dir PATH --milestone ID` |
-| `on_stage_before` | Before `craft task stage ...` mutates a task stage | `--project-dir PATH --stage STAGE --task-id ID --task-file PATH --task-dir PATH --status STATUS --reason REASON` |
-| `on_stage_after` | After `craft task stage ...` mutates a task stage | `--project-dir PATH --stage STAGE --task-id ID --task-file PATH --task-dir PATH --status STATUS --reason REASON` |
+| `on_stage_end` | Before Craft leaves the previous task stage | `--project-dir PATH --stage PREVIOUS --next-stage NEXT --task-id ID --task-file PATH --task-dir PATH --status STATUS --reason REASON --workflow NAME --workflow-options-json JSON` |
+| `on_stage_start` | After Craft enters the new task stage | `--project-dir PATH --stage STAGE --previous-stage PREVIOUS --task-id ID --task-file PATH --task-dir PATH --status STATUS --reason REASON --workflow NAME --workflow-options-json JSON` |
 
 Task-related hooks include `--task-file`, `--task-dir`, and `--pr-url` when Craft can derive them from the queue file and project layout. Hook handlers should ignore unknown arguments so this contract can grow without breaking existing plugins.
 

@@ -78,7 +78,7 @@ QUEUE_DIR="$PROJECT_DIR/queue"
 mkdir -p "$CRAFT_ROOT/plugins/example/project/.claude/commands"
 mkdir -p "$CRAFT_ROOT/plugins/example/project/.claude/skills/example-skill"
 mkdir -p "$CRAFT_ROOT/plugins/example/project/.codex/skills/example-skill"
-mkdir -p "$PROJECT_DIR" "$QUEUE_DIR"/{pending,approved,in-progress,waiting,done,blocked,archive}
+mkdir -p "$PROJECT_DIR" "$QUEUE_DIR"/{drafts,pending,approved,in-progress,waiting,done,blocked,archive}
 
 cat > "$PROJECT_DIR/craft.conf" << 'EOF'
 PLUGINS=example
@@ -142,20 +142,20 @@ assert_true "orchestrator claude skill linked" test -L "$real_project/.claude/sk
 assert_true "orchestrator codex skill linked" test -L "$real_project/.codex/skills/review-pr"
 assert_existing_file_not_contains_regex "orchestrator hooks file exists and does not hardcode skill symlinks" "$REPO_ROOT/plugins/orchestrator-skills/hooks.sh" 'ln -s .*skills|cp -R .*skills|skill_list='
 orchestrator_states="$(plugin_queue_states "$real_project" | sort | paste -sd, -)"
-expected_orchestrator_states="$(printf '%s\n' pending approved in-progress waiting done blocked archive diffhub-review | sort | paste -sd, -)"
+expected_orchestrator_states="$(printf '%s\n' drafts pending approved in-progress waiting done blocked archive diffhub-review | sort | paste -sd, -)"
 assert_eq "orchestrator declares diffhub-review" "$expected_orchestrator_states" "$orchestrator_states"
 CRAFT_ROOT="$old_craft_root"
 
 echo ""
 echo "plugin_queue_states"
 states="$(plugin_queue_states "$PROJECT_DIR" | paste -sd, -)"
-assert_eq "core plus plugin states" "pending,approved,in-progress,waiting,done,blocked,archive,diffhub-review,custom-review" "$states"
+assert_eq "core plus plugin states" "drafts,pending,approved,in-progress,waiting,done,blocked,archive,diffhub-review,custom-review" "$states"
 
 echo ""
 echo "notify hook args"
 source "$REPO_ROOT/bin/lib/queue.sh"
 source "$REPO_ROOT/bin/lib/notify.sh"
-QUEUE_STATES=(pending approved in-progress waiting done blocked archive diffhub-review custom-review)
+QUEUE_STATES=(drafts pending approved in-progress waiting done blocked archive diffhub-review custom-review)
 export PROJECT_DIR QUEUE_DIR
 
 task_file="$QUEUE_DIR/waiting/task-123.md"

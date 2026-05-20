@@ -31,6 +31,7 @@ source "$SCRIPT_DIR/lib/queue.sh"
 source "$SCRIPT_DIR/lib/plugins.sh"
 source "$SCRIPT_DIR/lib/notify.sh"
 source "$SCRIPT_DIR/lib/runtime.sh"
+source "$SCRIPT_DIR/lib/workflow.sh"
 source "$SCRIPT_DIR/lib/providers.sh"
 # Multiplexer loaded after config (needs MULTIPLEXER variable)
 
@@ -141,6 +142,7 @@ render_dashboard() {
         count=$(count_tasks "$QUEUE_DIR/$state")
         queue_counts["$state"]="$count"
         case "$state" in
+            drafts)      icon="◌"; color="$BLUE" ;;
             pending)     icon="○"; color="$BLUE" ;;
             approved)    icon="◐"; color="$YELLOW" ;;
             in-progress) icon="●"; color="$CYAN" ;;
@@ -175,7 +177,7 @@ render_dashboard() {
     # Plugin-declared intermediate queue states.
     for state in "${QUEUE_STATES[@]}"; do
         case "$state" in
-            pending|approved|in-progress|waiting|done|blocked|archive) continue ;;
+            drafts|pending|approved|in-progress|waiting|done|blocked|archive) continue ;;
         esac
         count="${queue_counts[$state]:-0}"
         [[ "$count" -gt 0 ]] || continue
@@ -261,18 +263,31 @@ run_task() {
     # Move to in-progress and notify plugins
     local new_file
     new_file=$(move_task "$task_file" "$QUEUE_DIR/in-progress" "in-progress")
-    # Build the prompt file
-    # Read the skill template and substitute $ARGUMENTS
-    # Prepend a note that the task has already been moved to in-progress by the orchestrator
-    # TASK_SKILL (craft.conf or task frontmatter) selects which slash command runs the task.
+    # Build the prompt file. `skill:` keeps an explicit direct command dispatch
+    # escape hatch; the default work-task path renders the resolved workflow.
     local skill_name="$(task_field "$new_file" "skill")"
-    local skill_file="$PROJECT_DIR/.claude/commands/${skill_name:-${TASK_SKILL:-work-task}}.md"
+    local configured_skill="${skill_name:-${TASK_SKILL:-}}"
     local prompt_file="/tmp/craft-prompt-${tid}.txt"
-    {
-        echo "NOTE: The orchestrator has already moved this task to queue/in-progress/${filename} and set its status to in-progress. Skip Step 2 (Move Task to In-Progress) — start from Step 1 (read context) then go straight to Step 3 (do the work)."
-        echo ""
-        sed "s/\\\$ARGUMENTS/$filename/g" "$skill_file"
-    } > "$prompt_file"
+    if [[ -n "$configured_skill" && "$configured_skill" != "work-task" ]]; then
+        local skill_file="$PROJECT_DIR/.claude/commands/${configured_skill}.md"
+        {
+            echo "NOTE: The orchestrator has already moved this task to queue/in-progress/${filename} and set its status to in-progress. Skip Step 2 (Move Task to In-Progress) — start from Step 1 (read context) then go straight to Step 3 (do the work)."
+            echo ""
+            sed "s/\\\$ARGUMENTS/$filename/g" "$skill_file"
+        } > "$prompt_file"
+    else
+        if ! workflow_render_prompt "$PROJECT_DIR" "$new_file" "$filename" > "$prompt_file"; then
+            log "Workflow prompt render failed for $tid"
+            append_work_log "$new_file" "Blocked: workflow prompt render failed"
+            move_task "$new_file" "$QUEUE_DIR/blocked" "blocked" > /dev/null
+            return
+        fi
+        local first_stage
+        first_stage="$(workflow_resolve_stages "$PROJECT_DIR" "$new_file" | head -1)"
+        if [[ -n "$first_stage" ]]; then
+            runtime_stage_set "$PROJECT_DIR" "$tid" "$first_stage" "workflow started" active >/dev/null
+        fi
+    fi
 
     # Determine which agent provider to use (task-level override or project default)
     local agent

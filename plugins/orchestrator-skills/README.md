@@ -80,7 +80,7 @@ Under `plugins/orchestrator-skills/scripts/`:
 
 - `CODEX_APPROVAL_MODE=bypass` — fewer interactive prompts.
 - `MULTIPLEXER=cmux` — if you're on cmux. Diffhub integrates cleanly here.
-- `TASK_SKILL=<skill-name>` — override the orchestrator's per-task slash command (defaults to `work-task`). Useful for opting individual projects into bespoke flows.
+- `TASK_SKILL=<skill-name>` — optional escape hatch for a non-workflow task command. By default, Craft renders the resolved workflow prompt from the task's `workflow:` field and enabled plugin stages.
 
 ### Plugin-level configuration
 
@@ -113,7 +113,7 @@ Under `archive/` and not installed by `on_poll`:
 - `commands/multiagent-task.md` — supervisor + per-stage delegation flow.
 - `skills/delegate-to-claude/` and `skills/delegate-to-codex/` — used by the old supervisor to delegate execute / review / planning stages to specialised sub-agents.
 
-The orchestrator's `TASK_SKILL` configurability is retained — anyone wanting to revive the multi-agent flow can move files back out of `archive/` and set `TASK_SKILL=multiagent-task`.
+The orchestrator's non-workflow `TASK_SKILL` escape hatch is retained — anyone wanting to revive the multi-agent flow can move files back out of `archive/` and set `TASK_SKILL=multiagent-task`.
 
 ## Open TODOs
 

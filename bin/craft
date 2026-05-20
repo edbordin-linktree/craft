@@ -54,7 +54,11 @@ Usage:
   craft config <project> [key] [val] Read or set project config
   craft plugin <subcommand>          Manage plugins
   craft task state set ...           Move a task through queue/runtime state
+  craft task wait-team <task-id>     Mark a task as waiting on team
+  craft task unwait-team <task-id>   Clear waiting-on-team marker
+  craft task promote-draft <task-id> Promote a draft task to pending
   craft task stage <subcommand>      Get or mutate a task workflow stage
+  craft workflow render [task]       Render assembled workflow prompt
   craft event <subcommand>           Manage a task's pending event queue
   craft surface <subcommand>         Manage task web surfaces
   craft doctor                       Check dependencies
@@ -83,10 +87,75 @@ _require_reason() {
     }
 }
 
+_task_file_from_arg() {
+    local project_dir="$1" arg="${2:-}"
+    local queue_dir="$project_dir/queue" task_id candidate dir
+
+    if [[ -z "$arg" ]]; then
+        next_ready_task "$queue_dir"
+        return
+    fi
+
+    if [[ -f "$arg" ]]; then
+        (cd "$(dirname "$arg")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$arg")")
+        return
+    fi
+
+    candidate="$project_dir/$arg"
+    if [[ -f "$candidate" ]]; then
+        (cd "$(dirname "$candidate")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$candidate")")
+        return
+    fi
+
+    task_id="${arg%.md}"
+    if [[ "$task_id" == task-* ]]; then
+        runtime_task_file "$project_dir" "$task_id"
+        return
+    fi
+
+    for dir in "$queue_dir"/*; do
+        [[ -d "$dir" ]] || continue
+        candidate="$dir/$arg"
+        [[ -f "$candidate" ]] && { printf '%s\n' "$candidate"; return; }
+    done
+    return 1
+}
+
 cmd_task() {
     local group="${1:-}"
     shift || true
     case "$group" in
+        promote-draft)
+            local task_id="${1:?task id required}"
+            local project_dir
+            project_dir="$(_cmd_project_dir)"
+            promote_draft_task "$project_dir/queue" "$task_id" >/dev/null
+            ;;
+        wait-team)
+            local task_id="${1:?task id required}" reason="team"
+            shift || true
+            local project_dir task_file
+            project_dir="$(_cmd_project_dir)"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --reason) reason="${2:-team}"; shift 2 ;;
+                    *) echo "craft task wait-team: unknown arg: $1" >&2; exit 2 ;;
+                esac
+            done
+            task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; exit 1; }
+            runtime_set_task_field "$task_file" waiting_on team
+            runtime_set_task_field "$task_file" waiting_reason "$reason"
+            runtime_append_work_log "$task_file" "Waiting On Team" "$reason"
+            ;;
+        unwait-team)
+            local task_id="${1:?task id required}"
+            local project_dir task_file
+            project_dir="$(_cmd_project_dir)"
+            task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; exit 1; }
+            runtime_set_task_field "$task_file" waiting_on ""
+            runtime_set_task_field "$task_file" waiting_reason ""
+            runtime_append_work_log "$task_file" "Waiting On Team Cleared"
+            ;;
         state)
             local subcmd="${1:-}"
             shift || true
@@ -199,7 +268,7 @@ cmd_task() {
             esac
             ;;
         *)
-            echo "Usage: craft task stage <subcommand>" >&2
+            echo "Usage: craft task promote-draft <task-id> | wait-team <task-id> | unwait-team <task-id> | state <subcommand> | stage <subcommand>" >&2
             exit 2
             ;;
     esac
@@ -245,6 +314,28 @@ cmd_event() {
             ;;
         *)
             echo "Usage: craft event enqueue|counts|take ..." >&2
+            exit 2
+            ;;
+    esac
+}
+
+cmd_workflow() {
+    local subcmd="${1:-}"
+    shift || true
+    local project_dir
+    project_dir="$(_cmd_project_dir)"
+    case "$subcmd" in
+        render)
+            local task_arg="${1:-}" task_file filename
+            task_file="$(_task_file_from_arg "$project_dir" "$task_arg")" || {
+                echo "task_not_found: ${task_arg:-next ready task}" >&2
+                exit 1
+            }
+            filename="$(basename "$task_file")"
+            workflow_render_prompt "$project_dir" "$task_file" "$filename"
+            ;;
+        *)
+            echo "Usage: craft workflow render [task-id|task-file]" >&2
             exit 2
             ;;
     esac
@@ -961,6 +1052,9 @@ HELP
         ;;
     task)
         cmd_task "$@"
+        ;;
+    workflow)
+        cmd_workflow "$@"
         ;;
     event)
         cmd_event "$@"

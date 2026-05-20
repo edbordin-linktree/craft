@@ -6,7 +6,7 @@ if [[ -z "${CRAFT_ROOT:-}" ]]; then
     CRAFT_ROOT="$(cd "$_PLUGINS_LIB_DIR/../.." && pwd)"
 fi
 
-BASE_QUEUE_STATES=(pending approved in-progress waiting done blocked archive)
+BASE_QUEUE_STATES=(drafts pending approved in-progress waiting done blocked archive)
 
 plugin_enabled_plugins() {
     local project_dir="$1"

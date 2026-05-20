@@ -37,7 +37,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 PROJECT_DIR="$TMPDIR/project"
 QUEUE_DIR="$PROJECT_DIR/queue"
 WORKTREE="$PROJECT_DIR/tasks/task-123/craft"
-mkdir -p "$QUEUE_DIR"/{pending,approved,in-progress,waiting,done,blocked,archive,diffhub-review}
+mkdir -p "$QUEUE_DIR"/{drafts,pending,approved,in-progress,waiting,done,blocked,archive,diffhub-review}
 mkdir -p "$WORKTREE/.orchestrator"
 
 cat > "$PROJECT_DIR/craft.conf" <<'EOF'
@@ -154,6 +154,8 @@ assert_eq "terminal event keeps snapshot" "MERGED" "$(jq -r '.[0].payload.snapsh
 echo ""
 echo "normal workflow docs"
 assert_true "normal work-task docs do not reference await scripts" bash -c "! grep -Eq 'await-diffhub-review|await-pr-event' '$REPO_ROOT/plugins/orchestrator-skills/commands/work-task.md'"
+assert_true "normal work-task docs render resolved workflow" grep -q 'craft workflow render' "$REPO_ROOT/plugins/orchestrator-skills/commands/work-task.md"
+assert_true "normal work-task docs do not hard-code local review" bash -c "! grep -Eq 'Step 8|diffhub|ready_for_pr' '$REPO_ROOT/plugins/orchestrator-skills/commands/work-task.md'"
 assert_true "await scripts removed from normal scripts" bash -c "! test -e '$REPO_ROOT/plugins/orchestrator-skills/scripts/await-diffhub-review' && ! test -e '$REPO_ROOT/plugins/orchestrator-skills/scripts/await-pr-event'"
 
 echo ""

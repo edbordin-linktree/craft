@@ -199,6 +199,7 @@ function modalError(msg: string): string {
 
 function statusBadgeColor(s: string): string {
   return ({
+    "drafts": "#64748b",
     "in-progress": "#2563eb",
     "diffhub-review": "#7c3aed",
     "waiting": "#d97706",
@@ -254,6 +255,57 @@ function approveTask(projectDir: string, taskId: string) {
     return { ok: false, error: `move failed: ${String(err)}` };
   }
   return { ok: true, from: src, to: dst };
+}
+
+function promoteDraft(projectDir: string, taskId: string) {
+  const craftBin = process.env.CRAFT_ROOT ? join(process.env.CRAFT_ROOT, "bin", "craft") : "craft";
+  const proc = Bun.spawnSync({
+    cmd: [craftBin, "task", "promote-draft", taskId],
+    cwd: projectDir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (proc.exitCode !== 0) {
+    return {
+      ok: false,
+      error: new TextDecoder().decode(proc.stderr).trim() || `craft exited ${proc.exitCode}`,
+    };
+  }
+  return { ok: true, from: "drafts", to: "pending" };
+}
+
+function waitTeam(projectDir: string, taskId: string) {
+  const craftBin = process.env.CRAFT_ROOT ? join(process.env.CRAFT_ROOT, "bin", "craft") : "craft";
+  const proc = Bun.spawnSync({
+    cmd: [craftBin, "task", "wait-team", taskId, "--reason", "team"],
+    cwd: projectDir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (proc.exitCode !== 0) {
+    return {
+      ok: false,
+      error: new TextDecoder().decode(proc.stderr).trim() || `craft exited ${proc.exitCode}`,
+    };
+  }
+  return { ok: true, waiting_on: "team" };
+}
+
+function unwaitTeam(projectDir: string, taskId: string) {
+  const craftBin = process.env.CRAFT_ROOT ? join(process.env.CRAFT_ROOT, "bin", "craft") : "craft";
+  const proc = Bun.spawnSync({
+    cmd: [craftBin, "task", "unwait-team", taskId],
+    cwd: projectDir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (proc.exitCode !== 0) {
+    return {
+      ok: false,
+      error: new TextDecoder().decode(proc.stderr).trim() || `craft exited ${proc.exitCode}`,
+    };
+  }
+  return { ok: true, waiting_on: null };
 }
 
 function signalReadyForPr(projectDir: string, taskId: string) {
@@ -383,6 +435,24 @@ const server = Bun.serve({
     if (url.pathname.startsWith("/approve/") && req.method === "POST") {
       const id = decodeURIComponent(url.pathname.slice("/approve/".length));
       const r = approveTask(projectDir, id);
+      return jsonResponse(r, r.ok ? 200 : 502);
+    }
+
+    if (url.pathname.startsWith("/promote-draft/") && req.method === "POST") {
+      const id = decodeURIComponent(url.pathname.slice("/promote-draft/".length));
+      const r = promoteDraft(projectDir, id);
+      return jsonResponse(r, r.ok ? 200 : 502);
+    }
+
+    if (url.pathname.startsWith("/wait-team/") && req.method === "POST") {
+      const id = decodeURIComponent(url.pathname.slice("/wait-team/".length));
+      const r = waitTeam(projectDir, id);
+      return jsonResponse(r, r.ok ? 200 : 502);
+    }
+
+    if (url.pathname.startsWith("/unwait-team/") && req.method === "POST") {
+      const id = decodeURIComponent(url.pathname.slice("/unwait-team/".length));
+      const r = unwaitTeam(projectDir, id);
       return jsonResponse(r, r.ok ? 200 : 502);
     }
 

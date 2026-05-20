@@ -8,8 +8,11 @@ fi
 
 # shellcheck source=bin/lib/queue.sh
 source "$CRAFT_ROOT/bin/lib/queue.sh"
+# shellcheck source=bin/lib/workflow.sh
+source "$CRAFT_ROOT/bin/lib/workflow.sh"
 
-CRAFT_STAGE_ORDER=(context setup_worktree implement qa local_review pr_review complete blocked cleanup)
+CRAFT_FALLBACK_STAGE_ORDER=(implement qa pr_review complete)
+CRAFT_TERMINAL_STAGES=(blocked)
 
 runtime_project_dir() {
     local d="${1:-$PWD}"
@@ -55,18 +58,37 @@ runtime_task_stage() {
 runtime_valid_stage() {
     local stage="$1" known
     [[ -n "$stage" ]] || return 1
-    for known in "${CRAFT_STAGE_ORDER[@]}"; do
+    for known in "${CRAFT_FALLBACK_STAGE_ORDER[@]}" "${CRAFT_TERMINAL_STAGES[@]}"; do
         [[ "$stage" == "$known" ]] && return 0
     done
     return 1
 }
 
-runtime_stage_next() {
-    local current="$1" i
-    for i in "${!CRAFT_STAGE_ORDER[@]}"; do
-        if [[ "${CRAFT_STAGE_ORDER[$i]}" == "$current" ]]; then
-            if (( i + 1 < ${#CRAFT_STAGE_ORDER[@]} )); then
-                echo "${CRAFT_STAGE_ORDER[$((i + 1))]}"
+runtime_stage_order_for_task() {
+    local project_dir="$1" task_file="$2"
+    workflow_resolve_stages "$project_dir" "$task_file" 2>/dev/null || printf '%s\n' "${CRAFT_FALLBACK_STAGE_ORDER[@]}"
+}
+
+runtime_valid_stage_for_task() {
+    local project_dir="$1" task_file="$2" stage="$3" known
+    [[ -n "$stage" ]] || return 1
+    for known in "${CRAFT_TERMINAL_STAGES[@]}"; do
+        [[ "$stage" == "$known" ]] && return 0
+    done
+    while IFS= read -r known; do
+        [[ "$stage" == "$known" ]] && return 0
+    done < <(runtime_stage_order_for_task "$project_dir" "$task_file")
+    return 1
+}
+
+runtime_stage_next_for_task() {
+    local project_dir="$1" task_file="$2" current="$3"
+    local stages=() i
+    mapfile -t stages < <(runtime_stage_order_for_task "$project_dir" "$task_file")
+    for i in "${!stages[@]}"; do
+        if [[ "${stages[$i]}" == "$current" ]]; then
+            if (( i + 1 < ${#stages[@]} )); then
+                echo "${stages[$((i + 1))]}"
                 return 0
             fi
             return 1
@@ -122,23 +144,42 @@ runtime_hook() {
 
 runtime_stage_set() {
     local project_dir="$1" task_id="$2" stage="$3" reason="$4" stage_status="${5:-active}"
-    local task_file task_dir status
-    runtime_valid_stage "$stage" || { echo "invalid_stage: $stage" >&2; return 2; }
+    local task_file task_dir status workflow options_json previous payload
     task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; return 1; }
+    runtime_valid_stage_for_task "$project_dir" "$task_file" "$stage" || { echo "invalid_stage: $stage" >&2; return 2; }
     task_dir="$(runtime_task_dir "$project_dir" "$task_id")"
     status="$(runtime_task_status "$task_file")"
+    workflow="$(workflow_task_workflow "$task_file")"
+    options_json="$(workflow_task_options_json "$task_file")"
+    previous="$(runtime_task_stage "$task_file" || true)"
 
-    runtime_hook "$project_dir" on_stage_before \
-        --stage "$stage" --task-id "$task_id" --task-file "$task_file" \
-        --task-dir "$task_dir" --status "$status" --reason "$reason"
+    if [[ -n "$previous" && "$previous" != "$stage" ]]; then
+        runtime_hook "$project_dir" on_stage_end \
+            --stage "$previous" --next-stage "$stage" --task-id "$task_id" --task-file "$task_file" \
+            --task-dir "$task_dir" --status "$status" --reason "$reason" \
+            --workflow "$workflow" --workflow-options-json "$options_json"
+    fi
 
     runtime_set_task_field "$task_file" stage "$stage"
     runtime_set_task_field "$task_file" stage_status "$stage_status"
     runtime_set_task_field "$task_file" stage_reason "$reason"
 
-    runtime_hook "$project_dir" on_stage_after \
-        --stage "$stage" --task-id "$task_id" --task-file "$task_file" \
-        --task-dir "$task_dir" --status "$status" --reason "$reason"
+    runtime_hook "$project_dir" on_stage_start \
+        --stage "$stage" --previous-stage "$previous" --task-id "$task_id" --task-file "$task_file" \
+        --task-dir "$task_dir" --status "$status" --reason "$reason" \
+        --workflow "$workflow" --workflow-options-json "$options_json"
+
+    payload="$(mktemp)"
+    jq -n \
+        --arg task_id "$task_id" \
+        --arg previous "$previous" \
+        --arg stage "$stage" \
+        --arg stage_status "$stage_status" \
+        --arg reason "$reason" \
+        --arg workflow "$workflow" \
+        '{task_id:$task_id, from:$previous, to:$stage, previous_stage:$previous, stage:$stage, stage_status:$stage_status, reason:$reason, workflow:$workflow}' > "$payload"
+    runtime_event_enqueue "$project_dir" "$task_id" "stage.changed" "stage changed to $stage" "$payload" >/dev/null || true
+    rm -f "$payload"
 
     echo "$stage"
 }
@@ -146,7 +187,6 @@ runtime_stage_set() {
 runtime_default_stage_for_status() {
     local status="$1"
     case "$status" in
-        diffhub-review) echo "local_review" ;;
         waiting) echo "pr_review" ;;
         done) echo "complete" ;;
         blocked) echo "blocked" ;;
@@ -229,14 +269,15 @@ runtime_task_state_set() {
 
 runtime_stage_advance() {
     local project_dir="$1" task_id="$2" reason="$3"
-    local task_file current next
+    local task_file current next first
     task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; return 1; }
-    current="$(runtime_task_stage "$task_file")"
-    [[ -n "$current" ]] || current="${CRAFT_STAGE_ORDER[0]}"
-    if [[ "$current" == "${CRAFT_STAGE_ORDER[0]}" && -z "$(runtime_task_stage "$task_file")" ]]; then
+    current="$(runtime_task_stage "$task_file" || true)"
+    first="$(runtime_stage_order_for_task "$project_dir" "$task_file" | head -1)"
+    [[ -n "$current" ]] || current="$first"
+    if [[ "$current" == "$first" && -z "$(runtime_task_stage "$task_file" || true)" ]]; then
         next="$current"
     else
-        next="$(runtime_stage_next "$current")" || {
+        next="$(runtime_stage_next_for_task "$project_dir" "$task_file" "$current")" || {
             echo "no_next_stage: $current" >&2
             return 2
         }

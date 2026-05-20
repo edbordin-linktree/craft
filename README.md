@@ -125,6 +125,8 @@ id: task-001
 type: pr
 milestone: m1-foundation
 status: pending
+workflow: standard-pr
+workflow_options: {}
 depends_on: []
 repos: [my-repo]
 branch: feat/add-feature
@@ -149,10 +151,23 @@ Key fields:
 | `type` | `pr` (creates a PR) or `research` (investigation only) |
 | `milestone` | Which milestone this belongs to, e.g. `m1-foundation` |
 | `depends_on` | Task IDs that must complete first |
+| `workflow` | Workflow preset to execute; defaults to `standard-pr` |
+| `workflow_options` | Small typed options passed to workflow prompt rendering and stage hooks |
+| `parent` | Optional display-only parent task ID for dashboard grouping |
 | `repos` | Repos the task touches (worktrees created for each) |
 | `branch` | Git branch name for the PR |
 | `qa` | What validation to run before creating the PR |
 | `agent` | Override the default agent for this task (optional) |
+
+Draft tasks live in `queue/drafts/` with `status: draft`. They reserve task IDs but are not executed until promoted:
+
+```bash
+craft task promote-draft task-001
+```
+
+Planning/grouping records use `type: plan` plus a human-readable `title:`. Plan tasks are never executed by the orchestrator; `parent:` on child tasks is only dashboard grouping metadata. Use `depends_on` for real execution dependencies.
+
+Set `skill:` only for one-off legacy command dispatch. When `skill:` is absent, Craft renders the selected workflow preset into the launch prompt.
 
 ### Agent Providers
 
@@ -275,4 +290,3 @@ make install
 make install    # use local repo (changes take effect immediately)
 make uninstall  # fall back to Homebrew install
 ```
-

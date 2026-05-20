@@ -37,6 +37,20 @@ task_type() {
     task_field "$1" "type"
 }
 
+task_workflow() {
+    local workflow
+    workflow="$(task_field "$1" "workflow")"
+    printf '%s\n' "${workflow:-standard-pr}"
+}
+
+task_parent() {
+    task_field "$1" "parent"
+}
+
+task_title() {
+    task_field "$1" "title"
+}
+
 # Human label for a queue state directory name.
 queue_state_label() {
     local state="$1"
@@ -97,6 +111,35 @@ task_depends_on() {
 
     # Multi-line format: depends_on:\n  - task-001
     sed -n '/^depends_on:/,/^[a-z]/p' "$file" | grep '^ *-' | sed 's/^ *- *//'
+}
+
+task_workflow_options_json() {
+    local file="$1"
+    awk '
+        /^workflow_options:[[:space:]]*$/ { in_opts = 1; next }
+        in_opts && /^[^[:space:]]/ { exit }
+        in_opts && /^[[:space:]]+[A-Za-z0-9_.-]+:/ {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            key = line
+            sub(/:.*/, "", key)
+            value = line
+            sub(/^[^:]+:[[:space:]]*/, "", value)
+            gsub(/^["'\''"]|["'\''"]$/, "", value)
+            print key "\t" value
+        }
+    ' "$file" | jq -cRn '
+        reduce inputs as $line ({};
+          ($line | split("\t")) as $p
+          | .[$p[0]] =
+              ($p[1]
+               | if . == "true" then true
+                 elif . == "false" then false
+                 elif . == "null" then null
+                 elif test("^-?[0-9]+$") then tonumber
+                 else .
+                 end))
+    '
 }
 
 # Check if all dependencies of a task are satisfied (in done/ or archive/)
@@ -180,12 +223,27 @@ count_tasks() {
 next_ready_task() {
     local queue_dir="$1"
     for task in $(list_tasks "$queue_dir/approved"); do
+        if [[ "$(task_type "$task")" == "plan" ]]; then
+            continue
+        fi
         if task_deps_met "$task"; then
             echo "$task"
             return 0
         fi
     done
     return 1
+}
+
+promote_draft_task() {
+    local queue_dir="$1" task_id="$2"
+    local src="$queue_dir/drafts/$task_id.md"
+    local dst_dir="$queue_dir/pending"
+    local dst="$dst_dir/$task_id.md"
+    [[ -f "$src" ]] || { echo "draft_not_found: $task_id" >&2; return 1; }
+    mkdir -p "$dst_dir"
+    _sed_i "s/^status:.*/status: pending/" "$src"
+    mv "$src" "$dst"
+    echo "$dst"
 }
 
 # Append a timestamped entry to a task's work log

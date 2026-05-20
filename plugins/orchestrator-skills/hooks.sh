@@ -216,7 +216,7 @@ _start_pr_review_runtime() {
     )
 }
 
-on_stage_after() {
+on_stage_start() {
     _parse_stage_args "$@"
     case "$STAGE" in
         local_review)

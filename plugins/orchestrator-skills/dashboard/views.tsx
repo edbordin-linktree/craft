@@ -6,6 +6,7 @@ const DONE_LIMIT = Number(process.env.DONE_LIMIT ?? "8");
 const inlineClick = (script: string) => ({ onclick: script }) as Record<string, string>;
 
 const statusColor: Record<string, string> = {
+  "drafts": "#64748b",
   "in-progress": "#2563eb",
   "diffhub-review": "#7c3aed",
   "waiting": "#d97706",
@@ -24,6 +25,12 @@ const STYLES = `
   .columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; align-items: start; }
   .column h2 { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #7e858d; margin: 0 0 0.5rem 0; }
   .task { padding: 0.7rem 0.8rem; border: 1px solid #1f242a; border-radius: 8px; margin-bottom: 0.6rem; background: #11151a; }
+  .task.waiting-team { opacity: 0.72; }
+  .task.child { margin-left: 0.8rem; border-left-color: #334155; }
+  .plan-group { border: 1px solid #1f242a; border-radius: 8px; margin-bottom: 0.7rem; background: #0d1117; overflow: hidden; }
+  .plan-group > .task { border: 0; border-radius: 0; margin-bottom: 0; background: #11151a; }
+  .plan-children { padding: 0.65rem 0.7rem 0.1rem 0.7rem; border-top: 1px solid #1f242a; }
+  .plan-title { font-size: 0.78rem; color: #cbd5e1; font-weight: 600; margin-left: 0.2rem; }
   .task-header { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
   .task-id { font-family: 'SF Mono', monospace; font-weight: 600; }
   .task-id a { color: #93c5fd; text-decoration: none; cursor: pointer; }
@@ -32,6 +39,7 @@ const STYLES = `
   .linear-pill:hover { background: #1f2d3f; }
   .pr-pill { font-size: 0.7rem; font-weight: 600; padding: 0.05rem 0.4rem; border-radius: 4px; background: #1a2614; color: #86efac; text-decoration: none; border: 1px solid #2d5219; }
   .pr-pill:hover { background: #1f3018; }
+  .wait-pill { font-size: 0.7rem; font-weight: 600; padding: 0.05rem 0.4rem; border-radius: 4px; background: #2a2112; color: #fbbf24; border: 1px solid #4b3410; }
   .summary { margin: 0.5rem 0 0 0; font-size: 0.85rem; color: #b8bdc4; line-height: 1.4; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
   .summary.lines-2 { -webkit-line-clamp: 2; }
   .summary.lines-1 { -webkit-line-clamp: 1; }
@@ -168,7 +176,13 @@ export function Dashboard({ projectName, tasks }: { projectName: string; tasks: 
     if (!byQueue.has(t.queueDir)) byQueue.set(t.queueDir, []);
     byQueue.get(t.queueDir)!.push(t);
   }
-  const active = tasks.filter(t => t.queueDir !== "done" && t.queueDir !== "blocked").length;
+  const active = tasks.filter(t => t.queueDir !== "done" && t.queueDir !== "blocked" && !isWaitingOnTeam(t)).length;
+  const waitingOnTeam = tasks.filter(isWaitingOnTeam).length;
+  const tasksById = new Map(tasks.map(t => [t.id, t]));
+  const queueOrder = [
+    ...QUEUE_ORDER.filter(s => byQueue.has(s)),
+    ...[...byQueue.keys()].filter(s => !QUEUE_ORDER.includes(s as typeof QUEUE_ORDER[number])).sort(),
+  ];
 
   return (
     <html lang="en">
@@ -214,11 +228,11 @@ export function Dashboard({ projectName, tasks }: { projectName: string; tasks: 
         <header>
           <h1>craft · <code>{projectName}</code></h1>
           <div class="meta-line">
-            {active} active · {tasks.length} total · auto-refresh 3s
+            {active} active · {waitingOnTeam} waiting on team · {tasks.length} total · auto-refresh 3s
           </div>
         </header>
         <div id="tasks-grid" class="columns" {...REFRESH_HX_ATTRS}>
-          {QUEUE_ORDER.filter(s => byQueue.get(s)?.length).map(s => {
+          {queueOrder.map(s => {
             const all = byQueue.get(s)!;
             const shown = s === "done" ? all.slice(0, DONE_LIMIT) : all;
             const hidden = all.length - shown.length;
@@ -228,7 +242,7 @@ export function Dashboard({ projectName, tasks }: { projectName: string; tasks: 
                   <span style={{ color: statusColor[s] ?? "#7e858d" }}>●</span>{" "}
                   {s} ({all.length})
                 </h2>
-                {shown.map(t => <TaskCard task={t} />)}
+                {renderQueueItems(shown, tasksById)}
                 {hidden > 0 && (
                   <div style={{ fontSize: "0.78rem", color: "#7e858d", padding: "0.4rem 0.2rem", fontStyle: "italic" }}>
                     …and {hidden} older — see <code>queue/done/</code>
@@ -243,10 +257,59 @@ export function Dashboard({ projectName, tasks }: { projectName: string; tasks: 
   );
 }
 
-function TaskCard({ task }: { task: Task }) {
+function renderQueueItems(tasks: Task[], tasksById: Map<string, Task>) {
+  const planParents = new Map<string, Task>(
+    tasks.filter(t => t.type === "plan").map(t => [t.id, t])
+  );
+
+  const childrenByParent = new Map<string, Task[]>();
+  for (const t of tasks) {
+    if (t.parent && planParents.has(t.parent)) {
+      if (!childrenByParent.has(t.parent)) childrenByParent.set(t.parent, []);
+      childrenByParent.get(t.parent)!.push(t);
+    }
+  }
+
+  const rendered = new Set<string>();
+  const out = [];
+  for (const task of tasks) {
+    if (task.type === "plan") {
+      if (rendered.has(task.id)) continue;
+      rendered.add(task.id);
+      const children = childrenByParent.get(task.id) ?? [];
+      out.push(<PlanGroup parent={task} children={children} />);
+      continue;
+    }
+    if (task.parent && planParents.has(task.parent)) {
+      if (rendered.has(task.parent)) continue;
+      rendered.add(task.parent);
+      out.push(<PlanGroup parent={planParents.get(task.parent)!} children={childrenByParent.get(task.parent) ?? []} />);
+      continue;
+    }
+    out.push(<TaskCard task={task} />);
+  }
+  return out;
+}
+
+function PlanGroup({ parent, children }: { parent: Task; children: Task[] }) {
+  return (
+    <div class="plan-group">
+      <TaskCard task={parent} />
+      {children.length > 0 && (
+        <div class="plan-children">
+          {children.map(child => <TaskCard task={child} nested />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TaskCard({ task, nested = false }: { task: Task; nested?: boolean }) {
   const color = statusColor[task.queueDir] ?? "#6b7280";
   const isDone = task.queueDir === "done";
   const isActive = !isDone;
+  const isPlan = task.type === "plan";
+  const waitingOnTeam = isWaitingOnTeam(task);
   const summaryClamp = isDone ? "lines-1" : "lines-2";
 
   // Done tasks: trim down to identity + PR + summary. Active tasks: keep
@@ -255,6 +318,10 @@ function TaskCard({ task }: { task: Task }) {
   // doesn't gate the expander on its own.
   const showDetails = isActive && (
     task.branch ||
+    task.workflow ||
+    task.waitingOn ||
+    task.waitingReason ||
+    task.parent ||
     task.repos.length > 0 ||
     task.milestone ||
     task.depends_on.length > 0 ||
@@ -263,7 +330,7 @@ function TaskCard({ task }: { task: Task }) {
   );
 
   return (
-    <article class={`task${isDone ? " done" : ""}`} id={`task-${task.id}`}>
+    <article class={`task${isDone ? " done" : ""}${nested ? " child" : ""}${waitingOnTeam ? " waiting-team" : ""}`} id={`task-${task.id}`}>
       <div class="task-header">
         <span class="task-id">
           <a
@@ -276,6 +343,8 @@ function TaskCard({ task }: { task: Task }) {
           </a>
         </span>
         <span class="badge" style={{ background: color }}>{task.queueDir}</span>
+        {waitingOnTeam && <span class="wait-pill">waiting on team</span>}
+        {isPlan && <span class="plan-title">{task.title ?? "plan"}</span>}
         {task.linearTickets.map(t => {
           const linearUrl = `https://linear.app/${LINEAR_ORG}/issue/${t}`;
           return (
@@ -316,9 +385,21 @@ function TaskCard({ task }: { task: Task }) {
         <DepsLine task={task} />
       )}
 
-      {isActive && (
+      {isActive && !isPlan && (
         <div class="actions">
-          {task.queueDir === "pending" ? (
+          {task.queueDir === "drafts" ? (
+            <button
+              type="button"
+              class="approve"
+              hx-post={`/promote-draft/${task.id}`}
+              hx-swap="none"
+              data-toast="promoting draft"
+              data-toast-success={`promoted ${task.id}`}
+              title="Move this task from queue/drafts/ to queue/pending/ for operator approval"
+            >
+              promote
+            </button>
+          ) : task.queueDir === "pending" ? (
             <button
               type="button"
               class="approve"
@@ -331,16 +412,41 @@ function TaskCard({ task }: { task: Task }) {
               ✓ approve
             </button>
           ) : (
-            <button
-              type="button"
-              class="primary"
-              hx-post={`/focus/task/${task.id}`}
-              hx-swap="none"
-              data-toast="focused"
-              data-toast-success={`focused ${task.id}`}
-            >
-              focus terminal
-            </button>
+            <>
+              <button
+                type="button"
+                class="primary"
+                hx-post={`/focus/task/${task.id}`}
+                hx-swap="none"
+                data-toast="focused"
+                data-toast-success={`focused ${task.id}`}
+              >
+                focus terminal
+              </button>
+              {waitingOnTeam ? (
+                <button
+                  type="button"
+                  hx-post={`/unwait-team/${task.id}`}
+                  hx-swap="none"
+                  data-toast="clearing wait marker"
+                  data-toast-success={`${task.id} active`}
+                  title="Clear the waiting-on-team marker without changing the task stage"
+                >
+                  mark active
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  hx-post={`/wait-team/${task.id}`}
+                  hx-swap="none"
+                  data-toast="marking waiting on team"
+                  data-toast-success={`${task.id} waiting on team`}
+                  title="Mark this task as waiting on team without changing the task stage"
+                >
+                  wait team
+                </button>
+              )}
+            </>
           )}
           {task.queueDir === "diffhub-review" && (
             <>
@@ -379,6 +485,24 @@ function TaskCard({ task }: { task: Task }) {
               <>
                 <b>branch</b>
                 <span style={{ fontFamily: "monospace" }}>{task.branch}</span>
+              </>
+            )}
+            {task.workflow && (
+              <>
+                <b>workflow</b>
+                <span style={{ fontFamily: "monospace" }}>{task.workflow}</span>
+              </>
+            )}
+            {(task.waitingOn || task.waitingReason) && (
+              <>
+                <b>waiting</b>
+                <span>{task.waitingOn ?? task.waitingReason}{task.waitingOn && task.waitingReason ? `: ${task.waitingReason}` : ""}</span>
+              </>
+            )}
+            {task.parent && (
+              <>
+                <b>parent</b>
+                <span style={{ fontFamily: "monospace" }}>{task.parent}</span>
               </>
             )}
             {task.repos.length > 0 && (
@@ -451,6 +575,10 @@ function DepsLine({ task }: { task: Task }) {
       ))}
     </div>
   );
+}
+
+function isWaitingOnTeam(task: Task): boolean {
+  return task.waitingOn === "team";
 }
 
 function shortenUrl(u: string): string {
