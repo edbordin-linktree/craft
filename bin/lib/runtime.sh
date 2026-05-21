@@ -55,15 +55,6 @@ runtime_task_stage() {
     task_field "$task_file" "stage"
 }
 
-runtime_valid_stage() {
-    local stage="$1" known
-    [[ -n "$stage" ]] || return 1
-    for known in "${CRAFT_FALLBACK_STAGE_ORDER[@]}" "${CRAFT_TERMINAL_STAGES[@]}"; do
-        [[ "$stage" == "$known" ]] && return 0
-    done
-    return 1
-}
-
 runtime_stage_order_for_task() {
     local project_dir="$1" task_file="$2"
     workflow_resolve_stages "$project_dir" "$task_file" 2>/dev/null || printf '%s\n' "${CRAFT_FALLBACK_STAGE_ORDER[@]}"
@@ -144,7 +135,7 @@ runtime_hook() {
 
 runtime_stage_set() {
     local project_dir="$1" task_id="$2" stage="$3" reason="$4" stage_status="${5:-active}"
-    local task_file task_dir status workflow options_json previous payload
+    local task_file task_dir status workflow options_json previous payload queue_state synced_file
     task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; return 1; }
     runtime_valid_stage_for_task "$project_dir" "$task_file" "$stage" || { echo "invalid_stage: $stage" >&2; return 2; }
     task_dir="$(runtime_task_dir "$project_dir" "$task_id")"
@@ -163,6 +154,16 @@ runtime_stage_set() {
     runtime_set_task_field "$task_file" stage "$stage"
     runtime_set_task_field "$task_file" stage_status "$stage_status"
     runtime_set_task_field "$task_file" stage_reason "$reason"
+
+    if [[ -z "${RUNTIME_SUPPRESS_STAGE_QUEUE_SYNC:-}" ]]; then
+        queue_state="$(runtime_queue_state_for_stage "$project_dir" "$task_file" "$stage" 2>/dev/null || true)"
+        if [[ -n "$queue_state" ]]; then
+            synced_file="$(runtime_queue_state_set_without_stage "$project_dir" "$task_id" "$queue_state" "$reason")" || return $?
+            task_file="$synced_file"
+            status="$queue_state"
+            task_dir="$(runtime_task_dir "$project_dir" "$task_id")"
+        fi
+    fi
 
     runtime_hook "$project_dir" on_stage_start \
         --stage "$stage" --previous-stage "$previous" --task-id "$task_id" --task-file "$task_file" \
@@ -199,12 +200,67 @@ runtime_timestamp_field_for_status() {
     local status="$1"
     case "$status" in
         in-progress) echo "started" ;;
-        diffhub-review) echo "diffhub_review_started" ;;
+        local-review) echo "local_review_started" ;;
         waiting) echo "waiting" ;;
         done) echo "done" ;;
         blocked) echo "blocked" ;;
         *) echo "" ;;
     esac
+}
+
+runtime_queue_state_for_stage() {
+    local project_dir="$1" task_file="$2" stage="$3" stage_file
+    if [[ "$stage" == "blocked" ]]; then
+        echo "blocked"
+        return 0
+    fi
+    stage_file="$(workflow_stage_provider_file "$project_dir" "$stage")" || return 0
+    workflow_stage_file_frontmatter "$stage_file" queue_state
+}
+
+runtime_queue_state_set_without_stage() {
+    local project_dir="$1" task_id="$2" status="$3" reason="$4"
+    local task_file task_dir queue_dir target_dir target timestamp_field timestamp current_status current_value
+    task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; return 1; }
+    task_dir="$(runtime_task_dir "$project_dir" "$task_id")"
+    queue_dir="$project_dir/queue"
+    target_dir="$queue_dir/$status"
+    [[ -d "$target_dir" ]] || { echo "queue_state_not_found: $status" >&2; return 2; }
+    target="$target_dir/$(basename "$task_file")"
+    current_status="$(runtime_task_status "$task_file")"
+
+    if [[ "$current_status" == "$status" && "$task_file" == "$target" ]]; then
+        echo "$task_file"
+        return 0
+    fi
+
+    runtime_hook "$project_dir" on_task_state_before \
+        --task-id "$task_id" --task-file "$task_file" --task-dir "$task_dir" \
+        --status "$status" --reason "$reason"
+
+    runtime_set_task_field "$task_file" status "$status"
+    timestamp_field="$(runtime_timestamp_field_for_status "$status")"
+    if [[ -n "$timestamp_field" ]]; then
+        timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        current_value="$(task_field "$task_file" "$timestamp_field" || true)"
+        if [[ "$status" != "in-progress" || -z "$current_value" ]]; then
+            runtime_set_task_field "$task_file" "$timestamp_field" "$timestamp"
+        fi
+    fi
+    if [[ "$status" == "blocked" ]]; then
+        runtime_set_task_field "$task_file" one_shot false
+    fi
+
+    if [[ "$task_file" != "$target" ]]; then
+        mv "$task_file" "$target"
+        task_file="$target"
+    fi
+
+    runtime_hook "$project_dir" on_task_state_after \
+        --task-id "$task_id" --task-file "$task_file" --task-dir "$task_dir" \
+        --status "$status" --reason "$reason"
+
+    echo "$task_file"
 }
 
 runtime_task_state_set() {
@@ -247,7 +303,7 @@ runtime_task_state_set() {
         stage_status="active"
         [[ "$status" == "done" ]] && stage_status="complete"
         [[ "$status" == "blocked" ]] && stage_status="blocked"
-        runtime_stage_set "$project_dir" "$task_id" "$stage_to_set" "$reason" "$stage_status" >/dev/null
+        RUNTIME_SUPPRESS_STAGE_QUEUE_SYNC=1 runtime_stage_set "$project_dir" "$task_id" "$stage_to_set" "$reason" "$stage_status" >/dev/null
     fi
 
     target="$target_dir/$(basename "$task_file")"
@@ -269,12 +325,12 @@ runtime_task_state_set() {
 
 runtime_stage_advance() {
     local project_dir="$1" task_id="$2" reason="$3"
-    local task_file current next first
+    local task_file recorded current next first
     task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; return 1; }
-    current="$(runtime_task_stage "$task_file" || true)"
+    recorded="$(runtime_task_stage "$task_file" || true)"
     first="$(runtime_stage_order_for_task "$project_dir" "$task_file" | head -1)"
-    [[ -n "$current" ]] || current="$first"
-    if [[ "$current" == "$first" && -z "$(runtime_task_stage "$task_file" || true)" ]]; then
+    current="${recorded:-$first}"
+    if [[ "$current" == "$first" && -z "$recorded" ]]; then
         next="$current"
     else
         next="$(runtime_stage_next_for_task "$project_dir" "$task_file" "$current")" || {
@@ -346,9 +402,22 @@ runtime_event_counts_text() {
 }
 
 runtime_event_enqueue() {
-    local project_dir="$1" task_id="$2" type="$3" summary="$4" payload_file="$5"
-    local pending_dir before file now counts pending_after msg
+    local project_dir="$1" task_id="$2" type="$3" summary="$4" payload_file="$5" publisher="${6:-core}"
+    local pending_dir before file now counts pending_after msg consume_file
     [[ -f "$payload_file" ]] || { echo "payload_not_found: $payload_file" >&2; return 1; }
+    consume_file="$(mktemp)"
+    export EVENT_CONSUME_FILE="$consume_file"
+    runtime_hook "$project_dir" on_event \
+        --task-id "$task_id" --event-type "$type" --event-summary "$summary" \
+        --event-payload "$payload_file" --publisher "$publisher"
+    unset EVENT_CONSUME_FILE
+    if [[ -s "$consume_file" ]]; then
+        rm -f "$consume_file"
+        echo "event_consumed"
+        return 0
+    fi
+    rm -f "$consume_file"
+
     pending_dir="$(runtime_event_pending_dir "$project_dir" "$task_id")"
     mkdir -p "$pending_dir"
     before="$(runtime_event_count_total "$pending_dir")"
@@ -359,8 +428,9 @@ runtime_event_enqueue() {
         --arg type "$type" \
         --arg summary "$summary" \
         --arg created_at "$now" \
+        --arg publisher "$publisher" \
         --slurpfile payload "$payload_file" \
-        '{task_id: $task_id, type: $type, summary: $summary, created_at: $created_at, payload: $payload[0]}' > "$file"
+        '{task_id: $task_id, type: $type, summary: $summary, created_at: $created_at, publisher: $publisher, payload: $payload[0]}' > "$file"
 
     pending_after="$(runtime_event_count_total "$pending_dir")"
     counts="$(runtime_event_counts_text "$pending_dir")"

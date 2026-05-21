@@ -1,4 +1,5 @@
 ---
+queue_state: done
 ---
 Only enter this stage after the task's pull request is merged or the task has otherwise reached its configured successful terminal condition.
 

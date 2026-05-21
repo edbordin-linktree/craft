@@ -260,9 +260,10 @@ run_task() {
 
     log "Starting task: $tid"
 
-    # Move to in-progress and notify plugins
+    # Mark as in-progress before rendering; the first workflow stage will
+    # project the task into its configured queue state.
     local new_file
-    new_file=$(move_task "$task_file" "$QUEUE_DIR/in-progress" "in-progress")
+    new_file=$(runtime_queue_state_set_without_stage "$PROJECT_DIR" "$tid" "in-progress" "workflow started")
     # Build the prompt file. `skill:` keeps an explicit direct command dispatch
     # escape hatch; the default work-task path renders the resolved workflow.
     local skill_name="$(task_field "$new_file" "skill")"
@@ -279,7 +280,7 @@ run_task() {
         if ! workflow_render_prompt "$PROJECT_DIR" "$new_file" "$filename" > "$prompt_file"; then
             log "Workflow prompt render failed for $tid"
             append_work_log "$new_file" "Blocked: workflow prompt render failed"
-            move_task "$new_file" "$QUEUE_DIR/blocked" "blocked" > /dev/null
+            runtime_stage_set "$PROJECT_DIR" "$tid" blocked "workflow prompt render failed" blocked >/dev/null || true
             return
         fi
         runtime_stage_advance "$PROJECT_DIR" "$tid" "workflow started" >/dev/null || log "Stage advance failed for $tid"

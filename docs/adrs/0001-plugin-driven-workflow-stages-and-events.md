@@ -48,12 +48,17 @@ Plugins provide stages by adding files under:
 plugins/<plugin>/stages/<stage-id>.md
 ```
 
+Plugin files are opt-in. A plugin does not need empty `hooks.sh` or
+`plugin.conf` files: absent hooks mean the plugin has no lifecycle hooks, and
+absent config means it has no shared metadata or settings.
+
 The filename is the stage ID. Stage files may include simple frontmatter:
 
 ```markdown
 ---
 insert: before:pr_review
 events: local_review.comment
+queue_state: local-review
 ---
 
 Local review feedback arrives as `local_review.comment` events.
@@ -97,6 +102,7 @@ that stage's canonical events:
 plugins/local-review/
   stages/local_review.md
   events/local_review.comment.md
+  skills/review-comment-triage/SKILL.md
 ```
 
 Other plugins can extend an event contract with fragments:
@@ -108,12 +114,17 @@ plugins/diffhub/fragments/events/local_review.comment.md
 Event definitions and fragments are included in the rendered prompt when a
 stage or stage fragment references those events in frontmatter.
 
+Plugin-owned agent skills live at `plugins/<plugin>/skills/<skill-name>/` and
+are installed into both `.claude/skills/` and `.codex/skills/` for enabled
+plugins. Skill-coupled helper scripts should stay inside the relevant skill
+folder. Plugin runtime side effects should move into hooks before adding a
+general plugin script runner.
+
 Plugin config remains limited to non-behavioral metadata such as dependencies
 and queue states:
 
 ```bash
 DEPENDS_ON=local-review
-QUEUE_STATES=diffhub-review
 ```
 
 ## Stage Runtime
@@ -227,20 +238,42 @@ Base stages must not mention optional plugins such as Diffhub.
 
 ## Initial Plugin Split
 
-Recommended starting point:
+The implementation should split runtime behavior into focused plugins:
 
 ```text
 plugins/local-review/
   stages/local_review.md
   events/local_review.comment.md
+  skills/review-comment-triage/SKILL.md
 
 plugins/bot-review/
   fragments/stages/local_review.md
+  skills/review-pr/SKILL.md
+  scripts/review-pr
 
 plugins/diffhub/
   plugin.conf
   fragments/stages/local_review.md
   fragments/events/local_review.comment.md
+  scripts/launch-diffhub
+  scripts/babysit-diffhub
+
+plugins/pr-review/
+  fragments/stages/pr_review.md
+  skills/babysit-pr/SKILL.md
+  scripts/watch-pr
+
+plugins/buildkite-status/
+  scripts/show-build-status
+
+plugins/planning/
+  commands/init-architect.md
+  commands/init-discoverer.md
+  skills/plan-reviewer/SKILL.md
+
+plugins/craft-dashboard/
+  dashboard/
+  scripts/set-task-state
 ```
 
 `local-review` owns the stage and canonical event contract.

@@ -1,4 +1,5 @@
 ---
+queue_state: in-progress
 ---
 Read the existing code before editing, then implement the task summary and acceptance criteria using the repository's conventions.
 

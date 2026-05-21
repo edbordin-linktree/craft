@@ -40,8 +40,8 @@ provider_flags() {
 # Build the env-setup snippet for an agent spawn. Cmux/tmux surfaces start a
 # fresh shell that does NOT inherit the orchestrator process's env directly, so
 # CRAFT_ROOT and the craft/plugin script dirs need to be re-injected. This
-# makes `craft-mux`, `send-agent`, `watch-pr`, `delegate-to-devin` usable from
-# inside the spawned agent without depending on the operator's shell init.
+# makes `craft-mux` and enabled plugin helper scripts usable from inside the
+# spawned agent without depending on the operator's shell init.
 #
 # Always emits a syntactically-valid shell expression — falls back to `:`
 # (the no-op builtin) when CRAFT_ROOT is unset, so the surrounding
@@ -52,9 +52,13 @@ _provider_env_setup() {
         printf ':'
         return
     fi
-    local scripts_dir="${craft_root}/plugins/orchestrator-skills/scripts"
-    printf "export CRAFT_ROOT='%s' && export PATH='%s/bin:%s:'\$PATH" \
-        "$craft_root" "$craft_root" "$scripts_dir"
+    local scripts_path="" dir
+    for dir in "$craft_root"/plugins/*/scripts; do
+        [[ -d "$dir" ]] || continue
+        scripts_path="${scripts_path:+$scripts_path:}$dir"
+    done
+    printf "export CRAFT_ROOT='%s' && export PATH='%s/bin%s%s:'\$PATH" \
+        "$craft_root" "$craft_root" "${scripts_path:+:}" "$scripts_path"
 }
 
 # Build the tmux command to launch an agent for a task

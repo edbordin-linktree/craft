@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+#
+# babysit-diffhub — Fast local watcher for local review.
+#
+# Watches:
+#   - diffhub's /api/comments REST API — every new comment (human OR bot) is
+#     treated equally. No tag filtering: the agent acts on whatever appears in
+#     arrival order. The cross-model reviewer (review-pr) and the human can
+#     comment in parallel; both are equal citizens here.
+#
+# Enqueues one typed Craft runtime event per transition. Craft owns event
+# storage and wakes the task agent with a compact CRAFT_EVENTS summary only when
+# the queue flips empty -> non-empty.
+#
+# Usage:
+#   babysit-diffhub --worktree <abs-path> [--poll-interval 5]
+#                   [--idle-timeout 7200]   # seconds; 0 disables
+#                   [--state-file <p>]
+#                   [--diffhub-url <url>]
+#
+# Idle-timeout behaviour: if no new comments arrive for <idle-timeout> seconds,
+# the script enqueues `review_timeout` and exits. This is intended for overnight
+# runs — the bake-loop gathers any late github-bot or async-reviewer findings,
+# then auto-advances to the PR phase so the human sees a polished PR in the
+# morning instead of a stuck task.
+# Default 7200s (2h); pass --idle-timeout 0 to disable.
+#
+# Exits 0 on idle timeout or after SIGTERM/INT.
+#
+# Requires: bash 4+, jq, curl.
+
+set -uo pipefail
+
+if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
+    echo "babysit-diffhub requires bash 4+" >&2; exit 1
+fi
+command -v jq >/dev/null   || { echo "babysit-diffhub: jq is required" >&2; exit 1; }
+command -v curl >/dev/null || { echo "babysit-diffhub: curl is required" >&2; exit 1; }
+
+WORKTREE=""
+POLL_INTERVAL=5
+IDLE_TIMEOUT=7200
+STATE_FILE=""
+DIFFHUB_URL=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --worktree)        WORKTREE="$2"; shift 2 ;;
+        --poll-interval)   POLL_INTERVAL="$2"; shift 2 ;;
+        --idle-timeout)    IDLE_TIMEOUT="$2"; shift 2 ;;
+        --state-file)      STATE_FILE="$2"; shift 2 ;;
+        --diffhub-url)     DIFFHUB_URL="$2"; shift 2 ;;
+        -h|--help)         sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *)                 echo "babysit-diffhub: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+[[ -n "$WORKTREE" ]] || { echo "--worktree is required" >&2; exit 2; }
+[[ -d "$WORKTREE" ]] || { echo "worktree not found: $WORKTREE" >&2; exit 1; }
+
+cd "$WORKTREE"
+mkdir -p "$WORKTREE/.orchestrator"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+# shellcheck source=bin/lib/task-runtime.sh
+source "${CRAFT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}/bin/lib/task-runtime.sh"
+
+TASK_ID="$(orchestrator_task_id_from_worktree "$WORKTREE")"
+STATE_FILE="${STATE_FILE:-$WORKTREE/.orchestrator/diffhub-state.json}"
+DIFFHUB_URL="${DIFFHUB_URL:-$(cat "$WORKTREE/.orchestrator/diffhub.url" 2>/dev/null || true)}"
+[[ -n "$DIFFHUB_URL" ]] || { echo "babysit-diffhub: diffhub URL unavailable; launch diffhub first or pass --diffhub-url" >&2; exit 1; }
+COMMENTS_API_URL="${DIFFHUB_URL%/}/api/comments?readonly=1"
+
+log() { printf '%s [babysit-diffhub] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+
+# Read the persisted "what we've already seen" state, normalized so the JSON
+# always has `ids: []` and `by_id: {}` (jq array-subtraction errors out on
+# null, which silently swallowed the diff on first startup and meant any
+# comment that landed BEFORE babysit booted — e.g. review-pr findings written
+# during Step 7 — was treated as "old" forever).
+read_state() {
+    local raw='{}'
+    if [[ -f "$STATE_FILE" ]]; then
+        raw="$(cat "$STATE_FILE")"
+        jq -e . <<<"$raw" >/dev/null 2>&1 || raw='{}'
+    fi
+    jq '{ids: (.ids // []), by_id: (.by_id // {}), last_polled_at: (.last_polled_at // null)}' <<<"$raw"
+}
+
+record_event_json() {
+    local event_json="$1" type summary payload
+    type="$(jq -r '.type' <<< "$event_json")"
+    summary="$(jq -r '.summary' <<< "$event_json")"
+    payload="$(orchestrator_payload_file "$WORKTREE" "diffhub-event")"
+    jq '.payload' <<< "$event_json" > "$payload"
+    orchestrator_enqueue_event "$WORKTREE" "$TASK_ID" "$type" "$summary" "$payload"
+    rm -f "$payload"
+}
+
+record_terminal_event() {
+    local type="$1" summary="$2" reason="$3"
+    local payload
+    payload="$(orchestrator_payload_file "$WORKTREE" "diffhub-terminal")"
+    jq -n \
+        --arg phase "local_review" \
+        --arg reason "$reason" \
+        --arg diffhub_url "$DIFFHUB_URL" \
+        '{phase:$phase, reason:$reason, diffhub_url:$diffhub_url}' > "$payload"
+    orchestrator_enqueue_event "$WORKTREE" "$TASK_ID" "$type" "$summary" "$payload"
+    rm -f "$payload"
+}
+
+# Pull the comment ID set + a small snapshot map (id → {file,line,tag}) from
+# diffhub's comments API. Robust against transient HTTP/JSON failures: callers
+# retry without replacing prior state, so a server blip cannot look like all
+# comments disappeared.
+fetch_snapshot() {
+    local raw
+    raw="$(curl -fsS --max-time 10 "$COMMENTS_API_URL")" || return 1
+    jq -e 'type == "array"' <<<"$raw" >/dev/null 2>&1 || return 1
+    jq '
+      map(select((.resolved // false) != true and (.staleness // "fresh") != "stale")) as $actionable
+      | {
+          ids: ($actionable | map(.id) | sort),
+        by_id: ($actionable | map({(.id|tostring): {file: .file, lineNumber: .lineNumber, staleness: (.staleness // "fresh"), tag: (.tag // ""), body: (.body // "")}}) | add // {})
+        }
+    ' <<<"$raw"
+}
+
+diff_snapshot() {
+    local prior="$1" cur="$2"
+    jq -n -c --argjson prior "$prior" --argjson cur "$cur" '
+        ($cur.ids - $prior.ids) as $new_ids
+        | $new_ids[] | . as $id
+        | $cur.by_id[($id | tostring)]
+        | (if (.tag // "") == "" then "human" else .tag end) as $author
+        | {
+            type: "local_review.comment",
+            summary: "\($author) comment at \(.file):\(.lineNumber)",
+            payload: {
+              phase: "local_review",
+              kind: "diffhub_comment",
+              comment_id: $id,
+              author: $author,
+              file: .file,
+              lineNumber: .lineNumber,
+              staleness: (.staleness // "fresh"),
+              tag: (.tag // ""),
+              body: (.body // "")
+            }
+          }
+    '
+}
+
+build_state() {
+    local cur="$1"
+    jq -n --argjson cur "$cur" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        $cur + {last_polled_at: $ts}
+    '
+}
+
+cleanup() { log "exiting"; exit "${1:-0}"; }
+trap 'cleanup 0' INT TERM
+
+if (( IDLE_TIMEOUT > 0 )); then
+    log "watching $COMMENTS_API_URL (interval=${POLL_INTERVAL}s, idle_timeout=${IDLE_TIMEOUT}s)"
+else
+    log "watching $COMMENTS_API_URL (interval=${POLL_INTERVAL}s, idle_timeout disabled)"
+fi
+
+prior_state="$(read_state)"
+last_activity=$(date +%s)
+last_api_success=$(date +%s)
+
+while true; do
+    if ! snapshot="$(fetch_snapshot)"; then
+        if (( IDLE_TIMEOUT > 0 )); then
+            now=$(date +%s)
+            idle=$(( now - last_activity ))
+            if (( idle >= IDLE_TIMEOUT )); then
+                mins=$(( idle / 60 ))
+                api_failure=$(( now - last_api_success ))
+                api_failure_mins=$(( api_failure / 60 ))
+                record_terminal_event "review_timeout" "local review idle timeout during diffhub API failure" "api-failure idle timeout: ${mins} minute(s) without new comment activity; diffhub API unreachable for ${api_failure_mins} minute(s)"
+                log "idle timeout (${idle}s ≥ ${IDLE_TIMEOUT}s) during snapshot failure (api_failure=${api_failure}s)"
+                build_state "$prior_state" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+                cleanup 0
+            fi
+        fi
+
+        log "snapshot fetch failed; retry in 10s"
+        sleep 10
+        continue
+    fi
+    last_api_success=$(date +%s)
+
+    # New comments since last poll.
+    transitions="$(diff_snapshot "$prior_state" "$snapshot" 2>/dev/null || true)"
+    if [[ -n "$transitions" ]]; then
+        log "new comments:"
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            log "  → $(jq -r '.summary' <<< "$line")"
+            record_event_json "$line"
+        done <<< "$transitions"
+        last_activity=$(date +%s)
+    fi
+
+    # Idle-timeout check. Disabled when IDLE_TIMEOUT == 0.
+    if (( IDLE_TIMEOUT > 0 )); then
+        now=$(date +%s)
+        idle=$(( now - last_activity ))
+        if (( idle >= IDLE_TIMEOUT )); then
+            mins=$(( idle / 60 ))
+            record_terminal_event "review_timeout" "local review idle timeout" "idle timeout: ${mins} minute(s) without new comments"
+            log "idle timeout (${idle}s ≥ ${IDLE_TIMEOUT}s)"
+            build_state "$snapshot" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+            cleanup 0
+        fi
+    fi
+
+    build_state "$snapshot" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+    prior_state="$(read_state)"
+
+    sleep "$POLL_INTERVAL"
+done

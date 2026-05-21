@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+#
+# launch-diffhub — Start diffhub through Craft's background helper, wait for it
+# to print its URL, then open/reuse the task's
+# `diffhub-review` browser surface through Craft's surface helper. Emit
+# URL / PID / surface to stdout and to .orchestrator/.
+#
+# Design notes:
+#
+#   • diffhub is ALWAYS started in `--no-open` (standalone) mode. We do NOT
+#     use `diffhub cmux`, because that subcommand has diffhub call
+#     `cmux new-surface` from inside its own process. Under launchctl the
+#     diffhub process is a child of launchd (no cmux ancestor), so cmux's
+#     process-tree access check denies the call and the surface is never
+#     created — the user just sees a dead/empty .orchestrator/diffhub.surface.
+#
+#   • Browser placement is delegated to `craft surface open`, which owns
+#     right-side browser-pane reuse and stable per-task surface registration.
+#
+# Side effects (in the current working directory):
+#   .orchestrator/diffhub.log      — diffhub stdout/stderr
+#   .orchestrator/diffhub.pid      — background helper process id, owned by run-bg
+#   .orchestrator/diffhub.surface  — cmux browser surface ref (if created)
+#   .orchestrator/diffhub.label    — background supervisor label when needed
+#   .orchestrator/diffhub.runner.sh — background runner shim when needed
+#
+# Stdout:
+#   diffhub.url=<url>
+#   diffhub.pid=<pid>
+#   diffhub.surface=<surface>      (only when cmux is reachable)
+#
+# Exit codes:
+#   0  diffhub came up and printed a URL within --timeout seconds
+#   1  failed to detect URL within timeout (diffhub.log still on disk for triage)
+#   2  bad args
+#
+# Usage:
+#   launch-diffhub [--repo <dir>] [--timeout <seconds>] [--version <n.n.n>] [--source <dir>] [--port <port>]
+
+set -uo pipefail
+
+REPO="$(pwd)"
+TIMEOUT=30
+VERSION="0.1.21"
+PORT="${DIFFHUB_PORT:-2047}"
+PORT_WAS_EXPLICIT=0
+SOURCE_DIR="${DIFFHUB_SOURCE_DIR:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=bin/lib/task-runtime.sh
+source "${CRAFT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}/bin/lib/task-runtime.sh"
+CRAFT_HOME="$(orchestrator_craft_root)"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo)    REPO="$2"; shift 2 ;;
+        --timeout) TIMEOUT="$2"; shift 2 ;;
+        --version) VERSION="$2"; shift 2 ;;
+        --port)    PORT="$2"; PORT_WAS_EXPLICIT=1; shift 2 ;;
+        --source)  SOURCE_DIR="$2"; shift 2 ;;
+        -h|--help) sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) echo "launch-diffhub: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+cd "$REPO" || { echo "launch-diffhub: repo not accessible: $REPO" >&2; exit 1; }
+REPO="$(pwd -P)"
+TASK_ID="$(orchestrator_task_id_from_worktree "$REPO")"
+mkdir -p .orchestrator
+
+if [[ -z "$SOURCE_DIR" && -f "$CRAFT_HOME/vendor/diffhub/apps/cli/package.json" ]]; then
+    SOURCE_DIR="$(cd "$CRAFT_HOME/vendor/diffhub" && pwd -P)"
+elif [[ -z "$SOURCE_DIR" && -f "../diffhub-source/apps/cli/package.json" ]]; then
+    echo "launch-diffhub: ../diffhub-source is deprecated; use \$CRAFT_ROOT/vendor/diffhub" >&2
+    SOURCE_DIR="$(cd "../diffhub-source" && pwd -P)"
+elif [[ -n "$SOURCE_DIR" ]]; then
+    SOURCE_DIR="$(cd "$SOURCE_DIR" 2>/dev/null && pwd -P)" || {
+        echo "launch-diffhub: source dir not accessible: $SOURCE_DIR" >&2
+        exit 1
+    }
+fi
+
+if [[ -n "$SOURCE_DIR" && ! -f "$SOURCE_DIR/apps/cli/package.json" ]]; then
+    echo "launch-diffhub: source dir is not a diffhub checkout: $SOURCE_DIR" >&2
+    exit 1
+fi
+
+port_is_free() {
+    local candidate="$1"
+    if command -v lsof >/dev/null 2>&1; then
+        ! lsof -nP -iTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1
+        return
+    fi
+
+    if command -v nc >/dev/null 2>&1; then
+        ! nc -z 127.0.0.1 "$candidate" >/dev/null 2>&1
+        return
+    fi
+
+    return 0
+}
+
+if [[ "$PORT_WAS_EXPLICIT" -eq 0 && -z "${DIFFHUB_PORT:-}" ]]; then
+    ORIGINAL_PORT="$PORT"
+    for candidate in $(seq "$PORT" $((PORT + 50))); do
+        if port_is_free "$candidate"; then
+            PORT="$candidate"
+            break
+        fi
+    done
+
+    if [[ "$PORT" != "$ORIGINAL_PORT" ]]; then
+        echo "launch-diffhub: port $ORIGINAL_PORT is in use; using $PORT" >&2
+    fi
+fi
+
+LOG=".orchestrator/diffhub.log"
+SURFACE_FILE=".orchestrator/diffhub.surface"
+URL_FILE=".orchestrator/diffhub.url"
+
+# Avoid reading a stale URL from a previous launch while the new server is still
+# starting. This matters when another task already owns the old port.
+rm -f "$LOG" "$URL_FILE"
+
+# --- spawn diffhub (always standalone) ---
+server_args=(--repo "$REPO" --port "$PORT" --version "$VERSION")
+[[ -n "$SOURCE_DIR" ]] && server_args+=(--source "$SOURCE_DIR")
+if ! spawn_output="$("${CRAFT_ROOT:-$CRAFT_HOME}/bin/run-bg" --name diffhub "$SCRIPT_DIR/diffhub-server" "${server_args[@]}" 2>&1)"; then
+    printf 'launch-diffhub: failed to start diffhub: %s\n' "$spawn_output" >&2
+    exit 1
+fi
+PID="$(printf '%s\n' "$spawn_output" | sed -n 's/^diffhub.pid=//p' | head -1)"
+[[ -n "$PID" ]] || { echo "launch-diffhub: launched diffhub but could not determine pid" >&2; exit 1; }
+
+# --- wait for diffhub to print its URL ---
+URL=""
+for _ in $(seq 1 "$TIMEOUT"); do
+    URL=$(grep -oE 'https?://(localhost|127\.0\.0\.1):[0-9]+' "$LOG" 2>/dev/null | head -1 || true)
+    [[ -n "$URL" ]] && break
+    sleep 1
+done
+
+if [[ -z "$URL" ]]; then
+    echo "launch-diffhub: timed out after ${TIMEOUT}s waiting for URL (see $LOG)" >&2
+    exit 1
+fi
+
+# The dev server can print its URL before route handlers are ready. Do not open
+# the browser surface until an HTTP probe succeeds, otherwise cmux may land on a
+# stale "refused to connect" page and never repaint to the app.
+READY_URL="${URL%/}/api/health"
+READY=""
+for _ in $(seq 1 "$TIMEOUT"); do
+    if curl -fsS "$READY_URL" >/dev/null 2>&1; then
+        READY=1
+        break
+    fi
+    sleep 1
+done
+
+if [[ -z "$READY" ]]; then
+    echo "launch-diffhub: timed out after ${TIMEOUT}s waiting for server readiness at $READY_URL (see $LOG)" >&2
+    exit 1
+fi
+echo "$URL" > "$URL_FILE"
+
+# --- open/reuse the task browser surface through Craft ---
+SURFACE=""
+if SURFACE_OUTPUT="$(orchestrator_surface_open "$REPO" "$TASK_ID" diffhub-review \
+        --url "$URL" --label "diffhub" --owner diffhub --stage local_review --url-match exact 2>&1)"; then
+    SURFACE="$(printf '%s\n' "$SURFACE_OUTPUT" | grep -oE 'surface:[0-9]+' | head -1)"
+    [[ -n "$SURFACE" ]] && echo "$SURFACE" > "$SURFACE_FILE"
+else
+    printf 'launch-diffhub: craft surface open failed: %s\n' "$SURFACE_OUTPUT" >&2
+fi
+
+printf 'diffhub.url=%s\n' "$URL"
+printf 'diffhub.pid=%s\n' "$PID"
+[[ -n "$SURFACE" ]] && printf 'diffhub.surface=%s\n' "$SURFACE"
+exit 0

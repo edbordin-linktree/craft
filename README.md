@@ -207,6 +207,13 @@ Available plugins:
 
 | Plugin | Description |
 |---|---|
+| `planning` | Architect and discoverer commands plus planning skills |
+| `local-review` | Pre-PR local review stage and comment event contracts |
+| `bot-review` | Cross-model local branch review feeding local review comments |
+| `diffhub` | Diffhub local review UI and comment ingestion |
+| `pr-review` | GitHub PR surface, watcher, and PR review events |
+| `buildkite-status` | Buildkite status surface for PR/deploy checks |
+| `craft-dashboard` | Web dashboard and cmux task badges |
 | `slack-dm-notify` | DMs you when a draft PR is ready for review |
 | `slack-daily-thread` | Posts PR events to a daily Slack channel thread |
 | `linear-sync` | Two-way sync with Linear issues |

@@ -30,6 +30,7 @@ workflow_base_stages() {
     [[ -f "$conf" ]] || { echo "workflow_not_found: $workflow" >&2; return 1; }
     stages="$(
         # shellcheck source=/dev/null
+        unset STAGES
         source "$conf"
         printf '%s' "${STAGES:-}"
     )"

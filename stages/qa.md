@@ -1,4 +1,5 @@
 ---
+queue_state: in-progress
 ---
 Run the automated QA specified by the task frontmatter:
 

@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+#
+# run-bg — Launch, inspect, or stop a sibling helper script in the background,
+# capturing its stdout/stderr to .orchestrator/<name>.log and its PID to
+# .orchestrator/<name>.pid. Wrapper around the common
+#   "<script> --worktree . >.orchestrator/<name>.log 2>&1 & echo $! > .orchestrator/<name>.pid"
+# pattern so callers don't have to repeat it.
+#
+# Usage:
+#   run-bg [--name <label>] <helper-path-or-command> [args...]
+#   run-bg status <name>
+#   run-bg stop <name>
+#
+# Examples:
+#   run-bg --name review-pr "$CRAFT_ROOT/plugins/bot-review/scripts/review-pr"
+#   run-bg --name babysit-diffhub "$CRAFT_ROOT/plugins/diffhub/scripts/babysit-diffhub" --idle-timeout 7200
+#
+# Outputs (stdout):
+#   <name>.pid=<pid>
+#
+# Exit codes:
+#   0  spawned successfully
+#      status: process is running
+#   2  bad args / helper not found
+#   3  status: process is not running
+
+set -uo pipefail
+
+usage() {
+    echo "Usage: run-bg [--name <label>] <helper-path-or-command> [args...]" >&2
+    echo "       run-bg status <name>" >&2
+    echo "       run-bg stop <name>" >&2
+}
+
+[[ $# -ge 1 ]] || { usage; exit 2; }
+
+if [[ "${1:-}" == "status" || "${1:-}" == "stop" ]]; then
+    ACTION="$1"
+    NAME="${2:-}"
+    [[ -n "$NAME" ]] || { usage; exit 2; }
+    mkdir -p .orchestrator
+    PIDFILE=".orchestrator/${NAME}.pid"
+    LABELFILE=".orchestrator/${NAME}.label"
+    RUNNER=".orchestrator/${NAME}.runner.sh"
+    PID=""
+    [[ -f "$PIDFILE" ]] && PID="$(cat "$PIDFILE" 2>/dev/null || true)"
+
+    if [[ "$ACTION" == "status" ]]; then
+        if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+            printf '%s.pid=%s\n' "$NAME" "$PID"
+            exit 0
+        fi
+        exit 3
+    fi
+
+    if [[ -f "$LABELFILE" ]] && command -v launchctl >/dev/null 2>&1; then
+        LABEL="$(cat "$LABELFILE" 2>/dev/null || true)"
+        [[ -n "$LABEL" ]] && launchctl remove "$LABEL" >/dev/null 2>&1 || true
+    fi
+
+    if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+        kill "$PID" 2>/dev/null || true
+        for _ in 1 2 3; do
+            kill -0 "$PID" 2>/dev/null || break
+            sleep 1
+        done
+        kill -0 "$PID" 2>/dev/null && kill -9 "$PID" 2>/dev/null || true
+    fi
+
+    rm -f "$PIDFILE" "$LABELFILE" "$RUNNER"
+    printf '%s.stopped=1\n' "$NAME"
+    exit 0
+fi
+
+NAME=""
+if [[ "${1:-}" == "--name" ]]; then
+    NAME="${2:-}"
+    shift 2
+fi
+
+HELPER_INPUT="${1:?helper required}"; shift
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ "$HELPER_INPUT" == */* ]]; then
+    HELPER="$HELPER_INPUT"
+else
+    HELPER="$(command -v "$HELPER_INPUT" 2>/dev/null || true)"
+fi
+[[ -n "$NAME" ]] || NAME="$(basename "$HELPER_INPUT")"
+[[ -n "$HELPER" && -x "$HELPER" ]] || { echo "run-bg: helper not found or not executable: $HELPER_INPUT" >&2; exit 2; }
+
+mkdir -p .orchestrator
+LOG=".orchestrator/${NAME}.log"
+PIDFILE=".orchestrator/${NAME}.pid"
+LABELFILE=".orchestrator/${NAME}.label"
+RUNNER=".orchestrator/${NAME}.runner.sh"
+
+if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null; then
+    LABEL="craft.${NAME}.$(date +%s).$$"
+    BASH_BIN="$(command -v bash)"
+    REPO="$(pwd)"
+    LOG_ABS="${REPO}/${LOG}"
+
+    {
+        printf '#!%s\n' "$BASH_BIN"
+        printf 'set -uo pipefail\n'
+        printf 'export PATH=%q\n' "$PATH"
+        printf 'cd %q || exit 1\n' "$REPO"
+        printf 'exec %q' "$HELPER"
+        for arg in "$@"; do
+            printf ' %q' "$arg"
+        done
+        printf ' >%q 2>&1 < /dev/null\n' "$LOG_ABS"
+    } > "$RUNNER"
+    chmod +x "$RUNNER"
+
+    launchctl submit -l "$LABEL" -- "$BASH_BIN" "$REPO/$RUNNER"
+    echo "$LABEL" > "$LABELFILE"
+
+    PID=""
+    for _ in $(seq 1 20); do
+        PID=$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/pid = / {print $3; exit}')
+        [[ -n "$PID" ]] && break
+        sleep 0.1
+    done
+
+    [[ -n "$PID" ]] || { echo "run-bg: launched $LABEL but could not determine pid" >&2; exit 1; }
+    echo "$PID" > "$PIDFILE"
+else
+    "$HELPER" "$@" >"$LOG" 2>&1 < /dev/null &
+    echo $! > "$PIDFILE"
+fi
+
+printf '%s.pid=%s\n' "$NAME" "$(cat "$PIDFILE")"

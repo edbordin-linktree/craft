@@ -189,10 +189,13 @@ echo "runtime stage validation"
 assert_true "set plugin stage when enabled" runtime_stage_set "$PROJECT_DIR" task-123 watching_prod_deploy "watch deploy"
 assert_false "reject plugin stage when disabled" runtime_stage_set "$PROJECT_NO_PLUGINS" task-124 watching_prod_deploy "watch deploy"
 runtime_stage_set "$PROJECT_DIR" task-123 pr_review "review" >/dev/null
+assert_true "stage metadata projects pr_review queue" test -f "$QUEUE_DIR/waiting/task-123.md"
+assert_eq "stage metadata projected status" "waiting" "$(task_field "$QUEUE_DIR/waiting/task-123.md" status)"
 assert_eq "advance uses resolved plugin stage" "watching_prod_deploy" "$(runtime_stage_advance "$PROJECT_DIR" task-123 "next")"
 assert_false "reject unknown stage" runtime_stage_set "$PROJECT_DIR" task-123 no_such_stage "bad"
 assert_true "terminal blocked stage is explicit escape" runtime_stage_set "$PROJECT_DIR" task-123 blocked "blocked" blocked
 runtime_stage_set "$PROJECT_DIR" task-123 complete "done" >/dev/null
+assert_true "complete stage projects done queue" test -f "$QUEUE_DIR/done/task-123.md"
 assert_false "advance stops at final happy-path stage" runtime_stage_advance "$PROJECT_DIR" task-123 "next"
 
 echo ""
