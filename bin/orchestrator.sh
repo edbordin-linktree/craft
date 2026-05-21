@@ -282,11 +282,7 @@ run_task() {
             move_task "$new_file" "$QUEUE_DIR/blocked" "blocked" > /dev/null
             return
         fi
-        local first_stage
-        first_stage="$(workflow_resolve_stages "$PROJECT_DIR" "$new_file" | head -1)"
-        if [[ -n "$first_stage" ]]; then
-            runtime_stage_set "$PROJECT_DIR" "$tid" "$first_stage" "workflow started" active >/dev/null
-        fi
+        runtime_stage_advance "$PROJECT_DIR" "$tid" "workflow started" >/dev/null || log "Stage advance failed for $tid"
     fi
 
     # Determine which agent provider to use (task-level override or project default)
