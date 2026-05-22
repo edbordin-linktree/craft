@@ -84,7 +84,7 @@ if [[ "${1:-}" == "status" || "${1:-}" == "stop" ]]; then
         done
     }
 
-    if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+    if [[ -n "$PID" ]] && [[ "$PID" -gt 0 ]] 2>/dev/null && kill -0 "$PID" 2>/dev/null; then
         CHILD_PIDS="$(descendants "$PID" || true)"
         if [[ -n "$CHILD_PIDS" ]]; then
             # shellcheck disable=SC2086
@@ -194,7 +194,7 @@ EOF
         [[ -n "$PID" ]] && break
         sleep 0.2
     done
-    [[ -n "$PID" ]] || PID="0"
+    [[ -n "$PID" ]] || { echo "run-bg: could not determine PID for $LABEL after bootstrap" >&2; launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true; rm -f "$LABELFILE"; exit 1; }
     echo "$PID" > "$PIDFILE"
 else
     "$HELPER" "$@" >"$LOG" 2>&1 < /dev/null &

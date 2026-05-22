@@ -303,7 +303,7 @@ runtime_task_state_set() {
         stage_status="active"
         [[ "$status" == "done" ]] && stage_status="complete"
         [[ "$status" == "blocked" ]] && stage_status="blocked"
-        RUNTIME_SUPPRESS_STAGE_QUEUE_SYNC=1 runtime_stage_set "$project_dir" "$task_id" "$stage_to_set" "$reason" "$stage_status" >/dev/null
+        ( RUNTIME_SUPPRESS_STAGE_QUEUE_SYNC=1 runtime_stage_set "$project_dir" "$task_id" "$stage_to_set" "$reason" "$stage_status" >/dev/null )
     fi
 
     target="$target_dir/$(basename "$task_file")"

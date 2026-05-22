@@ -161,7 +161,7 @@ workflow_resolve_stages() {
 
     while IFS=$'\t' read -r position anchor stage plugin; do
         [[ -n "$position" && -n "$anchor" && -n "$stage" ]] || continue
-        if grep -qx -- "$stage" <<< "$stages"; then
+        if grep -qxF -- "$stage" <<< "$stages"; then
             echo "duplicate_stage_in_workflow: $stage" >&2
             rm -f "$insertions_file"
             return 2
