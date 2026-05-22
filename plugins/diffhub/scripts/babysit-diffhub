@@ -3,10 +3,12 @@
 # babysit-diffhub — Fast local watcher for local review.
 #
 # Watches:
-#   - diffhub's /api/comments REST API — every new comment (human OR bot) is
-#     treated equally. No tag filtering: the agent acts on whatever appears in
-#     arrival order. The cross-model reviewer (review-pr) and the human can
-#     comment in parallel; both are equal citizens here.
+#   - diffhub's /api/comments REST API — every new unresolved top-level comment
+#     (human OR bot) is treated equally. Replies mutate an existing comment and
+#     are intentionally not forwarded back to the agent as new review events.
+#     No tag filtering: the agent acts on whatever appears in arrival order.
+#     The cross-model reviewer (review-pr) and the human can comment in
+#     parallel; both are equal citizens here.
 #
 # Enqueues one typed Craft runtime event per transition. Craft owns event
 # storage and wakes the task agent with a compact CRAFT_EVENTS summary only when
@@ -129,7 +131,7 @@ fetch_snapshot() {
 
 diff_snapshot() {
     local prior="$1" cur="$2"
-    jq -n -c --argjson prior "$prior" --argjson cur "$cur" '
+    jq -n -c --argjson prior "$prior" --argjson cur "$cur" --arg diffhub_url "$DIFFHUB_URL" '
         ($cur.ids - $prior.ids) as $new_ids
         | $new_ids[] | . as $id
         | $cur.by_id[($id | tostring)]
@@ -141,6 +143,7 @@ diff_snapshot() {
               phase: "local_review",
               kind: "diffhub_comment",
               comment_id: $id,
+              diffhub_url: $diffhub_url,
               author: $author,
               file: .file,
               lineNumber: .lineNumber,

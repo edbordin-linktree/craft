@@ -153,20 +153,20 @@ echo "split plugin assets"
 real_project="$TMPDIR/split-plugin-project"
 mkdir -p "$real_project"
 cat > "$real_project/craft.conf" << 'EOF'
-PLUGINS=planning,local-review,bot-review,diffhub,pr-review,craft-dashboard
+PLUGINS=planning,local-review,bot-review,diffhub,babysit-pr,craft-dashboard
 EOF
 
 old_craft_root="$CRAFT_ROOT"
 CRAFT_ROOT="$REPO_ROOT"
 assert_true "split plugins sync through generic assets" plugin_sync_project_assets "$real_project"
-assert_true "planning architect command linked" test -L "$real_project/.claude/commands/init-architect.md"
-assert_eq "planning architect command target" "$REPO_ROOT/plugins/planning/project/.claude/commands/init-architect.md" "$(readlink "$real_project/.claude/commands/init-architect.md")"
+assert_false "planning does not override architect command" test -e "$real_project/.claude/commands/init-architect.md"
 assert_true "planning discoverer command linked" test -L "$real_project/.claude/commands/init-discoverer.md"
 assert_true "bot-review claude skill linked" test -L "$real_project/.claude/skills/review-pr"
 assert_eq "bot-review claude skill target" "$REPO_ROOT/plugins/bot-review/skills/review-pr" "$(readlink "$real_project/.claude/skills/review-pr")"
-assert_true "pr-review codex skill linked" test -L "$real_project/.codex/skills/babysit-pr"
-assert_eq "pr-review codex skill target" "$REPO_ROOT/plugins/pr-review/skills/babysit-pr" "$(readlink "$real_project/.codex/skills/babysit-pr")"
-assert_false "orchestrator-skills plugin removed" test -d "$REPO_ROOT/plugins/orchestrator-skills"
+assert_true "babysit-pr codex skill linked" test -L "$real_project/.codex/skills/babysit-pr"
+assert_eq "babysit-pr codex skill target" "$REPO_ROOT/plugins/babysit-pr/skills/babysit-pr" "$(readlink "$real_project/.codex/skills/babysit-pr")"
+retired_monolith="orchestrator""-skills"
+assert_false "retired monolith plugin removed" test -d "$REPO_ROOT/plugins/$retired_monolith"
 orchestrator_states="$(plugin_queue_states "$real_project" | sort | paste -sd, -)"
 expected_orchestrator_states="$(printf '%s\n' drafts pending approved in-progress waiting done blocked archive local-review diffhub-review | sort | paste -sd, -)"
 assert_eq "plugins declare their queue states" "$expected_orchestrator_states" "$orchestrator_states"

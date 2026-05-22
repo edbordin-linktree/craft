@@ -55,9 +55,10 @@ ln -s "$REPO_ROOT/bin/lib/workflow.sh" "$CRAFT_ROOT/bin/lib/workflow.sh"
 ln -s "$REPO_ROOT/bin/lib/runtime.sh" "$CRAFT_ROOT/bin/lib/runtime.sh"
 ln -s "$REPO_ROOT/workflows" "$CRAFT_ROOT/workflows"
 ln -s "$REPO_ROOT/stages" "$CRAFT_ROOT/stages"
+ln -s "$REPO_ROOT/plugins/babysit-pr" "$CRAFT_ROOT/plugins/babysit-pr"
 
 cat > "$PROJECT_DIR/craft.conf" <<'EOF'
-PLUGINS=example
+PLUGINS=example,babysit-pr
 EOF
 
 cat > "$CRAFT_ROOT/plugins/example/plugin.conf" <<'EOF'
@@ -178,6 +179,12 @@ assert_true "prompt includes plugin fragment" grep -q 'Run the example plugin QA
 assert_true "prompt includes plugin stage" grep -q 'Watch the production deploy before completion.' "$prompt"
 assert_true "prompt includes event contract" grep -q 'Deploy watcher events use this contract.' "$prompt"
 assert_true "prompt includes event fragment" grep -q 'Example plugin adds deploy event metadata.' "$prompt"
+assert_true "prompt includes context preflight" grep -q 'docs/plan.md' "$prompt"
+assert_true "prompt includes dependency guard" grep -q 'craft task stage block <task-id>' "$prompt"
+assert_true "prompt includes worktree setup" grep -q 'Set up repository worktrees' "$prompt"
+assert_true "prompt includes open PR state guard" grep -q 'gh pr list --state open' "$prompt"
+assert_true "prompt includes PR creation" grep -q 'create a draft PR' "$prompt"
+assert_true "prompt includes review thread resolution" grep -q 'resolveReviewThread' "$prompt"
 
 cli_prompt="$TMPDIR/cli-prompt.md"
 (cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" workflow render task-123 > "$cli_prompt")

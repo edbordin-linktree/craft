@@ -48,6 +48,20 @@ on_stage_start() {
     )
 }
 
+on_task_state_after() {
+    craft_hook_parse_task_state_args "$@"
+    [[ "$STATUS" == "waiting" && -n "$TASK_FILE" ]] || return 0
+    [[ "$(craft_hook_task_frontmatter_field "$TASK_FILE" stage 2>/dev/null || true)" == "pr_review" ]] || return 0
+    local worktree pr_url
+    worktree="$(craft_hook_primary_worktree_for_task "$TASK_DIR" 2>/dev/null || true)"
+    pr_url="$(_bk_status_pr_url)"
+    [[ -n "$worktree" && -n "$pr_url" ]] || return 0
+    (
+        cd "$worktree" || exit 0
+        "$PLUGIN_DIR/scripts/show-build-status" "$pr_url" >/dev/null 2>&1 || true
+    )
+}
+
 on_stage_end() {
     craft_hook_parse_stage_args "$@"
     [[ "$STAGE" == "pr_review" ]] || return 0

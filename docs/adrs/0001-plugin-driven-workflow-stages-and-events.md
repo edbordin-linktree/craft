@@ -258,7 +258,7 @@ plugins/diffhub/
   scripts/launch-diffhub
   scripts/babysit-diffhub
 
-plugins/pr-review/
+plugins/babysit-pr/
   fragments/stages/pr_review.md
   skills/babysit-pr/SKILL.md
   scripts/watch-pr
@@ -267,7 +267,6 @@ plugins/buildkite-status/
   scripts/show-build-status
 
 plugins/planning/
-  commands/init-architect.md
   commands/init-discoverer.md
   skills/plan-reviewer/SKILL.md
 

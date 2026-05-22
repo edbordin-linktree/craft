@@ -25,9 +25,9 @@ Autonomous PR monitor. Detects the PR from the current worktree, polls on a 2-mi
 
 ## Inputs
 
-When invoked from `/work-task` Step 10, the caller usually already knows:
-- **PR URL or number** — captured at Step 9 (PR creation) and recorded on the task frontmatter as `pr:`.
-- **Worktree path** — the current directory; `cd` here was done at Step 3 and stays for the lifetime of the task.
+When invoked from the workflow `pr_review` stage, the caller usually already knows:
+- **PR URL or number** — created or found by the `pr_review` stage and recorded on the task frontmatter as `pr:`.
+- **Worktree path** — the task repo worktree under `tasks/<task-id>/<repo>/`.
 
 If invoked manually outside of work-task, auto-detect the PR from the current branch with `gh pr view --json number`.
 
@@ -113,7 +113,7 @@ The agent's job is only to respond to delivered events:
 **Event types the watcher emits:**
 - `merge_status`: `mergeable=CONFLICTING`, `mergeStateStatus=BEHIND`, or base branch SHA advanced.
 - `ci_status`: CI failure/action-required or recovery.
-- `review_comment`: new review submissions, threads, inline comments, conversation comments, or changes requested.
+- `review_comment`: unresolved review threads, inline comments on unresolved threads, conversation comments, or changes requested.
 - `pr_approval`: human approval.
 - `pr_review`: draft-to-ready, merged, closed, and other PR-review status transitions.
 
@@ -131,7 +131,7 @@ The agent's job is only to respond to delivered events:
 
 Run once on the first iteration. Idempotent — subsequent iterations skip if state file exists.
 
-1. **Detect the PR** — `gh pr view` from the worktree's current branch. If a PR number was passed by the caller (e.g. work-task Step 9), use it directly. If no PR found and none was passed, log and exit.
+1. **Detect the PR** — `gh pr view` from the worktree's current branch. If a PR number was passed by the caller or recorded as `pr:` in task frontmatter, use it directly. If no PR is found and none was passed, log and exit.
 2. **Identify CI platforms** — scan check names in `gh pr checks` for known patterns (GitHub Actions, Buildkite, Vercel, Fly.io). Record into `detected_ci_platforms`.
 3. **Initial snapshot** — write all `last_*` fields with current values so phase 5 doesn't fire spurious "broke!" notifications on the first real diff.
 4. **One-time confirmation log**:

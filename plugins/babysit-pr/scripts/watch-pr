@@ -206,16 +206,21 @@ diff_snapshot() {
               )
             | add // {};
 
-        # Flatten all inline review-comment IDs across all threads.
+        # Only unresolved review threads are actionable. Replies added while
+        # resolving a thread should not re-wake the agent as fresh work.
         def inline_ids(pr):
             ( pr.reviewThreads.nodes // [] )
+            | map(select(.isResolved == false))
             | map(.comments.nodes // [])
             | flatten
             | map(.id)
             | sort;
 
         def thread_ids(pr):
-            ( pr.reviewThreads.nodes // [] ) | map(.id) | sort;
+            ( pr.reviewThreads.nodes // [] )
+            | map(select(.isResolved == false))
+            | map(.id)
+            | sort;
 
         # shape() normalises EITHER a raw GraphQL pull-request response
         # (used for $cur) OR the persisted flat state from build_state
@@ -272,8 +277,6 @@ diff_snapshot() {
           ( [ $B.checks | to_entries[] | select(.value == "SUCCESS")
               | select(($A.checks // {})[.key] != "SUCCESS" and ($A.checks // {})[.key] != null)
               | "CI check recovered: \(.key) is now SUCCESS." ] | .[] ),
-          ( ($B.review_ids - $A.review_ids)
-              | if length > 0 then "\(length) new review submission(s)." else empty end ),
           ( ($B.thread_ids - $A.thread_ids)
               | if length > 0 then "\(length) new review thread(s). Run Phase 4 comment triage." else empty end ),
           ( (($B.inline_ids - $A.inline_ids) | length) as $new_inline
@@ -321,8 +324,8 @@ build_state() {
             checks: ($cur | check_map(.)),
             review_ids: (($cur.reviews.nodes // []) | map(.id) | sort),
             comment_ids: (($cur.comments.nodes // []) | map(.id) | sort),
-            thread_ids: (($cur.reviewThreads.nodes // []) | map(.id) | sort),
-            inline_ids: (($cur.reviewThreads.nodes // []) | map(.comments.nodes // []) | flatten | map(.id) | sort),
+            thread_ids: (($cur.reviewThreads.nodes // []) | map(select(.isResolved == false)) | map(.id) | sort),
+            inline_ids: (($cur.reviewThreads.nodes // []) | map(select(.isResolved == false)) | map(.comments.nodes // []) | flatten | map(.id) | sort),
             last_polled_at: $ts
         }
     '

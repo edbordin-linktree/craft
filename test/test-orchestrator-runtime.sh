@@ -42,7 +42,7 @@ mkdir -p "$WORKTREE/.orchestrator"
 
 cat > "$PROJECT_DIR/craft.conf" <<'EOF'
 MULTIPLEXER=cmux
-PLUGINS=local-review,diffhub,pr-review
+PLUGINS=local-review,diffhub,babysit-pr
 EOF
 
 cat > "$QUEUE_DIR/in-progress/task-123.md" <<'EOF'
@@ -116,7 +116,7 @@ runtime_write_task_session "$PROJECT_DIR" task-123 craft-project-task-123 "craft
 echo "orchestrator surface scripts"
 (
     cd "$WORKTREE" || exit 1
-    "$REPO_ROOT/plugins/pr-review/scripts/open-pr-surface" \
+    "$REPO_ROOT/plugins/babysit-pr/scripts/open-pr-surface" \
         "https://github.com/example/repo/pull/7" --repo "$WORKTREE" >/dev/null
 )
 assert_eq "github-pr surface registered" "https://github.com/example/repo/pull/7" \
@@ -219,7 +219,7 @@ echo ""
 echo "watch-pr event queue"
 (
     cd "$WORKTREE" || exit 1
-    "$REPO_ROOT/plugins/pr-review/scripts/watch-pr" \
+    "$REPO_ROOT/plugins/babysit-pr/scripts/watch-pr" \
         --pr 7 --worktree "$WORKTREE" --poll-interval 1 >/dev/null 2>&1
 )
 assert_eq "terminal PR event enqueued" "pending=2 counts=pr_approval:1,pr_review:1" \
@@ -233,7 +233,7 @@ echo "normal workflow docs"
 assert_true "normal work-task docs do not reference await scripts" bash -c "! grep -Eq 'await-diffhub-review|await-pr-event' '$REPO_ROOT/templates/.claude/commands/work-task.md'"
 assert_true "normal work-task docs render resolved workflow" grep -q 'craft workflow render' "$REPO_ROOT/templates/.claude/commands/work-task.md"
 assert_true "normal work-task docs do not hard-code local review" bash -c "! grep -Eq 'Step 8|diffhub|ready_for_pr' '$REPO_ROOT/templates/.claude/commands/work-task.md'"
-assert_true "await scripts removed from normal scripts" bash -c "! test -e '$REPO_ROOT/plugins/diffhub/scripts/await-diffhub-review' && ! test -e '$REPO_ROOT/plugins/pr-review/scripts/await-pr-event'"
+assert_true "await scripts removed from normal scripts" bash -c "! test -e '$REPO_ROOT/plugins/diffhub/scripts/await-diffhub-review' && ! test -e '$REPO_ROOT/plugins/babysit-pr/scripts/await-pr-event'"
 
 echo ""
 echo "────────────────────────────"

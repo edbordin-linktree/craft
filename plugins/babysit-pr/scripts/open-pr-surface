@@ -34,7 +34,7 @@ if [[ "$URL" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
 fi
 
 SURFACE_OUTPUT="$(orchestrator_surface_open "$REPO" "$TASK_ID" github-pr \
-    --url "$URL" --label "$TITLE" --owner pr-review --stage pr_review --url-match prefix 2>&1)" || {
+    --url "$URL" --label "$TITLE" --owner babysit-pr --stage pr_review --url-match prefix 2>&1)" || {
     echo "open-pr-surface: craft surface open failed: $SURFACE_OUTPUT" >&2
     exit 1
 }

@@ -41,6 +41,7 @@ if [[ "${1:-}" == "status" || "${1:-}" == "stop" ]]; then
     mkdir -p .orchestrator
     PIDFILE=".orchestrator/${NAME}.pid"
     LABELFILE=".orchestrator/${NAME}.label"
+    PLISTFILE=".orchestrator/${NAME}.plist"
     RUNNER=".orchestrator/${NAME}.runner.sh"
     PID=""
     [[ -f "$PIDFILE" ]] && PID="$(cat "$PIDFILE" 2>/dev/null || true)"
@@ -50,24 +51,58 @@ if [[ "${1:-}" == "status" || "${1:-}" == "stop" ]]; then
             printf '%s.pid=%s\n' "$NAME" "$PID"
             exit 0
         fi
+        if [[ -f "$LABELFILE" ]] && command -v launchctl >/dev/null 2>&1; then
+            LABEL="$(cat "$LABELFILE" 2>/dev/null || true)"
+            if [[ -n "$LABEL" ]]; then
+                PID="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null \
+                    | awk -F'= ' '/pid =/{print $2; exit}' \
+                    | tr -cd '0-9')"
+                if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+                    echo "$PID" > "$PIDFILE"
+                    printf '%s.pid=%s\n' "$NAME" "$PID"
+                    exit 0
+                fi
+            fi
+        fi
         exit 3
     fi
 
     if [[ -f "$LABELFILE" ]] && command -v launchctl >/dev/null 2>&1; then
         LABEL="$(cat "$LABELFILE" 2>/dev/null || true)"
-        [[ -n "$LABEL" ]] && launchctl remove "$LABEL" >/dev/null 2>&1 || true
+        if [[ -n "$LABEL" ]]; then
+            launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+            launchctl remove "$LABEL" >/dev/null 2>&1 || true
+        fi
     fi
 
+    descendants() {
+        local parent="$1" child
+        pgrep -P "$parent" 2>/dev/null | while IFS= read -r child; do
+            [[ -n "$child" ]] || continue
+            descendants "$child"
+            printf '%s\n' "$child"
+        done
+    }
+
     if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+        CHILD_PIDS="$(descendants "$PID" || true)"
+        if [[ -n "$CHILD_PIDS" ]]; then
+            # shellcheck disable=SC2086
+            kill $CHILD_PIDS 2>/dev/null || true
+        fi
         kill "$PID" 2>/dev/null || true
         for _ in 1 2 3; do
             kill -0 "$PID" 2>/dev/null || break
             sleep 1
         done
+        if [[ -n "${CHILD_PIDS:-}" ]]; then
+            # shellcheck disable=SC2086
+            kill -9 $CHILD_PIDS 2>/dev/null || true
+        fi
         kill -0 "$PID" 2>/dev/null && kill -9 "$PID" 2>/dev/null || true
     fi
 
-    rm -f "$PIDFILE" "$LABELFILE" "$RUNNER"
+    rm -f "$PIDFILE" "$LABELFILE" "$PLISTFILE" "$RUNNER"
     printf '%s.stopped=1\n' "$NAME"
     exit 0
 fi
@@ -92,10 +127,14 @@ mkdir -p .orchestrator
 LOG=".orchestrator/${NAME}.log"
 PIDFILE=".orchestrator/${NAME}.pid"
 LABELFILE=".orchestrator/${NAME}.label"
+PLISTFILE=".orchestrator/${NAME}.plist"
 RUNNER=".orchestrator/${NAME}.runner.sh"
 
-if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null; then
-    LABEL="craft.${NAME}.$(date +%s).$$"
+xml_escape() {
+    sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
     BASH_BIN="$(command -v bash)"
     REPO="$(pwd)"
     LOG_ABS="${REPO}/${LOG}"
@@ -113,17 +152,49 @@ if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null; then
     } > "$RUNNER"
     chmod +x "$RUNNER"
 
-    launchctl submit -l "$LABEL" -- "$BASH_BIN" "$REPO/$RUNNER"
+    SAFE_NAME="$(printf '%s' "$NAME" | tr -cs 'A-Za-z0-9._-' '-')"
+    LABEL="com.craft.run-bg.${SAFE_NAME}.$$"
+    BASH_XML="$(printf '%s' "$BASH_BIN" | xml_escape)"
+    RUNNER_XML="$(printf '%s/%s' "$REPO" "$RUNNER" | xml_escape)"
+    LOG_XML="$(printf '%s' "$LOG_ABS" | xml_escape)"
+
+    cat > "$PLISTFILE" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$BASH_XML</string>
+        <string>$RUNNER_XML</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>$LOG_XML</string>
+    <key>StandardErrorPath</key>
+    <string>$LOG_XML</string>
+</dict>
+</plist>
+EOF
+
     echo "$LABEL" > "$LABELFILE"
+    launchctl bootstrap "gui/$(id -u)" "$REPO/$PLISTFILE" >/dev/null 2>&1 \
+        || { rm -f "$LABELFILE"; echo "run-bg: launchctl bootstrap failed" >&2; exit 1; }
 
     PID=""
-    for _ in $(seq 1 20); do
-        PID=$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/pid = / {print $3; exit}')
+    for _ in 1 2 3 4 5; do
+        PID="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null \
+            | awk -F'= ' '/pid =/{print $2; exit}' \
+            | tr -cd '0-9')"
         [[ -n "$PID" ]] && break
-        sleep 0.1
+        sleep 0.2
     done
-
-    [[ -n "$PID" ]] || { echo "run-bg: launched $LABEL but could not determine pid" >&2; exit 1; }
+    [[ -n "$PID" ]] || PID="0"
     echo "$PID" > "$PIDFILE"
 else
     "$HELPER" "$@" >"$LOG" 2>&1 < /dev/null &

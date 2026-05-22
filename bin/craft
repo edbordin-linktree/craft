@@ -461,7 +461,7 @@ _plugins_enable_with_deps() {
     seen="${seen}${plugin},"
     while IFS= read -r dep; do
         [[ -n "$dep" ]] || continue
-        _plugins_enable_with_deps "$conf" "$dep" "$seen"
+        _plugins_enable_with_deps "$conf" "$dep" "$seen" || return 1
     done < <(plugin_dependencies "$plugin")
     _plugins_enable "$conf" "$plugin"
 }
@@ -498,7 +498,7 @@ Available plugins:
   local-review         Pre-PR local review stage and event contracts
   bot-review           Automated local branch review
   diffhub              Diffhub local review UI and comment ingestion
-  pr-review            GitHub PR watcher and review events
+  babysit-pr            GitHub PR watcher and review events
   buildkite-status     Buildkite status surface
   craft-dashboard      Web dashboard and cmux task badges
   slack-dm-notify      DMs you on Slack when a draft PR is ready

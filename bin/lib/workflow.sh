@@ -293,6 +293,30 @@ ${options_json}
 Resolved stages:
 $(printf '%s\n' "$stages" | sed 's/^/- /')
 
+## Before The First Stage
+
+Read the task file and parse its frontmatter before acting: \`id\`, \`type\`, \`milestone\`, \`depends_on\`, \`repos\`, \`branch\`, \`base\`, \`qa\`, \`pr\`, and any workflow options.
+
+Read project context first:
+
+- \`docs/plan.md\`
+- the milestone doc named by the task's \`milestone:\` field, when present
+- any ADRs referenced by the task or milestone
+- \`state.md\`
+- \`.claude/CLAUDE.md\`, when present
+
+If \`depends_on\` names a task that is not in \`queue/done/\` or \`queue/archive/\`, stop immediately and block the task:
+
+\`\`\`bash
+craft task stage block <task-id> --reason "unmet dependency: <task-id>"
+\`\`\`
+
+Set up repository worktrees before code work. For each repo in \`repos:\`, create or reuse \`tasks/<task-id>/<repo>/\` from the main clone at \`repos/<repo>\` or \`~/code/<repo>\`. Use the task's \`branch:\` and \`base:\` fields; default the base ref to \`origin/main\` when \`base:\` is absent. If the worktree does not exist, run \`git -C <main-clone> worktree add <task-dir>/<repo> -b <branch> <base-ref>\`; if the branch already exists, add the worktree for the existing branch instead. Create \`tasks/<task-id>/<repo>/.orchestrator/\` so plugin hooks can find the worktree. Do all code work inside these task worktrees, never in \`repos/\` or \`~/code/\`.
+
+Use the task's \`branch:\` exactly. Commit messages must be conventional (\`feat:\`, \`fix:\`, \`refactor:\`, etc.) and should not include task IDs. Use \`git push --force-with-lease\` after rewritten history; never plain \`--force\`.
+
+Never merge a PR yourself. When querying GitHub for an existing PR from this branch, scope checks to open PRs, for example \`gh pr list --state open --head <branch>\`.
+
 EOF
 
     while IFS= read -r stage; do

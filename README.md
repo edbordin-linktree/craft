@@ -211,7 +211,7 @@ Available plugins:
 | `local-review` | Pre-PR local review stage and comment event contracts |
 | `bot-review` | Cross-model local branch review feeding local review comments |
 | `diffhub` | Diffhub local review UI and comment ingestion |
-| `pr-review` | GitHub PR surface, watcher, and PR review events |
+| `babysit-pr` | GitHub PR surface, watcher, and PR review events |
 | `buildkite-status` | Buildkite status surface for PR/deploy checks |
 | `craft-dashboard` | Web dashboard and cmux task badges |
 | `slack-dm-notify` | DMs you when a draft PR is ready for review |
