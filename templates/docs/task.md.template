@@ -3,6 +3,9 @@ id: task-{{NUMBER}}
 type: pr
 milestone: {{MILESTONE_ID}}
 status: pending
+workflow: standard-pr
+workflow_options: {}
+parent:
 depends_on: []
 repos: []
 branch: sls/{{TICKET}}/{{BRANCH_NAME}}

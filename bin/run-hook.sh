@@ -48,6 +48,52 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # $CRAFT_ROOT/bin
 CRAFT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PLUGINS_LIB="$CRAFT_ROOT/plugins"
+# shellcheck source=bin/lib/plugins.sh
+source "$CRAFT_ROOT/bin/lib/plugins.sh"
+
+EVENT_TASK_ID=""
+EVENT_TYPE=""
+EVENT_SUMMARY=""
+EVENT_PAYLOAD=""
+EVENT_PUBLISHER=""
+if [[ "$HOOK_NAME" == "on_event" ]]; then
+    _event_args=("${FILTERED_ARGS[@]}")
+    while [[ ${#_event_args[@]} -gt 0 ]]; do
+        case "${_event_args[0]}" in
+            --task-id) EVENT_TASK_ID="${_event_args[1]:-}"; _event_args=("${_event_args[@]:2}") ;;
+            --event-type) EVENT_TYPE="${_event_args[1]:-}"; _event_args=("${_event_args[@]:2}") ;;
+            --event-summary) EVENT_SUMMARY="${_event_args[1]:-}"; _event_args=("${_event_args[@]:2}") ;;
+            --event-payload) EVENT_PAYLOAD="${_event_args[1]:-}"; _event_args=("${_event_args[@]:2}") ;;
+            --publisher) EVENT_PUBLISHER="${_event_args[1]:-}"; _event_args=("${_event_args[@]:2}") ;;
+            *) _event_args=("${_event_args[@]:1}") ;;
+        esac
+    done
+    export EVENT_TASK_ID EVENT_TYPE EVENT_SUMMARY EVENT_PAYLOAD EVENT_PUBLISHER EVENT_CONSUME_FILE
+fi
+
+event_consume() {
+    [[ -n "${EVENT_CONSUME_FILE:-}" ]] && printf 'consumed\n' > "$EVENT_CONSUME_FILE"
+}
+
+event_publish() {
+    local type="${1:?event type required}" payload="${2:?payload json required}" publisher="" summary=""
+    shift 2 || true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --publisher) publisher="${2:-}"; shift 2 ;;
+            --summary) summary="${2:-}"; shift 2 ;;
+            *) echo "event_publish: unknown arg: $1" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "${EVENT_TASK_ID:-}" ]] || { echo "event_publish: EVENT_TASK_ID unavailable" >&2; return 2; }
+    [[ -n "$summary" ]] || summary="$type"
+    [[ -n "$publisher" ]] || publisher="${EVENT_PUBLISHER:-plugin}"
+    (
+        cd "$PROJECT_DIR" || exit 1
+        "$CRAFT_ROOT/bin/craft" event enqueue "$EVENT_TASK_ID" \
+            --type "$type" --summary "$summary" --json "$payload" --publisher "$publisher"
+    )
+}
 
 # Read PLUGINS from the project's conf.
 PLUGINS=""
@@ -66,7 +112,12 @@ for plugin in "${PLUGIN_LIST[@]}"; do
     hooks_file="$PLUGINS_LIB/$plugin/hooks.sh"
 
     if [[ ! -f "$hooks_file" ]]; then
-        echo "[plugins] Warning: plugin '$plugin' not found at $hooks_file" >&2
+        continue
+    fi
+
+    missing_deps="$(plugin_missing_dependencies "$PROJECT_DIR" "$plugin" | paste -sd, -)"
+    if [[ -n "$missing_deps" ]]; then
+        echo "[plugins] $plugin: missing DEPENDS_ON plugin(s): $missing_deps — skipping $HOOK_NAME" >&2
         continue
     fi
 

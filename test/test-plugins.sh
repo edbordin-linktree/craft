@@ -76,16 +76,17 @@ export CRAFT_ROOT="$TMPDIR/craft"
 PROJECT_DIR="$TMPDIR/project"
 QUEUE_DIR="$PROJECT_DIR/queue"
 mkdir -p "$CRAFT_ROOT/plugins/example/project/.claude/commands"
-mkdir -p "$CRAFT_ROOT/plugins/example/project/.claude/skills/example-skill"
-mkdir -p "$CRAFT_ROOT/plugins/example/project/.codex/skills/example-skill"
-mkdir -p "$PROJECT_DIR" "$QUEUE_DIR"/{pending,approved,in-progress,waiting,done,blocked,archive}
+mkdir -p "$CRAFT_ROOT/plugins/example/skills/example-skill"
+mkdir -p "$CRAFT_ROOT/plugins/duplicate/skills/example-skill"
+mkdir -p "$CRAFT_ROOT/plugins/no-hooks"
+mkdir -p "$PROJECT_DIR" "$QUEUE_DIR"/{drafts,pending,approved,in-progress,waiting,done,blocked,archive}
 
 cat > "$PROJECT_DIR/craft.conf" << 'EOF'
 PLUGINS=example
 EOF
 
 cat > "$CRAFT_ROOT/plugins/example/plugin.conf" << 'EOF'
-QUEUE_STATES=diffhub-review,custom-review
+QUEUE_STATES=extra-review,custom-review
 EOF
 
 cat > "$CRAFT_ROOT/plugins/example/hooks.sh" << 'EOF'
@@ -96,13 +97,13 @@ cat > "$CRAFT_ROOT/plugins/example/project/.claude/commands/example.md" << 'EOF'
 # Example command
 EOF
 
-cat > "$CRAFT_ROOT/plugins/example/project/.claude/skills/example-skill/SKILL.md" << 'EOF'
+cat > "$CRAFT_ROOT/plugins/example/skills/example-skill/SKILL.md" << 'EOF'
 ---
 name: example-skill
 ---
 EOF
 
-cat > "$CRAFT_ROOT/plugins/example/project/.codex/skills/example-skill/SKILL.md" << 'EOF'
+cat > "$CRAFT_ROOT/plugins/duplicate/skills/example-skill/SKILL.md" << 'EOF'
 ---
 name: example-skill
 ---
@@ -114,48 +115,86 @@ echo "plugin_sync_project_assets"
 assert_true "syncs project assets" plugin_sync_project_assets "$PROJECT_DIR"
 assert_true "links claude command" test -L "$PROJECT_DIR/.claude/commands/example.md"
 assert_eq "claude command target" "$CRAFT_ROOT/plugins/example/project/.claude/commands/example.md" "$(readlink "$PROJECT_DIR/.claude/commands/example.md")"
-assert_true "links claude skill file" test -L "$PROJECT_DIR/.claude/skills/example-skill/SKILL.md"
-assert_true "links codex skill file" test -L "$PROJECT_DIR/.codex/skills/example-skill/SKILL.md"
+assert_true "links claude skill dir" test -L "$PROJECT_DIR/.claude/skills/example-skill"
+assert_eq "claude skill target" "$CRAFT_ROOT/plugins/example/skills/example-skill" "$(readlink "$PROJECT_DIR/.claude/skills/example-skill")"
+assert_true "links codex skill dir" test -L "$PROJECT_DIR/.codex/skills/example-skill"
+assert_eq "codex skill target" "$CRAFT_ROOT/plugins/example/skills/example-skill" "$(readlink "$PROJECT_DIR/.codex/skills/example-skill")"
 assert_true "idempotent resync" plugin_sync_project_assets "$PROJECT_DIR"
+
+cat > "$PROJECT_DIR/craft.conf" << 'EOF'
+PLUGINS=example,no-hooks
+EOF
+assert_true "plugin without hooks or config is valid for asset sync" plugin_sync_project_assets "$PROJECT_DIR"
+no_hooks_missing="$(plugin_missing_dependencies "$PROJECT_DIR" no-hooks | paste -sd, -)"
+assert_eq "plugin without hooks or config has no missing dependencies" "" "$no_hooks_missing"
+cat > "$PROJECT_DIR/craft.conf" << 'EOF'
+PLUGINS=example
+EOF
 
 rm "$PROJECT_DIR/.claude/commands/example.md"
 echo "local file" > "$PROJECT_DIR/.claude/commands/example.md"
 assert_false "refuses real-file conflict" plugin_sync_project_assets "$PROJECT_DIR"
 rm "$PROJECT_DIR/.claude/commands/example.md"
 
+cat > "$PROJECT_DIR/craft.conf" << 'EOF'
+PLUGINS=example,duplicate
+EOF
+assert_false "rejects duplicate plugin skills" plugin_sync_project_assets "$PROJECT_DIR"
+cat > "$PROJECT_DIR/craft.conf" << 'EOF'
+PLUGINS=example
+EOF
+mkdir -p "$CRAFT_ROOT/plugins/needs-example"
+cat > "$CRAFT_ROOT/plugins/needs-example/plugin.conf" << 'EOF'
+DEPENDS_ON=example
+EOF
+
 echo ""
-echo "orchestrator-skills assets"
-real_project="$TMPDIR/orchestrator-project"
+echo "split plugin assets"
+real_project="$TMPDIR/split-plugin-project"
 mkdir -p "$real_project"
 cat > "$real_project/craft.conf" << 'EOF'
-PLUGINS=orchestrator-skills
+PLUGINS=planning,local-review,bot-review,diffhub,babysit-pr,craft-dashboard
 EOF
 
 old_craft_root="$CRAFT_ROOT"
 CRAFT_ROOT="$REPO_ROOT"
-assert_true "orchestrator-skills syncs through generic assets" plugin_sync_project_assets "$real_project"
-assert_true "orchestrator work-task command linked" test -L "$real_project/.claude/commands/work-task.md"
-assert_eq "orchestrator work-task target" "$REPO_ROOT/plugins/orchestrator-skills/project/.claude/commands/work-task.md" "$(readlink "$real_project/.claude/commands/work-task.md")"
-assert_true "orchestrator architect command linked" test -L "$real_project/.claude/commands/init-architect.md"
-assert_true "orchestrator discoverer command linked" test -L "$real_project/.claude/commands/init-discoverer.md"
-assert_true "orchestrator claude skill linked" test -L "$real_project/.claude/skills/review-pr"
-assert_true "orchestrator codex skill linked" test -L "$real_project/.codex/skills/review-pr"
-assert_existing_file_not_contains_regex "orchestrator hooks file exists and does not hardcode skill symlinks" "$REPO_ROOT/plugins/orchestrator-skills/hooks.sh" 'ln -s .*skills|cp -R .*skills|skill_list='
+assert_true "split plugins sync through generic assets" plugin_sync_project_assets "$real_project"
+assert_false "planning does not override architect command" test -e "$real_project/.claude/commands/init-architect.md"
+assert_true "planning discoverer command linked" test -L "$real_project/.claude/commands/init-discoverer.md"
+assert_true "bot-review claude skill linked" test -L "$real_project/.claude/skills/review-pr"
+assert_eq "bot-review claude skill target" "$REPO_ROOT/plugins/bot-review/skills/review-pr" "$(readlink "$real_project/.claude/skills/review-pr")"
+assert_true "babysit-pr codex skill linked" test -L "$real_project/.codex/skills/babysit-pr"
+assert_eq "babysit-pr codex skill target" "$REPO_ROOT/plugins/babysit-pr/skills/babysit-pr" "$(readlink "$real_project/.codex/skills/babysit-pr")"
+retired_monolith="orchestrator""-skills"
+assert_false "retired monolith plugin removed" test -d "$REPO_ROOT/plugins/$retired_monolith"
 orchestrator_states="$(plugin_queue_states "$real_project" | sort | paste -sd, -)"
-expected_orchestrator_states="$(printf '%s\n' pending approved in-progress waiting done blocked archive diffhub-review | sort | paste -sd, -)"
-assert_eq "orchestrator declares diffhub-review" "$expected_orchestrator_states" "$orchestrator_states"
+expected_orchestrator_states="$(printf '%s\n' drafts pending approved in-progress waiting done blocked archive local-review diffhub-review | sort | paste -sd, -)"
+assert_eq "plugins declare their queue states" "$expected_orchestrator_states" "$orchestrator_states"
 CRAFT_ROOT="$old_craft_root"
+
+echo ""
+echo "plugin dependencies"
+cat > "$PROJECT_DIR/craft.conf" << 'EOF'
+PLUGINS=needs-example
+EOF
+missing_deps="$(plugin_missing_dependencies "$PROJECT_DIR" needs-example | paste -sd, -)"
+assert_eq "missing dependency reported" "example" "$missing_deps"
+assert_false "dependency validation fails" plugin_validate_dependencies "$PROJECT_DIR"
+cat > "$PROJECT_DIR/craft.conf" << 'EOF'
+PLUGINS=example,needs-example
+EOF
+assert_true "dependency validation passes" plugin_validate_dependencies "$PROJECT_DIR"
 
 echo ""
 echo "plugin_queue_states"
 states="$(plugin_queue_states "$PROJECT_DIR" | paste -sd, -)"
-assert_eq "core plus plugin states" "pending,approved,in-progress,waiting,done,blocked,archive,diffhub-review,custom-review" "$states"
+assert_eq "core plus plugin states" "drafts,pending,approved,in-progress,waiting,done,blocked,archive,extra-review,custom-review" "$states"
 
 echo ""
 echo "notify hook args"
 source "$REPO_ROOT/bin/lib/queue.sh"
 source "$REPO_ROOT/bin/lib/notify.sh"
-QUEUE_STATES=(pending approved in-progress waiting done blocked archive diffhub-review custom-review)
+QUEUE_STATES=(drafts pending approved in-progress waiting done blocked archive extra-review custom-review)
 export PROJECT_DIR QUEUE_DIR
 
 task_file="$QUEUE_DIR/waiting/task-123.md"

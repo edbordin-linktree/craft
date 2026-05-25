@@ -54,7 +54,11 @@ Usage:
   craft config <project> [key] [val] Read or set project config
   craft plugin <subcommand>          Manage plugins
   craft task state set ...           Move a task through queue/runtime state
+  craft task wait-team <task-id>     Mark a task as waiting on team
+  craft task unwait-team <task-id>   Clear waiting-on-team marker
+  craft task promote-draft <task-id> Promote a draft task to pending
   craft task stage <subcommand>      Get or mutate a task workflow stage
+  craft workflow render [task]       Render assembled workflow prompt
   craft event <subcommand>           Manage a task's pending event queue
   craft surface <subcommand>         Manage task web surfaces
   craft doctor                       Check dependencies
@@ -83,10 +87,75 @@ _require_reason() {
     }
 }
 
+_task_file_from_arg() {
+    local project_dir="$1" arg="${2:-}"
+    local queue_dir="$project_dir/queue" task_id candidate dir
+
+    if [[ -z "$arg" ]]; then
+        next_ready_task "$queue_dir"
+        return
+    fi
+
+    if [[ -f "$arg" ]]; then
+        (cd "$(dirname "$arg")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$arg")")
+        return
+    fi
+
+    candidate="$project_dir/$arg"
+    if [[ -f "$candidate" ]]; then
+        (cd "$(dirname "$candidate")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$candidate")")
+        return
+    fi
+
+    task_id="${arg%.md}"
+    if [[ "$task_id" == task-* ]]; then
+        runtime_task_file "$project_dir" "$task_id"
+        return
+    fi
+
+    for dir in "$queue_dir"/*; do
+        [[ -d "$dir" ]] || continue
+        candidate="$dir/$arg"
+        [[ -f "$candidate" ]] && { printf '%s\n' "$candidate"; return; }
+    done
+    return 1
+}
+
 cmd_task() {
     local group="${1:-}"
     shift || true
     case "$group" in
+        promote-draft)
+            local task_id="${1:?task id required}"
+            local project_dir
+            project_dir="$(_cmd_project_dir)"
+            promote_draft_task "$project_dir/queue" "$task_id" >/dev/null
+            ;;
+        wait-team)
+            local task_id="${1:?task id required}" reason="team"
+            shift || true
+            local project_dir task_file
+            project_dir="$(_cmd_project_dir)"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --reason) reason="${2:-team}"; shift 2 ;;
+                    *) echo "craft task wait-team: unknown arg: $1" >&2; exit 2 ;;
+                esac
+            done
+            task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; exit 1; }
+            runtime_set_task_field "$task_file" waiting_on team
+            runtime_set_task_field "$task_file" waiting_reason "$reason"
+            runtime_append_work_log "$task_file" "Waiting On Team" "$reason"
+            ;;
+        unwait-team)
+            local task_id="${1:?task id required}"
+            local project_dir task_file
+            project_dir="$(_cmd_project_dir)"
+            task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; exit 1; }
+            runtime_set_task_field "$task_file" waiting_on ""
+            runtime_set_task_field "$task_file" waiting_reason ""
+            runtime_append_work_log "$task_file" "Waiting On Team Cleared"
+            ;;
         state)
             local subcmd="${1:-}"
             shift || true
@@ -117,20 +186,21 @@ cmd_task() {
             esac
             ;;
         signal)
-            local task_id="${1:?task id required}" type="${2:?event type required}" reason=""
+            local task_id="${1:?task id required}" type="${2:?event type required}" reason="" publisher="operator"
             shift 2 || true
             local project_dir payload
             project_dir="$(_cmd_project_dir)"
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --reason) reason="${2:-}"; shift 2 ;;
+                    --publisher) publisher="${2:-}"; shift 2 ;;
                     *) echo "craft task signal: unknown arg: $1" >&2; exit 2 ;;
                 esac
             done
             _require_reason "$reason"
             payload="$(mktemp)"
             jq -n --arg type "$type" --arg reason "$reason" '{type:$type, reason:$reason}' > "$payload"
-            runtime_event_enqueue "$project_dir" "$task_id" "$type" "$reason" "$payload" >/dev/null
+            runtime_event_enqueue "$project_dir" "$task_id" "$type" "$reason" "$payload" "$publisher" >/dev/null
             rm -f "$payload"
             ;;
         stage)
@@ -199,7 +269,7 @@ cmd_task() {
             esac
             ;;
         *)
-            echo "Usage: craft task stage <subcommand>" >&2
+            echo "Usage: craft task promote-draft <task-id> | wait-team <task-id> | unwait-team <task-id> | state <subcommand> | stage <subcommand>" >&2
             exit 2
             ;;
     esac
@@ -212,21 +282,22 @@ cmd_event() {
     project_dir="$(_cmd_project_dir)"
     case "$subcmd" in
         enqueue)
-            local task_id="${1:?task id required}" type="" summary="" payload=""
+            local task_id="${1:?task id required}" type="" summary="" payload="" publisher="cli"
             shift || true
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --type) type="${2:-}"; shift 2 ;;
                     --summary) summary="${2:-}"; shift 2 ;;
                     --json) payload="${2:-}"; shift 2 ;;
+                    --publisher) publisher="${2:-}"; shift 2 ;;
                     *) echo "craft event enqueue: unknown arg: $1" >&2; exit 2 ;;
                 esac
             done
             [[ -n "$type" && -n "$summary" && -n "$payload" ]] || {
-                echo "Usage: craft event enqueue <task-id> --type <type> --summary <text> --json <payload-file>" >&2
+                echo "Usage: craft event enqueue <task-id> --type <type> --summary <text> --json <payload-file> [--publisher <name>]" >&2
                 exit 2
             }
-            runtime_event_enqueue "$project_dir" "$task_id" "$type" "$summary" "$payload"
+            runtime_event_enqueue "$project_dir" "$task_id" "$type" "$summary" "$payload" "$publisher"
             ;;
         counts)
             runtime_event_counts "$project_dir" "${1:?task id required}"
@@ -245,6 +316,28 @@ cmd_event() {
             ;;
         *)
             echo "Usage: craft event enqueue|counts|take ..." >&2
+            exit 2
+            ;;
+    esac
+}
+
+cmd_workflow() {
+    local subcmd="${1:-}"
+    shift || true
+    local project_dir
+    project_dir="$(_cmd_project_dir)"
+    case "$subcmd" in
+        render)
+            local task_arg="${1:-}" task_file filename
+            task_file="$(_task_file_from_arg "$project_dir" "$task_arg")" || {
+                echo "task_not_found: ${task_arg:-next ready task}" >&2
+                exit 1
+            }
+            filename="$(basename "$task_file")"
+            workflow_render_prompt "$project_dir" "$task_file" "$filename"
+            ;;
+        *)
+            echo "Usage: craft workflow render [task-id|task-file]" >&2
             exit 2
             ;;
     esac
@@ -354,6 +447,25 @@ _plugins_enable() {
     fi
 }
 
+_plugins_enable_with_deps() {
+    local conf="$1" plugin="$2" seen="${3:-,}"
+    local dep
+    if [[ "$seen" == *",$plugin,"* ]]; then
+        echo "Plugin dependency cycle involving '$plugin'" >&2
+        return 1
+    fi
+    [[ -d "$CRAFT_ROOT/plugins/$plugin" ]] || {
+        echo "Plugin not found: $CRAFT_ROOT/plugins/$plugin" >&2
+        return 1
+    }
+    seen="${seen}${plugin},"
+    while IFS= read -r dep; do
+        [[ -n "$dep" ]] || continue
+        _plugins_enable_with_deps "$conf" "$dep" "$seen" || return 1
+    done < <(plugin_dependencies "$plugin")
+    _plugins_enable "$conf" "$plugin"
+}
+
 cmd_plugin() {
     local subcmd="${1:-}"
     shift || true
@@ -374,13 +486,21 @@ Plugins are a shared library at $CRAFT_ROOT/plugins/. Enabling a plugin for a
 project adds its name to PLUGINS= in that project's craft.conf and fires the
 plugin's on_install hook. Plugins hook into task lifecycle events
 (on_started, on_waiting, on_done, on_blocked, on_milestone, on_poll, on_install)
-and run in subshells so failures don't break the orchestrator.
+and run in subshells so failures don't break the orchestrator. Plugins without
+hooks.sh are valid asset/config-only plugins.
 
-Note: plugin.conf is shared across all projects that enable the plugin.
+Note: plugin.conf is optional. When present, it is shared across all projects
+that enable the plugin.
 There are no per-project plugin forks.
 
 Available plugins:
-  orchestrator-skills  Multi-agent supervisor (Devin / Codex / Claude delegation)
+  planning             Architect/discoverer commands and planning skills
+  local-review         Pre-PR local review stage and event contracts
+  bot-review           Automated local branch review
+  diffhub              Diffhub local review UI and comment ingestion
+  babysit-pr            GitHub PR watcher and review events
+  buildkite-status     Buildkite status surface
+  craft-dashboard      Web dashboard and cmux task badges
   slack-dm-notify      DMs you on Slack when a draft PR is ready
   slack-daily-thread   Posts PR events to a daily Slack channel thread
   linear-sync          Two-way sync with Linear issues
@@ -429,7 +549,7 @@ HELP
             # the plugin = adding its name to PLUGINS= in this project's
             # craft.conf, firing on_install, then syncing any plugin-owned
             # project assets.
-            _plugins_enable "$project_dir/craft.conf" "$plugin_name"
+            _plugins_enable_with_deps "$project_dir/craft.conf" "$plugin_name"
             # Fire the plugin's on_install hook if defined.
             if [[ -f "$plugin_dir/hooks.sh" ]]; then
                 (
@@ -442,7 +562,7 @@ HELP
                     fi
                 )
             fi
-            if ! plugin_sync_project_assets "$project_dir" "$plugin_name"; then
+            if ! plugin_sync_project_assets "$project_dir"; then
                 echo "Enabled $plugin_name in $project_name/craft.conf, but project asset sync failed." >&2
                 echo "Resolve the conflict above and run: craft plugin check $project_name" >&2
                 exit 1
@@ -466,11 +586,13 @@ HELP
                 echo "       (plugin config is shared across all projects)"
                 exit 1
             fi
-            local conf="$CRAFT_ROOT/plugins/$plugin_name/plugin.conf"
-            if [[ ! -f "$conf" ]]; then
-                echo "Plugin config not found: $conf"
+            local plugin_dir="$CRAFT_ROOT/plugins/$plugin_name"
+            if [[ ! -d "$plugin_dir" ]]; then
+                echo "Plugin not found: $plugin_dir"
                 exit 1
             fi
+            local conf="$plugin_dir/plugin.conf"
+            [[ -f "$conf" ]] || : > "$conf"
             if grep -q "^${key}=" "$conf" || grep -q "^# ${key}=" "$conf"; then
                 _sed_i "s|^#? *${key}=.*|${key}=\"${value}\"|" "$conf"
             else
@@ -486,9 +608,13 @@ HELP
                 exit 1
             fi
             local conf="$CRAFT_ROOT/plugins/$plugin_name/plugin.conf"
-            if [[ ! -f "$conf" ]]; then
-                echo "Plugin not found: $conf"
+            if [[ ! -d "$CRAFT_ROOT/plugins/$plugin_name" ]]; then
+                echo "Plugin not found: $CRAFT_ROOT/plugins/$plugin_name"
                 exit 1
+            fi
+            if [[ ! -f "$conf" ]]; then
+                echo "Config for $plugin_name: no plugin.conf"
+                exit 0
             fi
             echo "Config for $plugin_name ($conf):"
             grep -v '^#' "$conf" | grep -v '^[[:space:]]*$'
@@ -518,15 +644,27 @@ HELP
             IFS=',' read -ra plugin_list <<< "$plugins"
             for plugin in "${plugin_list[@]}"; do
                 plugin="$(echo "$plugin" | xargs)"
+                local plugin_dir="$CRAFT_ROOT/plugins/$plugin"
                 local hooks_file="$CRAFT_ROOT/plugins/$plugin/hooks.sh"
+                local missing_deps
+                if [[ ! -d "$plugin_dir" ]]; then
+                    echo "✗ $plugin — plugin directory not found"
+                    all_ok=false
+                    continue
+                fi
+                missing_deps="$(plugin_missing_dependencies "$project_dir" "$plugin" | paste -sd, -)"
+                if [[ -n "$missing_deps" ]]; then
+                    echo "✗ $plugin — missing DEPENDS_ON plugin(s): $missing_deps"
+                    all_ok=false
+                    continue
+                fi
                 if ! plugin_sync_project_assets "$project_dir" "$plugin"; then
                     echo "✗ $plugin — project asset sync failed"
                     all_ok=false
                     continue
                 fi
                 if [[ ! -f "$hooks_file" ]]; then
-                    echo "✗ $plugin — hooks.sh not found at $hooks_file (was it removed or renamed?)"
-                    all_ok=false
+                    echo "✓ $plugin (no hooks)"
                     continue
                 fi
                 # Source and run check_deps in a subshell
@@ -961,6 +1099,9 @@ HELP
         ;;
     task)
         cmd_task "$@"
+        ;;
+    workflow)
+        cmd_workflow "$@"
         ;;
     event)
         cmd_event "$@"

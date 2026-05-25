@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#
+# cleanup-pr-stage — Stop the watch-pr background process. Used by babysit-pr
+# completion paths (merged, closed, failure).
+#
+# Safe to call multiple times.
+#
+# Usage:
+#   cleanup-pr-stage [--repo <dir>]
+
+set -uo pipefail
+
+REPO="$(pwd)"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo)    REPO="$2"; shift 2 ;;
+        -h|--help) sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) echo "cleanup-pr-stage: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+cd "$REPO" || { echo "cleanup-pr-stage: repo not accessible: $REPO" >&2; exit 1; }
+REPO="$(pwd -P)"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+# shellcheck source=bin/lib/task-runtime.sh
+source "${CRAFT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}/bin/lib/task-runtime.sh"
+CRAFT_HOME="$(orchestrator_craft_root)"
+TASK_ID="$(orchestrator_task_id_from_worktree "$REPO")"
+
+"$CRAFT_HOME/bin/run-bg" stop watch-pr >/dev/null 2>&1 || true
+
+orchestrator_surface_close "$REPO" "$TASK_ID" github-pr >/dev/null 2>&1 || true

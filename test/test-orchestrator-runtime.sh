@@ -37,12 +37,12 @@ trap 'rm -rf "$TMPDIR"' EXIT
 PROJECT_DIR="$TMPDIR/project"
 QUEUE_DIR="$PROJECT_DIR/queue"
 WORKTREE="$PROJECT_DIR/tasks/task-123/craft"
-mkdir -p "$QUEUE_DIR"/{pending,approved,in-progress,waiting,done,blocked,archive,diffhub-review}
+mkdir -p "$QUEUE_DIR"/{drafts,pending,approved,in-progress,local-review,waiting,done,blocked,archive}
 mkdir -p "$WORKTREE/.orchestrator"
 
 cat > "$PROJECT_DIR/craft.conf" <<'EOF'
 MULTIPLEXER=cmux
-PLUGINS=orchestrator-skills
+PLUGINS=local-review,diffhub,babysit-pr
 EOF
 
 cat > "$QUEUE_DIR/in-progress/task-123.md" <<'EOF'
@@ -52,6 +52,7 @@ type: pr
 status: in-progress
 repos: [craft]
 branch: refactor/runtime
+pr: https://github.com/example/repo/pull/7
 ---
 
 ## Summary
@@ -115,7 +116,7 @@ runtime_write_task_session "$PROJECT_DIR" task-123 craft-project-task-123 "craft
 echo "orchestrator surface scripts"
 (
     cd "$WORKTREE" || exit 1
-    "$REPO_ROOT/plugins/orchestrator-skills/scripts/open-pr-surface" \
+    "$REPO_ROOT/plugins/babysit-pr/scripts/open-pr-surface" \
         "https://github.com/example/repo/pull/7" --repo "$WORKTREE" >/dev/null
 )
 assert_eq "github-pr surface registered" "https://github.com/example/repo/pull/7" \
@@ -126,11 +127,30 @@ assert_eq "surface opened in fake cmux" "https://github.com/example/repo/pull/7"
     "$(jq -r '.windows[0].workspaces[0].panes[].surfaces[] | select(.type == "browser").url' "$FAKE_CMUX_STATE" | head -1)"
 
 echo ""
+echo "buildkite-status stage cleanup"
+tmp_state="$TMPDIR/cmux-bk.json"
+jq '.windows[0].workspaces[0].panes[0].surfaces +=
+    [{ref:"surface:77", type:"browser", title:"bk:repo#7", url:"http://127.0.0.1:27435/pr/example/repo/7"}]' \
+    "$FAKE_CMUX_STATE" > "$tmp_state" && mv "$tmp_state" "$FAKE_CMUX_STATE"
+(
+    export CRAFT_ROOT="$REPO_ROOT" PROJECT_DIR="$PROJECT_DIR"
+    source "$REPO_ROOT/plugins/buildkite-status/hooks.sh"
+    on_stage_end \
+        --stage pr_review \
+        --task-id task-123 \
+        --task-file "$QUEUE_DIR/in-progress/task-123.md" \
+        --task-dir "$PROJECT_DIR/tasks/task-123" \
+        --reason "stage advanced"
+)
+assert_eq "bk-status surface closed on pr_review end" "0" \
+    "$(jq '[.windows[].workspaces[].panes[].surfaces[] | select(.title == "bk:repo#7")] | length' "$FAKE_CMUX_STATE")"
+
+echo ""
 echo "babysit-diffhub event queue"
 printf 'http://127.0.0.1:2047\n' > "$WORKTREE/.orchestrator/diffhub.url"
 (
     cd "$WORKTREE" || exit 1
-    "$REPO_ROOT/plugins/orchestrator-skills/scripts/babysit-diffhub" \
+    "$REPO_ROOT/plugins/diffhub/scripts/babysit-diffhub" \
         --worktree "$WORKTREE" --poll-interval 1 --idle-timeout 1 >/dev/null 2>&1
 )
 assert_eq "review timeout enqueued" "pending=1 counts=review_timeout:1" \
@@ -139,22 +159,81 @@ taken="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event take task-123 --type 
 assert_eq "review timeout payload retained" "review_timeout" "$(jq -r '.[0].type' <<< "$taken")"
 
 echo ""
+echo "bot-review event queue"
+BOT_WORKTREE="$PROJECT_DIR/tasks/task-456/craft"
+mkdir -p "$BOT_WORKTREE/.orchestrator"
+cat > "$QUEUE_DIR/in-progress/task-456.md" <<'EOF'
+---
+id: task-456
+type: pr
+status: in-progress
+depends_on: []
+repos: [craft]
+branch: bot-review/events
+---
+
+## Summary
+Bot review fixture.
+EOF
+(
+    cd "$BOT_WORKTREE" || exit 1
+    git init -q
+    git config user.email test@example.com
+    git config user.name Test
+    printf 'base\n' > file.txt
+    git add file.txt
+    git commit -qm base
+    printf 'changed\n' > file.txt
+    git add file.txt
+    git commit -qm changed
+)
+cat > "$TMPDIR/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat <<'JSON'
+{
+  "summary": "One finding.",
+  "findings": [
+    {
+      "file": "file.txt",
+      "line": 1,
+      "severity": "major",
+      "category": "bug",
+      "message": "The changed line is wrong."
+    }
+  ]
+}
+JSON
+EOF
+chmod +x "$TMPDIR/bin/claude"
+(
+    cd "$BOT_WORKTREE" || exit 1
+    CRAFT_ROOT="$REPO_ROOT" "$REPO_ROOT/plugins/bot-review/scripts/review-pr" --worktree "$BOT_WORKTREE" --base HEAD~1 >/dev/null
+)
+bot_review_event="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event take task-456 --type local_review.comment --limit 1)"
+assert_eq "bot-review enqueues local review comment" "local_review.comment" "$(jq -r '.[0].type' <<< "$bot_review_event")"
+assert_eq "bot-review event publisher" "bot-review" "$(jq -r '.[0].publisher' <<< "$bot_review_event")"
+assert_eq "bot-review event author" "automated-review:claude-sonnet" "$(jq -r '.[0].payload.author' <<< "$bot_review_event")"
+assert_eq "bot-review event body" "The changed line is wrong." "$(jq -r '.[0].payload.body' <<< "$bot_review_event")"
+
+echo ""
 echo "watch-pr event queue"
 (
     cd "$WORKTREE" || exit 1
-    "$REPO_ROOT/plugins/orchestrator-skills/scripts/watch-pr" \
+    "$REPO_ROOT/plugins/babysit-pr/scripts/watch-pr" \
         --pr 7 --worktree "$WORKTREE" --poll-interval 1 >/dev/null 2>&1
 )
-assert_eq "terminal PR event enqueued" "pending=2 counts=pr_approval:1,pr_terminal:1" \
+assert_eq "terminal PR event enqueued" "pending=2 counts=pr_approval:1,pr_review:1" \
     "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event counts task-123)"
-terminal="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event take task-123 --type pr_terminal --limit 1)"
-assert_eq "terminal event type" "pr_terminal" "$(jq -r '.[0].type' <<< "$terminal")"
+terminal="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event take task-123 --type pr_review --limit 1)"
+assert_eq "terminal event type" "pr_review" "$(jq -r '.[0].type' <<< "$terminal")"
 assert_eq "terminal event keeps snapshot" "MERGED" "$(jq -r '.[0].payload.snapshot.state' <<< "$terminal")"
 
 echo ""
 echo "normal workflow docs"
-assert_true "normal work-task docs do not reference await scripts" bash -c "! grep -Eq 'await-diffhub-review|await-pr-event' '$REPO_ROOT/plugins/orchestrator-skills/commands/work-task.md'"
-assert_true "await scripts removed from normal scripts" bash -c "! test -e '$REPO_ROOT/plugins/orchestrator-skills/scripts/await-diffhub-review' && ! test -e '$REPO_ROOT/plugins/orchestrator-skills/scripts/await-pr-event'"
+assert_true "normal work-task docs do not reference await scripts" bash -c "! grep -Eq 'await-diffhub-review|await-pr-event' '$REPO_ROOT/templates/.claude/commands/work-task.md'"
+assert_true "normal work-task docs render resolved workflow" grep -q 'craft workflow render' "$REPO_ROOT/templates/.claude/commands/work-task.md"
+assert_true "normal work-task docs do not hard-code local review" bash -c "! grep -Eq 'Step 8|diffhub|ready_for_pr' '$REPO_ROOT/templates/.claude/commands/work-task.md'"
+assert_true "await scripts removed from normal scripts" bash -c "! test -e '$REPO_ROOT/plugins/diffhub/scripts/await-diffhub-review' && ! test -e '$REPO_ROOT/plugins/babysit-pr/scripts/await-pr-event'"
 
 echo ""
 echo "────────────────────────────"
