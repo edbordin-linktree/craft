@@ -15,11 +15,6 @@ fi
 CMUX_PREFIX="craft"
 CMUX_CRAFT_SCHEMA_VERSION="1"
 
-if ! declare -f runtime_surface_put >/dev/null 2>&1; then
-    # shellcheck source=bin/lib/runtime.sh
-    source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/bin/lib/runtime.sh"
-fi
-
 _cmux_craft_root() {
     if [[ -n "${CRAFT_ROOT:-}" ]]; then
         echo "$CRAFT_ROOT"
@@ -237,59 +232,120 @@ _cmux_surface_exists() {
     [[ -n "$surface_id" ]] || return 1
     _cmux_tree_json "$ws_ref" \
         | jq -e --arg ref "$surface_id" '
+            ($ref | ascii_downcase) as $want
+            |
             .windows[].workspaces[].panes[].surfaces[]
-            | select((.ref // .id // .surface_id // .surfaceId) == $ref)
+            | ((.ref // .id // .surface_id // .surfaceId // "") | ascii_downcase) as $actual
+            | select($actual == $want)
         ' >/dev/null 2>&1
 }
 
-_cmux_surface_from_metadata() {
-    local ws_ref="$1" semantic="$2" key value surface_id
+_cmux_surface_metadata_set() {
+    local ws_ref="$1" surface_id="$2" key="$3" value="$4"
+    [[ -n "$value" ]] || return 0
+    cmux surface metadata set --workspace "$ws_ref" --surface "$surface_id" "$key" "$value" >/dev/null 2>&1
+}
+
+_cmux_surface_metadata_clear() {
+    local ws_ref="$1" surface_id="$2" key="$3"
+    cmux surface metadata clear --workspace "$ws_ref" --surface "$surface_id" "$key" >/dev/null 2>&1 || true
+}
+
+_cmux_surface_lookup_by_metadata() {
+    local ws_ref="$1"
+    shift
+    local args=(surface lookup --workspace "$ws_ref" --json) pair
+    for pair in "$@"; do
+        [[ -n "$pair" ]] || continue
+        args+=(--metadata "$pair")
+    done
+    cmux "${args[@]}" 2>/dev/null
+}
+
+_cmux_surface_normalize_lookup_json() {
+    local semantic="${1:-}"
+    jq -c --arg semantic "$semantic" '
+        [
+          .matches[]?,
+          .surfaces[]?,
+          .surface?,
+          .match?,
+          .
+        ]
+        | map(select(type == "object"))
+        | .[0] as $s
+        | select($s != null)
+        | ($s.metadata // {}) as $m
+        | ($s.surface_ref // $s.surfaceRef // $s.ref // $s.surface_id // $s.surfaceId // $s.id // empty) as $ref
+        | select($ref != "")
+        | {
+            surface_id: $ref,
+            surface_ref: $ref,
+            id: ($s.id // $s.surface_id // $s.surfaceId // $ref),
+            type: ($s.type // $m["craft:type"] // $m["craft:kind"] // ""),
+            purpose: ($m["craft:purpose"] // $semantic),
+            title: ($s.title // $m["craft:title"] // ""),
+            url: ($s.url // $m["craft:url"] // ""),
+            agent: ($m["craft:agent"] // ""),
+            placement: ($m["craft:placement"] // ""),
+            owner: ($m["craft:owner"] // ""),
+            stage: ($m["craft:stage"] // ""),
+            url_match: ($m["craft:url_match"] // "")
+          }
+    ' 2>/dev/null
+}
+
+_cmux_surface_from_surface_metadata() {
+    local ws_ref="$1" semantic="$2" raw surface_id
+    raw="$(_cmux_surface_lookup_by_metadata "$ws_ref" "craft:semantic=${semantic}")" || return 1
+    [[ -n "$raw" ]] || return 1
+    raw="$(printf '%s' "$raw" | _cmux_surface_normalize_lookup_json "$semantic")" || return 1
+    [[ -n "$raw" ]] || return 1
+    surface_id="$(jq -r '.surface_id // empty' <<< "$raw" 2>/dev/null)"
+    [[ -n "$surface_id" ]] || return 1
+    _cmux_surface_exists "$ws_ref" "$surface_id" || return 1
+    echo "$raw"
+}
+
+_cmux_legacy_surface_from_workspace_metadata() {
+    local ws_ref="$1" semantic="$2" key value surface_id type purpose title url agent placement
     key="$(_cmux_surface_key "$semantic")"
     value="$(_cmux_metadata_get "$ws_ref" "$key" 2>/dev/null || true)"
     [[ -n "$value" ]] || return 1
     surface_id="$(jq -r '.surface_id // .surface_ref // .ref // empty' <<< "$value" 2>/dev/null)"
     [[ -n "$surface_id" ]] || return 1
     _cmux_surface_exists "$ws_ref" "$surface_id" || return 1
-    echo "$value"
+    type="$(jq -r '.type // .kind // empty' <<< "$value" 2>/dev/null)"
+    purpose="$(jq -r '.purpose // empty' <<< "$value" 2>/dev/null)"
+    title="$(jq -r '.title // empty' <<< "$value" 2>/dev/null)"
+    url="$(jq -r '.url // empty' <<< "$value" 2>/dev/null)"
+    agent="$(jq -r '.agent // empty' <<< "$value" 2>/dev/null)"
+    placement="$(jq -r '.placement // empty' <<< "$value" 2>/dev/null)"
+    _cmux_record_surface "$ws_ref" "$semantic" "$surface_id" "$type" "${purpose:-$semantic}" "$title" "$url" "$agent" "$placement" || true
+    _cmux_metadata_clear "$ws_ref" "$key"
+    _cmux_surface_from_surface_metadata "$ws_ref" "$semantic"
 }
 
-_cmux_surface_by_title_type() {
-    local ws_ref="$1" title="$2" type="$3"
-    _cmux_tree_json "$ws_ref" \
-        | jq -r --arg title "$title" --arg type "$type" '
-            [
-              .windows[].workspaces[].panes[].surfaces[]
-              | select((.title // "") == $title and (.type // "") == $type)
-              | .ref // .id // .surface_id // .surfaceId // empty
-            ]
-            | if length == 1 then .[0] else empty end
-          ' 2>/dev/null
+_cmux_surface_from_metadata() {
+    local ws_ref="$1" semantic="$2"
+    _cmux_surface_from_surface_metadata "$ws_ref" "$semantic" \
+        || _cmux_legacy_surface_from_workspace_metadata "$ws_ref" "$semantic"
 }
 
 _cmux_record_surface() {
     local ws_ref="$1" semantic="$2" surface_id="$3" type="$4" purpose="$5" title="${6:-}" url="${7:-}" agent="${8:-}" placement="${9:-}"
-    local json
     [[ -n "$placement" ]] || placement="$(_cmux_default_placement "$semantic")"
-    json="$(jq -n \
-        --arg surface_id "$surface_id" \
-        --arg type "$type" \
-        --arg purpose "$purpose" \
-        --arg title "$title" \
-        --arg url "$url" \
-        --arg agent "$agent" \
-        --arg placement "$placement" \
-        --arg updated_at "$(_cmux_now_utc)" \
-        '{
-          surface_id: $surface_id,
-          type: $type,
-          purpose: $purpose,
-          updated_at: $updated_at
-        }
-        | if $title != "" then .title = $title else . end
-        | if $url != "" then .url = $url else . end
-        | if $agent != "" then .agent = $agent else . end
-        | if $placement != "" then .placement = $placement else . end')"
-    _cmux_metadata_set_json "$ws_ref" "$(_cmux_surface_key "$semantic")" "$json"
+    [[ -n "$surface_id" ]] || return 1
+    _cmux_surface_metadata_set "$ws_ref" "$surface_id" "craft:schema-version" "$CMUX_CRAFT_SCHEMA_VERSION" || return 1
+    _cmux_surface_metadata_set "$ws_ref" "$surface_id" "craft:semantic" "$semantic" || return 1
+    _cmux_surface_metadata_set "$ws_ref" "$surface_id" "craft:type" "$type" || return 1
+    _cmux_surface_metadata_set "$ws_ref" "$surface_id" "craft:purpose" "$purpose" || return 1
+    _cmux_surface_metadata_set "$ws_ref" "$surface_id" "craft:title" "$title" || true
+    _cmux_surface_metadata_set "$ws_ref" "$surface_id" "craft:url" "$url" || true
+    _cmux_surface_metadata_set "$ws_ref" "$surface_id" "craft:agent" "$agent" || true
+    _cmux_surface_metadata_set "$ws_ref" "$surface_id" "craft:placement" "$placement" || true
+    _cmux_surface_metadata_set "$ws_ref" "$surface_id" "craft:updated_at" "$(_cmux_now_utc)" || true
+    _cmux_metadata_clear "$ws_ref" "$(_cmux_surface_key "$semantic")"
 }
 
 _cmux_surface_id_from_output() {
@@ -545,14 +601,6 @@ _cmux_ensure_surface() {
         echo "$sid"
         return 0
     fi
-    if [[ "$semantic" == "architect" ]]; then
-        sid="$(_cmux_surface_by_title_type "$ws_ref" "$title" "$type" 2>/dev/null || true)"
-        if [[ -n "$sid" ]]; then
-            _cmux_record_surface "$ws_ref" "$semantic" "$sid" "$type" "$purpose" "$title" "$url" "$agent" "$placement" || true
-            echo "$sid"
-            return 0
-        fi
-    fi
 
     sid="$(_cmux_create_surface "$ws_ref" "$type" "$title" "$url" "$command" "$direction" "$placement")" || return 1
     _cmux_record_surface "$ws_ref" "$semantic" "$sid" "$type" "$purpose" "$title" "$url" "$agent" "$placement" || true
@@ -725,9 +773,7 @@ _cmux_left_dashboard_pane() {
 
 _cmux_ensure_dashboard_surface() {
     local ws_ref="$1" project_dir="$2" url="$3"
-    local state_dir="$project_dir/.state/dashboard"
-    local surface_file="$state_dir/surface"
-    local sid existing
+    local sid="" existing
 
     existing="$(_cmux_surface_from_metadata "$ws_ref" "dashboard" 2>/dev/null || true)"
     if [[ -n "$existing" ]]; then
@@ -751,8 +797,6 @@ _cmux_ensure_dashboard_surface() {
         }
     fi
     _cmux_prune_dashboard_surfaces "$ws_ref" "$url" "$sid"
-    mkdir -p "$state_dir"
-    echo "$sid" > "$surface_file"
 
     if [[ "${CMUX_FOCUS_DASHBOARD:-}" == "1" ]]; then
         _cmux_focus_surface_ui "$ws_ref" "$sid" >/dev/null 2>&1 || true
@@ -1226,33 +1270,6 @@ mux_kill_named_pane() {
     _cmux_close_surface "$ws_ref" "$(_cmux_semantic_for_pane "$session" "$name")"
 }
 
-_cmux_surface_alive_in_workspace() {
-    local ws_ref="$1" surface_ref="$2"
-    [[ -n "$surface_ref" ]] || return 1
-    cmux tree --workspace "$ws_ref" --json 2>/dev/null \
-        | jq -e --arg ref "$surface_ref" '
-            .windows[].workspaces[].panes[].surfaces[]
-            | select(.ref == $ref)
-          ' >/dev/null 2>&1
-}
-
-_cmux_browser_surface_by_url() {
-    local ws_ref="$1" url="$2" match="${3:-exact}"
-    cmux tree --workspace "$ws_ref" --json 2>/dev/null \
-        | jq -r --arg url "$url" --arg match "$match" '
-            .windows[].workspaces[].panes[].surfaces[]
-            | select(.type == "browser")
-            | select(
-                if $match == "prefix"
-                then ((.url // "") | startswith($url))
-                else (.url // "") == $url
-                end
-              )
-            | .ref
-          ' 2>/dev/null \
-        | head -1
-}
-
 _cmux_pane_with_browser() {
     local ws_ref="$1"
     cmux tree --workspace "$ws_ref" --json 2>/dev/null \
@@ -1369,7 +1386,7 @@ mux_surface_open() {
     [[ "$kind" == "browser" ]] || { echo "surface_unsupported_kind: $kind" >&2; return 2; }
     [[ -n "$url" ]] || { echo "surface open: --url is required" >&2; return 2; }
 
-    local ws_ref sid surface_json
+    local ws_ref sid
     ws_ref="$(_cmux_task_workspace_ref_for_project_dir "$project_dir" "$task_id" 2>/dev/null || true)"
     [[ -n "$ws_ref" ]] || { echo "workspace_not_found: $(_cmux_task_workspace_label "$project_dir" "$task_id")" >&2; return 1; }
 
@@ -1377,83 +1394,28 @@ mux_surface_open() {
         --title "$label" \
         --url "$url" \
         ${placement:+--placement "$placement"})" || return 1
-    cmux focus-surface "$sid" >/dev/null 2>&1 || true
-
-    surface_json="$(jq -n \
-        --arg surface_id "$surface_id" \
-        --arg kind "$kind" \
-        --arg label "$label" \
-        --arg owner "$owner" \
-        --arg stage "$stage" \
-        --arg url "$url" \
-        --arg url_match "$url_match" \
-        --arg placement "$placement" \
-        --arg cached_surface_ref "$sid" \
-        '{surface_id:$surface_id, kind:$kind, label:$label, owner:$owner, stage:$stage,
-          url:$url, url_match:$url_match, cached_surface_ref:$cached_surface_ref, status:"open"}
-          | if $placement != "" then .placement = $placement else . end')"
-    runtime_surface_put "$project_dir" "$task_id" "$surface_json"
+    _cmux_surface_metadata_set "$ws_ref" "$sid" "craft:owner" "$owner" || true
+    _cmux_surface_metadata_set "$ws_ref" "$sid" "craft:stage" "$stage" || true
+    _cmux_surface_metadata_set "$ws_ref" "$sid" "craft:url_match" "$url_match" || true
+    _cmux_focus_surface_ui "$ws_ref" "$sid" >/dev/null 2>&1 || true
     echo "$sid"
 }
 
 mux_surface_focus() {
     local project_dir="$1" task_id="$2" surface_id="$3"
     local attach_first="${4:-false}"
-    local ws_ref surface kind url url_match cached found recorded
+    local ws_ref recorded cached
     ws_ref="$(_cmux_task_workspace_ref_for_project_dir "$project_dir" "$task_id" 2>/dev/null || true)"
     [[ -n "$ws_ref" ]] || { echo "workspace_not_found: $(_cmux_task_workspace_label "$project_dir" "$task_id")" >&2; return 1; }
     if [[ "$attach_first" == "true" ]]; then
         ws_ref="$(_cmux_attach_workspace_ui "$ws_ref")" || return 1
     fi
-    surface="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id" 2>/dev/null || true)"
-
-    if [[ -z "$surface" ]]; then
-        recorded="$(_cmux_surface_from_metadata "$ws_ref" "$surface_id" 2>/dev/null || true)"
-        if [[ -n "$recorded" ]]; then
-            cached="$(jq -r '.surface_id // empty' <<< "$recorded")"
-            [[ -n "$cached" ]] || { echo "surface_not_found: $surface_id" >&2; return 4; }
-            _cmux_focus_surface_ui "$ws_ref" "$cached" || return 1
-            echo "$cached"
-            return 0
-        fi
-        echo "surface_not_found: $surface_id" >&2
-        return 4
-    fi
-    kind="$(jq -r '.kind // "browser"' <<< "$surface")"
-
     recorded="$(_cmux_surface_from_metadata "$ws_ref" "$surface_id" 2>/dev/null || true)"
     if [[ -n "$recorded" ]]; then
         cached="$(jq -r '.surface_id // empty' <<< "$recorded")"
         _cmux_focus_surface_ui "$ws_ref" "$cached" || return 1
-        runtime_surface_patch_ref "$project_dir" "$task_id" "$surface_id" "$cached" open 2>/dev/null || true
         echo "$cached"
         return 0
-    fi
-
-    cached="$(jq -r '.cached_surface_ref // empty' <<< "$surface")"
-    if [[ -n "$cached" ]] && _cmux_surface_alive_in_workspace "$ws_ref" "$cached"; then
-        _cmux_record_surface "$ws_ref" "$surface_id" "$cached" "$kind" "$surface_id" \
-            "$(jq -r '.label // .surface_id // empty' <<< "$surface")" \
-            "$(jq -r '.url // empty' <<< "$surface")" \
-            >/dev/null 2>&1 || true
-        _cmux_focus_surface_ui "$ws_ref" "$cached" || return 1
-        echo "$cached"
-        return 0
-    fi
-    if [[ "$kind" == "browser" ]]; then
-        url="$(jq -r '.url // empty' <<< "$surface")"
-        url_match="$(jq -r '.url_match // "exact"' <<< "$surface")"
-        found="$(_cmux_browser_surface_by_url "$ws_ref" "$url" "$url_match")"
-        if [[ -n "$found" ]]; then
-            runtime_surface_patch_ref "$project_dir" "$task_id" "$surface_id" "$found" open
-            _cmux_record_surface "$ws_ref" "$surface_id" "$found" "$kind" "$surface_id" \
-                "$(jq -r '.label // .surface_id // empty' <<< "$surface")" \
-                "$url" \
-                >/dev/null 2>&1 || true
-            _cmux_focus_surface_ui "$ws_ref" "$found" || return 1
-            echo "$found"
-            return 0
-        fi
     fi
     echo "surface_not_found: $surface_id" >&2
     return 4
@@ -1461,15 +1423,9 @@ mux_surface_focus() {
 
 mux_surface_close() {
     local project_dir="$1" task_id="$2" surface_id="$3"
-    local surface ws_ref cached
-    surface="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id" 2>/dev/null)" || return 0
+    local ws_ref
     ws_ref="$(_cmux_task_workspace_ref_for_project_dir "$project_dir" "$task_id" 2>/dev/null || true)"
-    cached="$(jq -r '.cached_surface_ref // empty' <<< "$surface")"
     if [[ -n "$ws_ref" ]]; then
         _cmux_close_surface "$ws_ref" "$surface_id"
-        if [[ -n "$cached" ]] && _cmux_surface_alive_in_workspace "$ws_ref" "$cached"; then
-            cmux close-surface --workspace "$ws_ref" --surface "$cached" >/dev/null 2>&1 || true
-        fi
     fi
-    runtime_surface_patch_ref "$project_dir" "$task_id" "$surface_id" "$cached" closed 2>/dev/null || true
 }

@@ -1,5 +1,4 @@
 import { spawnSync } from "child_process";
-import { readFileSync, existsSync, readdirSync } from "fs";
 import { join } from "path";
 
 export interface FocusResult {
@@ -130,8 +129,11 @@ function isUiUnavailable(error: string): boolean {
  * surface ref, and even when given the right pane it doesn't switch which
  * tab is selected inside that pane.
  */
-function focusSurface(surfaceRef: string): { ok: boolean; error?: string } {
-  const focused = cmux("focus-surface", surfaceRef);
+function focusSurface(surfaceRef: string, workspaceRef?: string): { ok: boolean; error?: string } {
+  const args = ["focus-surface"];
+  if (workspaceRef) args.push("--workspace", workspaceRef);
+  args.push("--surface", surfaceRef);
+  const focused = cmux(...args);
   if (!focused.ok) {
     return { ok: false, error: focused.stderr.trim() };
   }
@@ -159,13 +161,6 @@ export function focusTaskSurface(projectDir: string, taskId: string, attach = fa
     : { ok: false, error };
 }
 
-/**
- * Focus the diffhub browser surface for a task.
- *
- * `launch-diffhub` writes the cmux surface ref to
- * `tasks/<id>/<repo>/.orchestrator/diffhub.surface`. We don't know the repo
- * up front, so we scan the task dir for the first match.
- */
 /**
  * Hand a URL off to the system default browser via macOS `open`. The cmux
  * in-app browser sometimes can't complete corporate SSO redirects, so links
@@ -220,7 +215,7 @@ export function focusPrSurface(prUrl: string): FocusResult {
           if (s.type !== "browser") continue;
           const url = s.url ?? "";
           if (!url.startsWith(prefix)) continue;
-          const r = focusSurface(s.ref);
+          const r = focusSurface(s.ref, ws.ref);
           if (!r.ok) {
             return {
               ok: false,
@@ -241,47 +236,7 @@ export function focusDiffhubSurface(projectDir: string, taskId: string): FocusRe
   if (registered.ok) {
     return { ok: true, surfaceRef: registered.stdout.trim() || undefined };
   }
-
-  const taskDir = join(projectDir, "tasks", taskId);
-  if (!existsSync(taskDir)) {
-    return { ok: false, error: `no tasks/${taskId}/ directory` };
-  }
-  let sid: string | null = null;
-  let repoDir: string | null = null;
-  for (const sub of readdirSync(taskDir)) {
-    const candidate = join(taskDir, sub, ".orchestrator", "diffhub.surface");
-    if (existsSync(candidate)) {
-      try {
-        sid = readFileSync(candidate, "utf-8").trim();
-        repoDir = sub;
-        break;
-      } catch {
-        /* try next */
-      }
-    }
-  }
-  if (!sid) {
-    return { ok: false, error: `no diffhub.surface in tasks/${taskId}/*/.orchestrator/` };
-  }
-  const r = focusSurface(sid);
-  if (r.ok) return { ok: true, surfaceRef: sid };
-
-  // Differentiate transient socket failures (caller should retry) from
-  // genuine "surface not found" (likely stale .orchestrator/diffhub.surface
-  // after a diffhub relaunch).
-  const err = r.error ?? "";
-  const isSocket = /Failed to write to socket|broken pipe|Connection reset/i.test(err);
-  const isMissing = /not.?found|Pane not found|Surface not found|Invalid/i.test(err);
-  const hint = isSocket
-    ? "cmux IPC blip — try again in a moment"
-    : isMissing
-      ? `surface ${sid} no longer exists — diffhub may have been relaunched without updating ${repoDir}/.orchestrator/diffhub.surface`
-      : "";
-  return {
-    ok: false,
-    surfaceRef: sid,
-    error: hint ? `${err} (${hint}; registry lookup also failed: ${registered.stderr.trim()})` : err,
-  };
+  return { ok: false, error: registered.stderr.trim() || registered.stdout.trim() || "diffhub surface not found" };
 }
 
 export function focusRegisteredSurface(projectDir: string, taskId: string, surfaceId: string): FocusResult {

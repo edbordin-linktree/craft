@@ -114,7 +114,7 @@ craft event take task-123 --type pr_review --limit 5
 
 Each enqueue writes one JSON item under `.orchestrator/events/pending/`. When the queue transitions from empty to non-empty, Craft injects a short task-targeted message such as `CRAFT_EVENTS task=task-123 pending=3 counts=pr_review:2,ci_status:1 queue=.orchestrator/events/pending`. Event bodies stay on disk and are returned by `craft event take`, which deletes consumed pending files.
 
-Generic web surfaces are keyed by stable `surface_id` values and stored in `tasks/<task-id>/.orchestrator/surfaces.json`. `craft surface open` creates or reuses a browser surface in the task workspace; `craft surface focus` only focuses/adopts an existing browser match and returns `surface_not_found` for stale non-browser refs; `craft surface close` closes the cached surface when present.
+Generic web surfaces are keyed by stable semantic ids such as `github-pr`, `diffhub-review`, or `buildkite-status`. Under cmux, Craft stores that semantic id and related attributes on the cmux surface metadata, then resolves the current surface ref with the mux provider when focusing or closing. `craft surface open` creates or reuses a browser surface in the task workspace; `craft surface focus` returns `surface_not_found` when no surface metadata matches; `craft surface close` closes the matched surface when present.
 
 ## Queue States
 

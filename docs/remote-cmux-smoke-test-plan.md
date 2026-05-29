@@ -19,7 +19,7 @@ Validated against `CMUX_TAG=craft_integration` with cmux `0.64.10 (90) [733c7e4d
 - Detached caller -> detached target: passed for Craft provider metadata lookup, terminal send, browser surface create/tree/metadata validation, and close cleanup.
 - Detached caller -> attached target: passed for metadata lookup, terminal send, browser surface create/metadata validation, and close cleanup. Attached target workspace IDs may still appear as Swift uppercase UUIDs; command routing worked.
 - Detached status routing: passed after cmux `c5864cac7`. Remote wrapper `set-status`/`list-status` against a detached workspace UUID worked, and Mac tagged CLI `list-status`/`set-status`/`list-status` against the same detached UUID showed both remote and Mac entries.
-- Bounded remote orchestrator smoke: passed. The task moved into `queue/in-progress`, the task session file stored the actual cmux workspace UUID/ref, and task metadata plus `craft:surface:agent` were present.
+- Bounded remote orchestrator smoke: passed. The task moved into `queue/in-progress`, the task workspace was resolved by cmux workspace metadata, and the agent surface was resolved by cmux surface metadata.
 - Idempotency smoke: passed. Repeated `ensure_task_session`, agent surface ensure, and browser surface ensure converged on the same task workspace and semantic surfaces; closing the browser cleared its metadata.
 - Dashboard UI behavior: passed. A fake relay failure returned a non-fatal `cmux_ui_unavailable`, and a real attached focus call resolved task metadata then focused the recorded agent surface.
 - Detached snapshot locking/contention: passed against cmux `733c7e4d3`. A 20-way remote-wrapper stress run against one detached workspace completed with `failures=0`, `meta_ok=20`, `status_ok=20`, and `err_lines=0`.
@@ -83,7 +83,7 @@ Exercise the basic Craft orchestrator flow.
   - `craft:project-dir`
   - `craft:task-id`
   - `craft:task-dir`
-- Verify the main agent is recorded as the semantic surface `craft:surface:agent`.
+- Verify the main agent surface has `craft:semantic=agent` surface metadata.
 
 Success criteria:
 
@@ -105,7 +105,7 @@ For each case:
 - Resolve the target workspace by metadata.
 - Validate the target with `cmux tree`.
 - Ensure the agent terminal surface exists.
-- Ensure one non-agent semantic surface exists, such as `craft:surface:smoke-browser`.
+- Ensure one non-agent semantic surface exists, such as a browser with `craft:semantic=smoke-browser`.
 - Use placement semantics:
   - assume the agent is on the left;
   - place all other semantic surfaces on the right;
@@ -203,8 +203,8 @@ Examples:
 Success criteria:
 
 - Task panes and named panes use the same semantic-surface path.
-- The main task agent is just `craft:surface:agent`.
-- Plugin surfaces use keys such as `craft:surface:buildkite-status`, `craft:surface:diffhub-review`, or `craft:surface:devin-session`.
+- The main task agent is just the surface with `craft:semantic=agent`.
+- Plugin surfaces use semantic values such as `buildkite-status`, `diffhub-review`, or `devin-session` stored in `craft:semantic` surface metadata.
 - Direct cmux shell-outs outside the provider are either gone or documented as UI-only/direct exceptions.
 
 ## Phase 7: Doctor And Plugin Diagnostics

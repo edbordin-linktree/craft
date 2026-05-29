@@ -11,9 +11,13 @@ For cmux, the backend stores workspace identity in hidden metadata:
 - `craft:project-dir`
 - `craft:task-id` and `craft:task-dir` for task workspaces
 
-Semantic surfaces are stored as `craft:surface:<name>` metadata values. The
-value includes the opaque cmux `surface_id`, `type`, `purpose`, optional
-`title`, `url`, `agent`, `placement`, and `updated_at`.
+Semantic surfaces are stored on the cmux surface itself, not on the workspace.
+Craft sets `craft:semantic=<name>` plus `craft:type`, `craft:purpose`,
+optional `craft:title`, `craft:url`, `craft:agent`, `craft:placement`, and
+`craft:updated_at` surface metadata. Surface refs are treated as ephemeral:
+helpers resolve the current ref with `cmux surface lookup --workspace <ws>
+--metadata craft:semantic=<name> --json`, then validate it against
+`cmux tree`.
 
 The cmux backend currently supports two placement values: `left` and `right`.
 The `agent` surface defaults to `left`; every other semantic surface defaults
@@ -52,8 +56,9 @@ Remote validation notes from the `local/remote-workspace-snapshots` fork:
   known detached targets.
 - Remote smoke from an attached orchestrator workspace confirmed Craft creates
   task workspaces through `cmux ssh` and records task metadata on the resulting
-  remote workspace. Craft no longer writes task-session workspace mappings;
-  helpers resolve task workspaces from cmux metadata on demand.
+  remote workspace. Craft no longer writes task-session workspace or surface
+  mappings; helpers resolve task workspaces and semantic surfaces from cmux
+  metadata on demand.
 - Detached fallback smoke confirmed `cmux ssh <same-host> --cwd ... --json`
   creates detached task snapshots, then metadata writes, tree reads, terminal
   sends, browser surface creation, status set/list, and cleanup work against

@@ -203,12 +203,12 @@ assert_eq "consumed event is not queued" "pending=0 counts=" "$(cd "$PROJECT_DIR
 export CRAFT_HOOK_RUNNER="$hook_runner"
 
 echo ""
-echo "surface registry and fake cmux"
+echo "surface metadata and fake cmux"
 (
     cd "$PROJECT_DIR" || exit 1
     "$REPO_ROOT/bin/craft-mux" open task-123 pr --url https://github.com/example/repo/pull/1 --label "PR" --owner test --stage pr_review >/dev/null
 )
-assert_eq "surface registered" "https://github.com/example/repo/pull/1" "$(jq -r '.pr.url' "$PROJECT_DIR/tasks/task-123/.orchestrator/surfaces.json")"
+assert_eq "surface registered" "https://github.com/example/repo/pull/1" "$(jq -r '.windows[0].workspaces[0].panes[].surfaces[] | select(.metadata["craft:semantic"] == "pr").metadata["craft:url"]' "$FAKE_CMUX_STATE")"
 assert_eq "browser opened in right pane" "pane:2" "$(jq -r '.windows[0].workspaces[0].panes[] | select(.surfaces[]?.url == "https://github.com/example/repo/pull/1").ref' "$FAKE_CMUX_STATE")"
 (
     cd "$PROJECT_DIR" || exit 1
@@ -216,11 +216,11 @@ assert_eq "browser opened in right pane" "pane:2" "$(jq -r '.windows[0].workspac
 )
 assert_eq "second browser reuses right pane" "pane:2" "$(jq -r '.windows[0].workspaces[0].panes[] | select(.surfaces[]?.url == "https://build.example/task-123").ref' "$FAKE_CMUX_STATE")"
 assert_eq "right-side browser tabs do not add splits" "2" "$(jq '[.windows[0].workspaces[0].panes[].ref] | length' "$FAKE_CMUX_STATE")"
-assert_eq "non-agent surface records right placement" "right" "$(jq -r '.windows[0].workspaces[0].metadata["craft:surface:build"].placement' "$FAKE_CMUX_STATE")"
+assert_eq "non-agent surface records right placement" "right" "$(jq -r '.windows[0].workspaces[0].panes[].surfaces[] | select(.metadata["craft:semantic"] == "build").metadata["craft:placement"]' "$FAKE_CMUX_STATE")"
 source "$REPO_ROOT/bin/lib/mux-cmux.sh"
 _cmux_ensure_surface "workspace:1" "dashboard" "browser" "dashboard" --title "dashboard" --url "http://127.0.0.1:27434" >/dev/null
 assert_eq "dashboard browser opens in left pane" "pane:1" "$(jq -r '.windows[0].workspaces[0].panes[] | select(.surfaces[]?.url == "http://127.0.0.1:27434").ref' "$FAKE_CMUX_STATE")"
-assert_eq "dashboard surface records left placement" "left" "$(jq -r '.windows[0].workspaces[0].metadata["craft:surface:dashboard"].placement' "$FAKE_CMUX_STATE")"
+assert_eq "dashboard surface records left placement" "left" "$(jq -r '.windows[0].workspaces[0].panes[].surfaces[] | select(.metadata["craft:semantic"] == "dashboard").metadata["craft:placement"]' "$FAKE_CMUX_STATE")"
 tmp_json="$TMPDIR/surfaces.json"
 jq '
   .windows[0].workspaces += [{
@@ -229,18 +229,22 @@ jq '
     metadata: {
       "craft:schema-version": "1",
       "craft:project-id": "project",
-      "craft:project-dir": "/tmp/project",
-      "craft:surface:orchestrator": {
-        surface_id: "surface:50",
-        type: "terminal",
-        purpose: "orchestrator",
-        title: "orchestrator",
-        placement: "left"
-      }
+      "craft:project-dir": "/tmp/project"
     },
     panes: [{
       ref: "pane:50",
-      surfaces: [{ref:"surface:50", type:"terminal", title:"orchestrator"}]
+      surfaces: [{
+        ref:"surface:50",
+        type:"terminal",
+        title:"orchestrator",
+        metadata: {
+          "craft:semantic": "orchestrator",
+          "craft:type": "terminal",
+          "craft:purpose": "orchestrator",
+          "craft:title": "orchestrator",
+          "craft:placement": "left"
+        }
+      }]
     }]
   }]
 ' "$FAKE_CMUX_STATE" > "$tmp_json" && mv "$tmp_json" "$FAKE_CMUX_STATE"
@@ -265,25 +269,24 @@ _cmux_ensure_dashboard_surface "workspace:project" "$PROJECT_DIR" "http://127.0.
 assert_eq "dashboard ensure prunes duplicate browsers" "1" "$(jq '[.windows[0].workspaces[] | select(.ref == "workspace:project").panes[].surfaces[] | select(.type == "browser" and (.url // "" | startswith("http://localhost:27434") or startswith("http://127.0.0.1:27434")))] | length' "$FAKE_CMUX_STATE")"
 jq '
   .windows[0].workspaces[0].metadata["craft:surface:architect"] = {
-    surface_id: "surface:stale",
+    surface_id: "surface:42",
     type: "terminal",
     purpose: "architect",
     title: "architect"
   }
-  | .windows[0].workspaces[0].panes[1].surfaces += [{ref:"surface:42", type:"terminal", title:"architect"}]
+  | .windows[0].workspaces[0].panes[1].surfaces += [{ref:"surface:42", type:"terminal", title:"architect", metadata:{}}]
 ' "$FAKE_CMUX_STATE" > "$tmp_json" && mv "$tmp_json" "$FAKE_CMUX_STATE"
 surface_count_before="$(jq '[.windows[0].workspaces[0].panes[].surfaces[]] | length' "$FAKE_CMUX_STATE")"
 _cmux_ensure_surface "workspace:1" "architect" "terminal" "architect" --title "architect" --command "echo architect" --agent "codex" >/dev/null
-assert_eq "architect adopts existing titled terminal" "surface:42" "$(jq -r '.windows[0].workspaces[0].metadata["craft:surface:architect"].surface_id' "$FAKE_CMUX_STATE")"
+assert_eq "legacy architect metadata migrates to surface metadata" "architect" "$(jq -r '.windows[0].workspaces[0].panes[].surfaces[] | select(.ref == "surface:42").metadata["craft:semantic"]' "$FAKE_CMUX_STATE")"
+assert_eq "legacy architect workspace metadata is cleared" "null" "$(jq -r '.windows[0].workspaces[0].metadata["craft:surface:architect"] // null' "$FAKE_CMUX_STATE")"
 assert_eq "architect adoption does not create surface" "$surface_count_before" "$(jq '[.windows[0].workspaces[0].panes[].surfaces[]] | length' "$FAKE_CMUX_STATE")"
 
-registry="$PROJECT_DIR/tasks/task-123/.orchestrator/surfaces.json"
-jq '.pr.cached_surface_ref = "surface:999"' "$registry" > "$tmp_json" && mv "$tmp_json" "$registry"
 (
     cd "$PROJECT_DIR" || exit 1
     "$REPO_ROOT/bin/craft-mux" focus task-123 pr >/dev/null
 )
-assert_eq "focus adopts same-workspace browser" "surface:2" "$(jq -r '.pr.cached_surface_ref' "$registry")"
+assert_eq "focus uses current cmux surface metadata" "surface:2" "$(jq -r '.focused' "$FAKE_CMUX_STATE")"
 workspace_state="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft-mux" workspace-state task-123 agent)"
 assert_eq "workspace state reports attached task" "false" "$(jq -r '.detached' <<< "$workspace_state")"
 assert_eq "workspace state reports agent surface" "true" "$(jq -r '.surface_exists' <<< "$workspace_state")"
@@ -301,17 +304,21 @@ jq '
     metadata: {
       "craft:schema-version": "1",
       "craft:project-id": "project",
-      "craft:task-id": "task-detached",
-      "craft:surface:agent": {
-        surface_id: "surface:11111111-1111-1111-1111-111111111112",
-        type: "terminal",
-        purpose: "agent",
-        title: "task-detached"
-      }
+      "craft:task-id": "task-detached"
     },
     panes: [{
       ref: "pane:11111111-1111-1111-1111-111111111113",
-      surfaces: [{ref:"surface:11111111-1111-1111-1111-111111111112", type:"terminal", title:"task-detached"}]
+      surfaces: [{
+        ref:"surface:11111111-1111-1111-1111-111111111112",
+        type:"terminal",
+        title:"task-detached",
+        metadata: {
+          "craft:semantic": "agent",
+          "craft:type": "terminal",
+          "craft:purpose": "agent",
+          "craft:title": "task-detached"
+        }
+      }]
     }]
   }]
 ' "$FAKE_CMUX_STATE" > "$tmp_json" && mv "$tmp_json" "$FAKE_CMUX_STATE"
@@ -323,8 +330,7 @@ assert_eq "workspace state reports detached task" "true" "$(jq -r '.detached' <<
 )
 assert_eq "attach focus uses restored agent surface" "surface:11111111-1111-1111-1111-111111111112" "$(jq -r '.focused' "$FAKE_CMUX_STATE")"
 
-jq '.terminal = {surface_id:"terminal", kind:"terminal", label:"Terminal", owner:"test", stage:"qa", cached_surface_ref:"surface:999", status:"open"}' "$registry" > "$tmp_json" && mv "$tmp_json" "$registry"
-assert_false "stale non-browser is not adopted" bash -c "cd '$PROJECT_DIR' && '$REPO_ROOT/bin/craft-mux' focus task-123 terminal"
+assert_false "unknown surface is not adopted" bash -c "cd '$PROJECT_DIR' && '$REPO_ROOT/bin/craft-mux' focus task-123 terminal"
 
 echo ""
 echo "remote task workspace creation"

@@ -30,13 +30,11 @@ source "${CRAFT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}/bin/lib/task-runti
 CRAFT_HOME="$(orchestrator_craft_root)"
 TASK_ID="$(orchestrator_task_id_from_worktree "$REPO")"
 
-SURFACE_FILE=".orchestrator/diffhub.surface"
 URL_FILE=".orchestrator/diffhub.url"
 
 "$CRAFT_HOME/bin/run-bg" stop diffhub >/dev/null 2>&1 || true
 
 orchestrator_surface_close "$REPO" "$TASK_ID" diffhub-review >/dev/null 2>&1 || true
-rm -f "$SURFACE_FILE"
 
 rm -f "$URL_FILE"
 

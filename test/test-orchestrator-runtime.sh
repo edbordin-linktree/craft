@@ -118,9 +118,9 @@ echo "orchestrator surface scripts"
         "https://github.com/example/repo/pull/7" --repo "$WORKTREE" >/dev/null
 )
 assert_eq "github-pr surface registered" "https://github.com/example/repo/pull/7" \
-    "$(jq -r '."github-pr".url' "$PROJECT_DIR/tasks/task-123/.orchestrator/surfaces.json")"
+    "$(jq -r '.windows[0].workspaces[0].panes[].surfaces[] | select(.metadata["craft:semantic"] == "github-pr").metadata["craft:url"]' "$FAKE_CMUX_STATE")"
 assert_eq "github-pr stable id" "github-pr" \
-    "$(jq -r '."github-pr".surface_id' "$PROJECT_DIR/tasks/task-123/.orchestrator/surfaces.json")"
+    "$(jq -r '.windows[0].workspaces[0].panes[].surfaces[] | select(.metadata["craft:semantic"] == "github-pr").metadata["craft:semantic"]' "$FAKE_CMUX_STATE")"
 assert_eq "surface opened in fake cmux" "https://github.com/example/repo/pull/7" \
     "$(jq -r '.windows[0].workspaces[0].panes[].surfaces[] | select(.type == "browser").url' "$FAKE_CMUX_STATE" | head -1)"
 
@@ -128,28 +128,21 @@ echo ""
 echo "buildkite-status stage cleanup"
 tmp_state="$TMPDIR/cmux-bk.json"
 jq '.windows[0].workspaces[0].panes[0].surfaces +=
-    [{ref:"surface:77", type:"browser", title:"bk:repo#7", url:"http://127.0.0.1:27435/pr/example/repo/7"}]
-    | .windows[0].workspaces[0].metadata["craft:surface:buildkite-status"] = {
-        surface_id: "surface:77",
-        type: "browser",
-        purpose: "buildkite-status",
-        title: "bk:repo#7",
-        url: "http://127.0.0.1:27435/pr/example/repo/7"
-      }' \
+    [{
+      ref:"surface:77",
+      type:"browser",
+      title:"bk:repo#7",
+      url:"http://127.0.0.1:27435/pr/example/repo/7",
+      metadata: {
+        "craft:semantic": "buildkite-status",
+        "craft:type": "browser",
+        "craft:purpose": "buildkite-status",
+        "craft:title": "bk:repo#7",
+        "craft:url": "http://127.0.0.1:27435/pr/example/repo/7",
+        "craft:stage": "pr_review"
+      }
+    }]' \
     "$FAKE_CMUX_STATE" > "$tmp_state" && mv "$tmp_state" "$FAKE_CMUX_STATE"
-jq '."buildkite-status" = {
-      surface_id: "buildkite-status",
-      kind: "browser",
-      label: "bk:repo#7",
-      owner: "buildkite-status",
-      stage: "pr_review",
-      url: "http://127.0.0.1:27435/pr/example/repo/7",
-      url_match: "prefix",
-      cached_surface_ref: "surface:77",
-      status: "open"
-    }' \
-    "$PROJECT_DIR/tasks/task-123/.orchestrator/surfaces.json" > "$tmp_state" \
-    && mv "$tmp_state" "$PROJECT_DIR/tasks/task-123/.orchestrator/surfaces.json"
 (
     export CRAFT_ROOT="$REPO_ROOT" PROJECT_DIR="$PROJECT_DIR"
     source "$REPO_ROOT/plugins/buildkite-status/hooks.sh"

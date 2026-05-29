@@ -24,20 +24,25 @@ if [[ ! -f "$STATE" ]]; then
             "craft:project-id": "project",
             "craft:project-dir": "/tmp/project",
             "craft:task-id": "task-123",
-            "craft:task-dir": "/tmp/project/tasks/task-123",
-            "craft:surface:agent": {
-              "surface_id": "surface:1",
-              "type": "terminal",
-              "purpose": "agent",
-              "title": "task-123",
-              "placement": "left"
-            }
+            "craft:task-dir": "/tmp/project/tasks/task-123"
           },
           "panes": [
             {
               "ref": "pane:1",
               "surfaces": [
-                {"ref": "surface:1", "type": "terminal", "title": "task-123"}
+                {
+                  "ref": "surface:1",
+                  "type": "terminal",
+                  "title": "task-123",
+                  "metadata": {
+                    "craft:schema-version": "1",
+                    "craft:semantic": "agent",
+                    "craft:type": "terminal",
+                    "craft:purpose": "agent",
+                    "craft:title": "task-123",
+                    "craft:placement": "left"
+                  }
+                }
               ]
             }
           ]
@@ -141,6 +146,30 @@ metadata_args_json() {
     echo "$args_json"
 }
 
+positional_args_json() {
+    local args_json="[]" skip_next=0
+    for arg in "$@"; do
+        if [[ "$skip_next" -eq 1 ]]; then
+            skip_next=0
+            continue
+        fi
+        case "$arg" in
+            surface|metadata|lookup|get|set|list|clear|--json)
+                continue
+                ;;
+            --workspace|--surface|--metadata|--prefix|--value-json|--url|--type|--pane|--name|--cwd|--command|--direction|--focus|--icon|--color|--workspace-id)
+                skip_next=1
+                continue
+                ;;
+            --*)
+                continue
+                ;;
+        esac
+        args_json="$(jq --arg item "$arg" '. + [$item]' <<< "$args_json")"
+    done
+    echo "$args_json"
+}
+
 case "${1:-}" in
     tree)
         ws="$(workspace_arg "$@" || true)"
@@ -216,6 +245,88 @@ case "${1:-}" in
                 ;;
         esac
         ;;
+    surface)
+        sub="${2:-}"
+        if [[ "$sub" == "lookup" ]]; then
+            ws="$(workspace_arg "$@")"
+            filters="$(metadata_args_json "$@")"
+            jq --arg ws "$ws" --argjson filters "$filters" '
+                def matches_filter($s; $f):
+                  ($f | split("=")) as $parts
+                  | ($parts[0]) as $key
+                  | ($parts[1:] | join("=")) as $value
+                  | (($s.metadata[$key] // "") | tostring) == $value;
+                {
+                  matches: [
+                    .windows[].workspaces[]
+                    | select(.ref == $ws)
+                    | . as $workspace
+                    | .panes[].surfaces[]
+                    | . as $surface
+                    | select(all($filters[]; matches_filter($surface; .)))
+                    | $surface + {
+                        id: ($surface.id // $surface.ref),
+                        surface_id: ($surface.surface_id // $surface.ref),
+                        surface_ref: ($surface.surface_ref // $surface.ref),
+                        workspace_ref: $workspace.ref,
+                        workspace_id: ($workspace.id // $workspace.ref)
+                      }
+                  ]
+                }
+            ' "$STATE"
+            exit 0
+        fi
+        if [[ "$sub" == "metadata" ]]; then
+            action="${3:-}"
+            ws="$(workspace_arg "$@")"
+            surface="$(surface_arg "$@")"
+            positional="$(positional_args_json "$@")"
+            case "$action" in
+                get)
+                    key="$(jq -r '.[0] // empty' <<< "$positional")"
+                    jq --arg ws "$ws" --arg surface "$surface" --arg key "$key" '
+                        .windows[].workspaces[]
+                        | select(.ref == $ws)
+                        | .panes[].surfaces[]
+                        | select(.ref == $surface)
+                        | {key: $key, value: (.metadata[$key] // null)}
+                    ' "$STATE"
+                    ;;
+                set)
+                    key="$(jq -r '.[0] // empty' <<< "$positional")"
+                    value="$(jq -r '.[1] // empty' <<< "$positional")"
+                    save --arg ws "$ws" --arg surface "$surface" --arg key "$key" --arg value "$value" '
+                        (.windows[].workspaces[] | select(.ref == $ws).panes[].surfaces[] | select(.ref == $surface).metadata[$key]) = $value
+                    '
+                    ;;
+                list)
+                    prefix="$(flag_value --prefix "$@" || true)"
+                    jq --arg ws "$ws" --arg surface "$surface" --arg prefix "$prefix" '
+                        .windows[].workspaces[]
+                        | select(.ref == $ws)
+                        | .panes[].surfaces[]
+                        | select(.ref == $surface)
+                        | (.metadata // {})
+                        | to_entries
+                        | map(select($prefix == "" or (.key | startswith($prefix))))
+                    ' "$STATE"
+                    ;;
+                clear)
+                    key="$(jq -r '.[0] // empty' <<< "$positional")"
+                    save --arg ws "$ws" --arg surface "$surface" --arg key "$key" '
+                        del(.windows[].workspaces[] | select(.ref == $ws).panes[].surfaces[] | select(.ref == $surface).metadata[$key])
+                    '
+                    ;;
+                *)
+                    echo "fake-cmux: unsupported command: $*" >&2
+                    exit 2
+                    ;;
+            esac
+            exit 0
+        fi
+        echo "fake-cmux: unsupported command: $*" >&2
+        exit 2
+        ;;
     ssh)
         ws="workspace:$(jq -r '.next_workspace' "$STATE")"
         pane="pane:$(jq -r '.next_pane' "$STATE")"
@@ -230,7 +341,7 @@ case "${1:-}" in
                 id: $ws,
                 title: $title,
                 metadata: {},
-                panes: [{ref: $pane, surfaces: [{ref: $surface, type: "terminal", title: ""}]}]
+                panes: [{ref: $pane, surfaces: [{ref: $surface, type: "terminal", title: "", metadata: {}}]}]
               }]
         '
         if [[ " $* " == *" --json "* ]]; then
@@ -279,7 +390,7 @@ case "${1:-}" in
             .next_pane += 1
             | .next_surface += 1
             | (.windows[].workspaces[] | select(.ref == $ws).panes) +=
-              [{ref: $pane, surfaces: [{ref: $surface, type: "terminal", title: ""}]}]
+              [{ref: $pane, surfaces: [{ref: $surface, type: "terminal", title: "", metadata: {}}]}]
         '
         echo "OK $surface $ws"
         ;;
@@ -293,7 +404,7 @@ case "${1:-}" in
             .next_pane += 1
             | .next_surface += 1
             | (.windows[].workspaces[] | select(.ref == $ws).panes) +=
-              [{ref: $pane, surfaces: [{ref: $surface, type: $kind, title: "", url: $url}]}]
+              [{ref: $pane, surfaces: [{ref: $surface, type: $kind, title: "", url: $url, metadata: {}}]}]
         '
         echo "OK $surface $pane $ws"
         ;;
@@ -309,7 +420,7 @@ case "${1:-}" in
         save --arg pane "$pane" --arg surface "$surface" --arg url "$url" --arg kind "$kind" '
             .next_surface += 1
             | (.windows[].workspaces[].panes[] | select(.ref == $pane).surfaces) +=
-              [{ref: $surface, type: $kind, title: "", url: $url}]
+              [{ref: $surface, type: $kind, title: "", url: $url, metadata: {}}]
         '
         if [[ " $* " == *" --json "* ]]; then
             jq -n --arg surface_id "$surface" '{surface_id: $surface_id}'

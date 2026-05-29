@@ -440,36 +440,3 @@ runtime_event_take() {
     jq -s '.' "${selected[@]}"
     rm -f "${selected[@]}"
 }
-
-runtime_surface_registry() {
-    local project_dir="$1" task_id="$2"
-    echo "$(runtime_task_dir "$project_dir" "$task_id")/.orchestrator/surfaces.json"
-}
-
-runtime_surface_get() {
-    local project_dir="$1" task_id="$2" surface_id="$3"
-    local registry
-    registry="$(runtime_surface_registry "$project_dir" "$task_id")"
-    [[ -f "$registry" ]] || return 1
-    jq -e --arg id "$surface_id" '.[$id]' "$registry"
-}
-
-runtime_surface_put() {
-    local project_dir="$1" task_id="$2" surface_json="$3"
-    local registry tmp surface_id
-    registry="$(runtime_surface_registry "$project_dir" "$task_id")"
-    mkdir -p "$(dirname "$registry")"
-    [[ -f "$registry" ]] || echo '{}' > "$registry"
-    surface_id="$(jq -r '.surface_id' <<< "$surface_json")"
-    tmp="$(mktemp)"
-    jq --arg id "$surface_id" --argjson surface "$surface_json" '.[$id] = $surface' "$registry" > "$tmp"
-    mv "$tmp" "$registry"
-}
-
-runtime_surface_patch_ref() {
-    local project_dir="$1" task_id="$2" surface_id="$3" surface_ref="$4" status="${5:-open}"
-    local current
-    current="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id")" || return 1
-    current="$(jq --arg ref "$surface_ref" --arg status "$status" '.cached_surface_ref = $ref | .status = $status' <<< "$current")"
-    runtime_surface_put "$project_dir" "$task_id" "$current"
-}
