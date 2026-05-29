@@ -247,6 +247,14 @@ case "${1:-}" in
         ;;
     surface)
         sub="${2:-}"
+        if [[ "$sub" == "metadata" && "${3:-}" == "--help" ]]; then
+            echo "fake-cmux surface metadata"
+            exit 0
+        fi
+        if [[ "$sub" == "lookup" && "${3:-}" == "--help" ]]; then
+            echo "fake-cmux surface lookup"
+            exit 0
+        fi
         if [[ "$sub" == "lookup" ]]; then
             ws="$(workspace_arg "$@")"
             filters="$(metadata_args_json "$@")"

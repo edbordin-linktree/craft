@@ -240,6 +240,14 @@ _cmux_surface_exists() {
         ' >/dev/null 2>&1
 }
 
+_cmux_require_surface_metadata() {
+    if cmux surface metadata --help >/dev/null 2>&1 && cmux surface lookup --help >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "cmux_surface_metadata_unsupported: update cmux to a build with surface metadata and surface lookup support" >&2
+    return 1
+}
+
 _cmux_surface_metadata_set() {
     local ws_ref="$1" surface_id="$2" key="$3" value="$4"
     [[ -n "$value" ]] || return 0
@@ -589,6 +597,7 @@ _cmux_ensure_surface() {
         esac
     done
     [[ -n "$placement" ]] || placement="$(_cmux_default_placement "$semantic")"
+    _cmux_require_surface_metadata || return 1
 
     existing="$(_cmux_surface_from_metadata "$ws_ref" "$semantic" 2>/dev/null || true)"
     if [[ -n "$existing" ]]; then
@@ -609,6 +618,7 @@ _cmux_ensure_surface() {
 
 _cmux_send_to_surface() {
     local ws_ref="$1" semantic="$2" text="$3" surface_json sid type
+    _cmux_require_surface_metadata || return 1
     surface_json="$(_cmux_surface_from_metadata "$ws_ref" "$semantic" 2>/dev/null)" || {
         echo "surface_not_found: $semantic" >&2
         return 1
@@ -1410,6 +1420,7 @@ mux_surface_focus() {
     if [[ "$attach_first" == "true" ]]; then
         ws_ref="$(_cmux_attach_workspace_ui "$ws_ref")" || return 1
     fi
+    _cmux_require_surface_metadata || return 1
     recorded="$(_cmux_surface_from_metadata "$ws_ref" "$surface_id" 2>/dev/null || true)"
     if [[ -n "$recorded" ]]; then
         cached="$(jq -r '.surface_id // empty' <<< "$recorded")"
