@@ -339,6 +339,13 @@ case "${1:-}" in
             (.windows[].workspaces[].panes[].surfaces) |= map(select(.ref != $surface))
         '
         ;;
+    close-workspace)
+        ws="$(workspace_arg "$@" || true)"
+        [[ -n "$ws" ]] || ws="${2:-}"
+        save --arg ws "$ws" '
+            (.windows[].workspaces) |= map(select(.ref != $ws))
+        '
+        ;;
     focus-surface)
         surface="$(surface_arg "$@" || true)"
         [[ -n "$surface" ]] || surface="${2:-}"

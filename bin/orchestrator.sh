@@ -49,6 +49,7 @@ PROJECT_DIR=""
 MAX_PARALLEL=10
 POLL_INTERVAL=15  # seconds between queue checks
 PR_POLL_INTERVAL=120  # seconds between PR merge checks
+RESTART_WORKSPACE=0
 
 # --- Parse arguments ---
 while [[ $# -gt 0 ]]; do
@@ -61,8 +62,12 @@ while [[ $# -gt 0 ]]; do
             POLL_INTERVAL="$2"
             shift 2
             ;;
+        --restart-workspace|--replace-workspace)
+            RESTART_WORKSPACE=1
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 <project-dir> [--max-parallel N] [--poll-interval SECONDS]"
+            echo "Usage: $0 <project-dir> [--max-parallel N] [--poll-interval SECONDS] [--restart-workspace]"
             exit 0
             ;;
         *)
@@ -104,6 +109,26 @@ load_provider_config "$PROJECT_DIR"
 
 # Load multiplexer provider (must come after config so MULTIPLEXER is set)
 source "$SCRIPT_DIR/lib/mux.sh"
+
+orchestrator_reexec_command() {
+    local cmd
+    printf -v cmd 'CRAFT_INNER_SESSION=1 exec %q %q --max-parallel %q --poll-interval %q' \
+        "$0" "$PROJECT_DIR" "$MAX_PARALLEL" "$POLL_INTERVAL"
+    echo "$cmd"
+}
+
+if [[ "$RESTART_WORKSPACE" == "1" ]]; then
+    if [[ "$MULTIPLEXER" != "cmux" ]]; then
+        echo "orchestrator restart workspace is only supported for cmux" >&2
+        exit 2
+    fi
+    if ! declare -f mux_replace_orchestrator_workspace >/dev/null 2>&1; then
+        echo "orchestrator restart workspace is not supported by the current mux provider" >&2
+        exit 2
+    fi
+    mux_replace_orchestrator_workspace "$PROJECT_NAME" "$PROJECT_DIR" "$(orchestrator_reexec_command)" >/dev/null
+    exit 0
+fi
 
 # --- State tracking ---
 declare -A ACTIVE_TASKS=()   # task_id -> pane/window identifier
@@ -509,7 +534,7 @@ fi
 # workspace's initial surface, so the dashboard lives next to the architect.
 # Mirrors the tmux re-exec pattern. The invoking shell exits.
 if [[ "$MULTIPLEXER" == "cmux" ]] && [[ -z "${CRAFT_INNER_SESSION:-}" ]]; then
-    _cmd="CRAFT_INNER_SESSION=1 exec '$0' '$PROJECT_DIR' --max-parallel $MAX_PARALLEL --poll-interval $POLL_INTERVAL"
+    _cmd="$(orchestrator_reexec_command)"
     if _initial="$(mux_bootstrap_orchestrator "$PROJECT_NAME" "$PROJECT_DIR" "$_cmd")" && [[ -n "$_initial" ]]; then
         exit 0
     fi

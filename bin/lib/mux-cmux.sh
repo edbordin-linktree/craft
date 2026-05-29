@@ -137,6 +137,28 @@ _cmux_metadata_clear() {
     cmux metadata clear --workspace "$ws_ref" "$key" >/dev/null 2>&1 || true
 }
 
+_cmux_clear_workspace_identity() {
+    local ws_ref="$1"
+    _cmux_metadata_clear "$ws_ref" "craft:schema-version"
+    _cmux_metadata_clear "$ws_ref" "craft:project-id"
+    _cmux_metadata_clear "$ws_ref" "craft:project-dir"
+    _cmux_metadata_clear "$ws_ref" "craft:task-id"
+    _cmux_metadata_clear "$ws_ref" "craft:task-dir"
+}
+
+_cmux_close_workspace_async() {
+    local ws_ref="$1"
+    [[ -n "$ws_ref" ]] || return 0
+    if [[ "${CMUX_CLOSE_WORKSPACE_SYNC:-}" == "1" ]]; then
+        cmux close-workspace --workspace "$ws_ref" >/dev/null 2>&1 || true
+        return 0
+    fi
+    nohup bash -c '
+        sleep "${CMUX_CLOSE_WORKSPACE_DELAY:-1}"
+        cmux close-workspace --workspace "$1" >/dev/null 2>&1 || true
+    ' _ "$ws_ref" </dev/null >/dev/null 2>&1 &
+}
+
 _cmux_tree_json() {
     local ws_ref="$1"
     cmux tree --workspace "$ws_ref" --json 2>/dev/null
@@ -880,6 +902,49 @@ mux_bootstrap_orchestrator() {
         --command "$command" \
         --direction down)" || return 1
     cmux select-workspace --workspace "$ws_ref" >/dev/null 2>&1 || true
+    echo "$surface_id"
+}
+
+mux_replace_orchestrator_workspace() {
+    local project_name="$1" project_dir="$2" command="$3"
+    local title="${CMUX_PREFIX}-${project_name}" old_ws new_ws raw surface_id
+
+    old_ws="$(_cmux_project_workspace_ref "$project_name" 2>/dev/null || true)"
+    raw="$(_cmux_create_project_workspace "$project_dir" "$title" "$command")" || return 1
+    new_ws="$(printf '%s' "$raw" | _cmux_workspace_id_from_output)"
+    [[ -n "$new_ws" ]] || new_ws="$(echo "$raw" | grep -oE 'workspace:[0-9]+' | head -1)"
+    if [[ -z "$new_ws" ]]; then
+        echo "mux_replace_orchestrator_workspace: failed to create cmux workspace: $raw" >&2
+        return 1
+    fi
+
+    _cmux_write_workspace_identity "$new_ws" "$project_name" "$project_dir" || {
+        echo "mux_replace_orchestrator_workspace: failed to write cmux workspace metadata for project=$project_name" >&2
+        return 1
+    }
+    cmux rename-workspace --workspace "$new_ws" "$title" >/dev/null 2>&1 || true
+    cmux workspace-action --workspace "$new_ws" --action pin >/dev/null 2>&1 || true
+
+    if [[ -n "$old_ws" && "$old_ws" != "$new_ws" ]]; then
+        _cmux_clear_workspace_identity "$old_ws"
+    fi
+
+    surface_id="$(printf '%s' "$raw" | _cmux_surface_id_from_output)"
+    if [[ -n "$surface_id" ]]; then
+        _cmux_record_surface "$new_ws" "orchestrator" "$surface_id" "terminal" "orchestrator" "orchestrator" "" "" "left" || true
+        cmux rename-tab --workspace "$new_ws" --surface "$surface_id" "orchestrator" >/dev/null 2>&1 || true
+        _cmux_send_command_to_surface "$new_ws" "$surface_id" "$command" || true
+    else
+        surface_id="$(_cmux_ensure_surface "$new_ws" "orchestrator" "terminal" "orchestrator" \
+            --title "orchestrator" \
+            --command "$command" \
+            --direction down)" || return 1
+    fi
+
+    cmux select-workspace --workspace "$new_ws" >/dev/null 2>&1 || true
+    if [[ -n "$old_ws" && "$old_ws" != "$new_ws" ]]; then
+        _cmux_close_workspace_async "$old_ws"
+    fi
     echo "$surface_id"
 }
 

@@ -227,6 +227,9 @@ jq '
     ref: "workspace:project",
     title: "craft-project",
     metadata: {
+      "craft:schema-version": "1",
+      "craft:project-id": "project",
+      "craft:project-dir": "/tmp/project",
       "craft:surface:orchestrator": {
         surface_id: "surface:50",
         type: "terminal",
@@ -328,6 +331,11 @@ assert_eq "remote task resolves workspace ref" "workspace:2" "$remote_workspace_
 assert_false "remote task does not write task-session mapping" test -f "$PROJECT_DIR/tasks/task-remote/.orchestrator/task-session.json"
 assert_eq "remote task uses cmux ssh workspace" "craft-project-task-remote · Remote task" "$(jq -r '.windows[0].workspaces[] | select(.metadata["craft:task-id"] == "task-remote").title' "$FAKE_CMUX_STATE")"
 assert_eq "remote task metadata records dir" "$PROJECT_DIR/tasks/task-remote" "$(jq -r '.windows[0].workspaces[] | select(.metadata["craft:task-id"] == "task-remote").metadata["craft:task-dir"]' "$FAKE_CMUX_STATE")"
+CMUX_CLOSE_WORKSPACE_SYNC=1 mux_replace_orchestrator_workspace project "$PROJECT_DIR" "CRAFT_INNER_SESSION=1 exec orchestrator" >/dev/null
+assert_eq "orchestrator workspace restart closes old project workspace" "0" "$(jq '[.windows[0].workspaces[] | select(.ref == "workspace:project")] | length' "$FAKE_CMUX_STATE")"
+assert_eq "orchestrator workspace restart creates replacement" "1" "$(jq '[.windows[0].workspaces[] | select(.metadata["craft:project-id"] == "project" and (.metadata["craft:task-id"] // "") == "")] | length' "$FAKE_CMUX_STATE")"
+assert_eq "orchestrator workspace restart sends launch command" "CRAFT_INNER_SESSION=1 exec orchestrator" "$(jq -r '.sent[-1].text' "$FAKE_CMUX_STATE")"
+unset CMUX_CLOSE_WORKSPACE_SYNC
 (
     cd "$PROJECT_DIR" || exit 1
     CRAFT_ROOT="$REPO_ROOT" "$REPO_ROOT/plugins/craft-dashboard/scripts/set-task-state" task-remote in-progress >/dev/null

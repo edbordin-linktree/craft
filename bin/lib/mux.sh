@@ -50,6 +50,10 @@
 #   mux_task_status_set <project-name> <task-id> <status> <icon> <color>
 #     → Set a visible task status banner. cmux writes a workspace status pill;
 #       tmux is a no-op.
+#
+#   mux_replace_orchestrator_workspace <project-name> <project-dir> <command>
+#     → Optional provider hook. Replace the project orchestrator workspace with
+#       a freshly bootstrapped workspace running <command>.
 
 MUX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
