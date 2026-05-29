@@ -197,7 +197,7 @@ case "${1:-}" in
                     .windows[].workspaces[]
                     | . as $ws
                     | select(all($filters[]; matches_filter($ws; .)))
-                    | {ref, id: .ref, workspace_ref: .ref, workspace_id: .ref, title, attached: (.attached // true), detached: (.detached // false)}
+                    | {ref, id: .ref, workspace_ref: .ref, workspace_id: .ref, title, metadata: (.metadata // {}), attached: (.attached // true), detached: (.detached // false)}
                   ]
                 }
             ' "$STATE"

@@ -166,38 +166,21 @@ _cmux_tree_json() {
 }
 
 _cmux_project_workspace_ref() {
-    local project_id="$1" candidate task_id workspace_ref
-    while IFS= read -r candidate; do
-        [[ -n "$candidate" ]] || continue
-        task_id="$(_cmux_metadata_get "$candidate" "craft:task-id" 2>/dev/null || true)"
-        if [[ -z "$task_id" ]]; then
-            workspace_ref="$(_cmux_tree_json "$candidate" \
-                | jq -r --arg project "$project_id" '
-                    .windows[].workspaces[]
-                    | select((.metadata["craft:project-id"] // "") == $project)
-                    | select((.metadata["craft:task-id"] // "") == "")
-                    | .ref // .workspace_ref // .workspace_id // .id // empty
-                ' 2>/dev/null | head -1)"
-            echo "${workspace_ref:-$candidate}"
-            return 0
-        fi
-    done < <(
-        cmux workspace lookup \
-            --metadata "craft:project-id=${project_id}" \
-            --include-detached \
-            --json 2>/dev/null \
-            | jq -r '
-                [
-                  .matches[]?,
-                  .workspaces[]?,
-                  .
-                ]
-                | map(select(type == "object"))
-                | .[]
-                | .workspace_id // .workspaceId // .id // .workspace_ref // .workspaceRef // .ref // empty
-            ' 2>/dev/null
-    )
-    return 1
+    local project_id="$1"
+    _cmux_workspace_lookup_json_by_metadata "craft:project-id=${project_id}" \
+        | jq -r '
+            [
+              .matches[]?,
+              .workspaces[]?,
+              .workspace?,
+              .
+            ]
+            | map(select(type == "object"))
+            | .[]
+            | select((.metadata["craft:task-id"] // "") == "")
+            | .workspace_ref // .workspaceRef // .ref // .workspace_id // .workspaceId // .id // empty
+        ' 2>/dev/null \
+        | head -1
 }
 
 _cmux_task_workspace_ref() {
