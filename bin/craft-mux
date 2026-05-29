@@ -104,15 +104,11 @@ case "$cmd" in
         task_id="${1:?task id required}"; shift
         text="$*"
         [[ -n "$text" ]] || { echo "craft-mux: text required" >&2; exit 2; }
-        task_session="$(runtime_task_session_value "$PROJECT_DIR" "$task_id" session 2>/dev/null || true)"
-        pane_name="$(runtime_task_session_value "$PROJECT_DIR" "$task_id" pane_name 2>/dev/null || true)"
-        if [[ -z "$task_session" ]]; then
-            case "$MULTIPLEXER" in
-                tmux) task_session="$SESSION" ;;
-                cmux) task_session="${CMUX_PREFIX:-craft}-${PROJECT_NAME}-${task_id}" ;;
-            esac
-        fi
-        [[ -n "$pane_name" ]] || pane_name="$task_id"
+        case "$MULTIPLEXER" in
+            tmux) task_session="$SESSION" ;;
+            cmux) task_session="${CMUX_PREFIX:-craft}-${PROJECT_NAME}-${task_id}" ;;
+        esac
+        pane_name="$task_id"
         mux_send_to_pane "$task_session" "$pane_name" "$text"
         ;;
     open)

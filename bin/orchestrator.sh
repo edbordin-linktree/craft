@@ -310,18 +310,6 @@ run_task() {
     task_human_title=$(task_human_title "$new_file")
     local task_session
     task_session=$(ensure_task_session "$PROJECT_NAME" "$tid" "$task_dir" "$task_human_title")
-    local workspace_title="$task_session"
-    [[ -n "$task_human_title" && "$MULTIPLEXER" == "cmux" ]] && workspace_title="${task_session} · ${task_human_title}"
-    local runtime_workspace_id="$task_session"
-    if [[ "$MULTIPLEXER" == "cmux" ]]; then
-        local resolved_workspace
-        resolved_workspace="$(_mux_ws_ref "$task_session" 2>/dev/null || true)"
-        if [[ "$resolved_workspace" =~ ^[0-9A-Fa-f-]{36}$ ]]; then
-            resolved_workspace="$(printf '%s' "$resolved_workspace" | tr '[:upper:]' '[:lower:]')"
-        fi
-        [[ -n "$resolved_workspace" ]] && runtime_workspace_id="$resolved_workspace"
-    fi
-    runtime_write_task_session "$PROJECT_DIR" "$tid" "$runtime_workspace_id" "$workspace_title" "$task_session" "$tid"
 
     # Spawn the agent in the task workspace, working in the task directory.
     local window

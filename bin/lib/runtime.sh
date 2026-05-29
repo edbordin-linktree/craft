@@ -341,44 +341,6 @@ runtime_stage_advance() {
     runtime_stage_set "$project_dir" "$task_id" "$next" "$reason" active
 }
 
-runtime_task_session_file() {
-    local project_dir="$1" task_id="$2"
-    echo "$(runtime_task_dir "$project_dir" "$task_id")/.orchestrator/task-session.json"
-}
-
-runtime_write_task_session() {
-    local project_dir="$1" task_id="$2" workspace_id="$3" workspace_title="$4" session="$5" pane_name="$6"
-    local task_dir file
-    task_dir="$(runtime_task_dir "$project_dir" "$task_id")"
-    file="$(runtime_task_session_file "$project_dir" "$task_id")"
-    mkdir -p "$(dirname "$file")"
-    jq -n \
-        --arg task_id "$task_id" \
-        --arg workspace_id "$workspace_id" \
-        --arg workspace_title "$workspace_title" \
-        --arg project_name "$(basename "$project_dir")" \
-        --arg task_dir "$task_dir" \
-        --arg session "$session" \
-        --arg pane_name "$pane_name" \
-        '{
-          task_id: $task_id,
-          workspace_id: $workspace_id,
-          workspace_title: $workspace_title,
-          project_name: $project_name,
-          task_dir: $task_dir,
-          session: $session,
-          pane_name: $pane_name
-        }' > "$file"
-}
-
-runtime_task_session_value() {
-    local project_dir="$1" task_id="$2" key="$3"
-    local file
-    file="$(runtime_task_session_file "$project_dir" "$task_id")"
-    [[ -f "$file" ]] || return 1
-    jq -r --arg key "$key" '.[$key] // empty' "$file"
-}
-
 runtime_event_pending_dir() {
     local project_dir="$1" task_id="$2"
     echo "$(runtime_task_dir "$project_dir" "$task_id")/.orchestrator/events/pending"

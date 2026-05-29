@@ -80,11 +80,6 @@ export FAKE_CMUX_STATE="$TMPDIR/cmux-state.json"
 export CRAFT_ROOT="$REPO_ROOT"
 
 source "$REPO_ROOT/bin/lib/runtime.sh"
-runtime_write_task_session "$PROJECT_DIR" task-123 craft-project-task-123 "craft-project-task-123 · Runtime smoke" craft-project-task-123 task-123
-
-echo "task sessions"
-assert_eq "writes workspace id" "craft-project-task-123" "$(jq -r '.workspace_id' "$PROJECT_DIR/tasks/task-123/.orchestrator/task-session.json")"
-assert_eq "writes pane name" "task-123" "$(jq -r '.pane_name' "$PROJECT_DIR/tasks/task-123/.orchestrator/task-session.json")"
 
 echo ""
 echo "stage commands"
@@ -249,7 +244,7 @@ jq '.pr.cached_surface_ref = "surface:999"' "$registry" > "$tmp_json" && mv "$tm
 )
 assert_eq "focus adopts same-workspace browser" "surface:2" "$(jq -r '.pr.cached_surface_ref' "$registry")"
 
-jq '.terminal = {surface_id:"terminal", kind:"terminal", label:"Terminal", owner:"test", stage:"qa", expected_workspace_id:"craft-project-task-123", cached_surface_ref:"surface:999", status:"open"}' "$registry" > "$tmp_json" && mv "$tmp_json" "$registry"
+jq '.terminal = {surface_id:"terminal", kind:"terminal", label:"Terminal", owner:"test", stage:"qa", cached_surface_ref:"surface:999", status:"open"}' "$registry" > "$tmp_json" && mv "$tmp_json" "$registry"
 assert_false "stale non-browser is not adopted" bash -c "cd '$PROJECT_DIR' && '$REPO_ROOT/bin/craft-mux' focus task-123 terminal"
 
 echo ""
@@ -264,8 +259,7 @@ unset CMUX_WORKSPACE_ID CMUX_REMOTE_DAEMON_SLOT
 assert_eq "remote task returns structured session" "craft-project-task-remote" "$remote_session"
 remote_workspace_ref="$(_mux_ws_ref "$remote_session")"
 assert_eq "remote task resolves workspace ref" "workspace:2" "$remote_workspace_ref"
-runtime_write_task_session "$PROJECT_DIR" task-remote "$remote_workspace_ref" "craft-project-task-remote · Remote task" "$remote_session" task-remote
-assert_eq "remote task session stores workspace ref" "workspace:2" "$(jq -r '.workspace_id' "$PROJECT_DIR/tasks/task-remote/.orchestrator/task-session.json")"
+assert_false "remote task does not write task-session mapping" test -f "$PROJECT_DIR/tasks/task-remote/.orchestrator/task-session.json"
 assert_eq "remote task uses cmux ssh workspace" "craft-project-task-remote · Remote task" "$(jq -r '.windows[0].workspaces[] | select(.metadata["craft:task-id"] == "task-remote").title' "$FAKE_CMUX_STATE")"
 assert_eq "remote task metadata records dir" "$PROJECT_DIR/tasks/task-remote" "$(jq -r '.windows[0].workspaces[] | select(.metadata["craft:task-id"] == "task-remote").metadata["craft:task-dir"]' "$FAKE_CMUX_STATE")"
 (

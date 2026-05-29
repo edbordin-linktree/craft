@@ -15,7 +15,7 @@ fi
 CMUX_PREFIX="craft"
 CMUX_CRAFT_SCHEMA_VERSION="1"
 
-if ! declare -f runtime_task_session_value >/dev/null 2>&1; then
+if ! declare -f runtime_surface_put >/dev/null 2>&1; then
     # shellcheck source=bin/lib/runtime.sh
     source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/bin/lib/runtime.sh"
 fi
@@ -1099,12 +1099,9 @@ _cmux_new_browser_surface_right() {
     return 1
 }
 
-_cmux_task_workspace_id() {
+_cmux_task_workspace_label() {
     local project_dir="$1" task_id="$2"
-    local workspace_id
-    workspace_id="$(runtime_task_session_value "$project_dir" "$task_id" workspace_id 2>/dev/null || true)"
-    [[ -n "$workspace_id" ]] || workspace_id="${CMUX_PREFIX:-craft}-$(basename "$project_dir")-${task_id}"
-    echo "$workspace_id"
+    echo "${CMUX_PREFIX:-craft}-$(basename "$project_dir")-${task_id}"
 }
 
 _cmux_task_workspace_ref_for_project_dir() {
@@ -1133,10 +1130,9 @@ mux_surface_open() {
     [[ "$kind" == "browser" ]] || { echo "surface_unsupported_kind: $kind" >&2; return 2; }
     [[ -n "$url" ]] || { echo "surface open: --url is required" >&2; return 2; }
 
-    local workspace_id ws_ref sid surface_json
-    workspace_id="$(_cmux_task_workspace_id "$project_dir" "$task_id")"
+    local ws_ref sid surface_json
     ws_ref="$(_cmux_task_workspace_ref_for_project_dir "$project_dir" "$task_id" 2>/dev/null || true)"
-    [[ -n "$ws_ref" ]] || { echo "workspace_not_found: $workspace_id" >&2; return 1; }
+    [[ -n "$ws_ref" ]] || { echo "workspace_not_found: $(_cmux_task_workspace_label "$project_dir" "$task_id")" >&2; return 1; }
 
     sid="$(_cmux_ensure_surface "$ws_ref" "$surface_id" "$kind" "$surface_id" \
         --title "$label" \
@@ -1153,11 +1149,9 @@ mux_surface_open() {
         --arg url "$url" \
         --arg url_match "$url_match" \
         --arg placement "$placement" \
-        --arg expected_workspace_id "$workspace_id" \
         --arg cached_surface_ref "$sid" \
         '{surface_id:$surface_id, kind:$kind, label:$label, owner:$owner, stage:$stage,
-          url:$url, url_match:$url_match, expected_workspace_id:$expected_workspace_id,
-          cached_surface_ref:$cached_surface_ref, status:"open"}
+          url:$url, url_match:$url_match, cached_surface_ref:$cached_surface_ref, status:"open"}
           | if $placement != "" then .placement = $placement else . end')"
     runtime_surface_put "$project_dir" "$task_id" "$surface_json"
     echo "$sid"
@@ -1165,15 +1159,13 @@ mux_surface_open() {
 
 mux_surface_focus() {
     local project_dir="$1" task_id="$2" surface_id="$3"
-    local workspace_id ws_ref surface kind url url_match cached found recorded
+    local ws_ref surface kind url url_match cached found recorded
     surface="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id" 2>/dev/null)" || {
         echo "surface_not_found: $surface_id" >&2
         return 4
     }
-    workspace_id="$(jq -r '.expected_workspace_id // empty' <<< "$surface")"
-    [[ -n "$workspace_id" ]] || workspace_id="$(_cmux_task_workspace_id "$project_dir" "$task_id")"
     ws_ref="$(_cmux_task_workspace_ref_for_project_dir "$project_dir" "$task_id" 2>/dev/null || true)"
-    [[ -n "$ws_ref" ]] || { echo "workspace_not_found: $workspace_id" >&2; return 1; }
+    [[ -n "$ws_ref" ]] || { echo "workspace_not_found: $(_cmux_task_workspace_label "$project_dir" "$task_id")" >&2; return 1; }
     kind="$(jq -r '.kind // "browser"' <<< "$surface")"
 
     recorded="$(_cmux_surface_from_metadata "$ws_ref" "$surface_id" 2>/dev/null || true)"
@@ -1216,10 +1208,8 @@ mux_surface_focus() {
 
 mux_surface_close() {
     local project_dir="$1" task_id="$2" surface_id="$3"
-    local surface workspace_id ws_ref cached
+    local surface ws_ref cached
     surface="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id" 2>/dev/null)" || return 0
-    workspace_id="$(jq -r '.expected_workspace_id // empty' <<< "$surface")"
-    [[ -n "$workspace_id" ]] || workspace_id="$(_cmux_task_workspace_id "$project_dir" "$task_id")"
     ws_ref="$(_cmux_task_workspace_ref_for_project_dir "$project_dir" "$task_id" 2>/dev/null || true)"
     cached="$(jq -r '.cached_surface_ref // empty' <<< "$surface")"
     if [[ -n "$ws_ref" ]]; then
@@ -1227,8 +1217,6 @@ mux_surface_close() {
         if [[ -n "$cached" ]] && _cmux_surface_alive_in_workspace "$ws_ref" "$cached"; then
             cmux close-surface --workspace "$ws_ref" --surface "$cached" >/dev/null 2>&1 || true
         fi
-    elif [[ -n "$cached" ]]; then
-        cmux close-surface --surface "$cached" >/dev/null 2>&1 || true
     fi
     runtime_surface_patch_ref "$project_dir" "$task_id" "$surface_id" "$cached" closed 2>/dev/null || true
 }

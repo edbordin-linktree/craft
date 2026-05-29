@@ -110,7 +110,6 @@ export FAKE_CMUX_STATE="$TMPDIR/cmux-state.json"
 export CRAFT_ROOT="$REPO_ROOT"
 
 source "$REPO_ROOT/bin/lib/runtime.sh"
-runtime_write_task_session "$PROJECT_DIR" task-123 craft-project-task-123 "craft-project-task-123" craft-project-task-123 task-123
 
 echo "orchestrator surface scripts"
 (
@@ -146,7 +145,6 @@ jq '."buildkite-status" = {
       stage: "pr_review",
       url: "http://127.0.0.1:27435/pr/example/repo/7",
       url_match: "prefix",
-      expected_workspace_id: "craft-project-task-123",
       cached_surface_ref: "surface:77",
       status: "open"
     }' \

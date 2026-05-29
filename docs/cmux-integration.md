@@ -52,8 +52,8 @@ Remote validation notes from the `local/remote-workspace-snapshots` fork:
   known detached targets.
 - Remote smoke from an attached orchestrator workspace confirmed Craft creates
   task workspaces through `cmux ssh` and records task metadata on the resulting
-  remote workspace. Runtime task-session files store the actual cmux workspace
-  UUID/ref, while the legacy `session` field remains the structured Craft name.
+  remote workspace. Craft no longer writes task-session workspace mappings;
+  helpers resolve task workspaces from cmux metadata on demand.
 - Detached fallback smoke confirmed `cmux ssh <same-host> --cwd ... --json`
   creates detached task snapshots, then metadata writes, tree reads, terminal
   sends, browser surface creation, status set/list, and cleanup work against
