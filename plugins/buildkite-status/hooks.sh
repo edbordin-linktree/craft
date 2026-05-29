@@ -27,9 +27,7 @@ _bk_status_close_surface() {
     )
 }
 
-on_stage_start() {
-    craft_hook_parse_stage_args "$@"
-    [[ "$STAGE" == "pr_review" || "$STAGE" == "complete" ]] || return 0
+_bk_status_show_for_task() {
     local worktree pr_url
     worktree="$(craft_hook_primary_worktree_for_task "$TASK_DIR" 2>/dev/null || true)"
     [[ -n "$worktree" && -n "$TASK_FILE" ]] || return 0
@@ -39,6 +37,18 @@ on_stage_start() {
         cd "$worktree" || exit 0
         "$PLUGIN_DIR/scripts/show-build-status" "$pr_url" >/dev/null 2>&1 || true
     )
+}
+
+on_stage_start() {
+    craft_hook_parse_stage_args "$@"
+    [[ "$STAGE" == "pr_review" || "$STAGE" == "complete" ]] || return 0
+    _bk_status_show_for_task
+}
+
+on_stage_resume() {
+    craft_hook_parse_stage_args "$@"
+    [[ "$STAGE" == "pr_review" || "$STAGE" == "complete" ]] || return 0
+    _bk_status_show_for_task
 }
 
 on_task_state_after() {

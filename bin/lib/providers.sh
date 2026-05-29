@@ -91,6 +91,32 @@ provider_task_cmd() {
     esac
 }
 
+# Build the command to resume an existing agent conversation for a task.
+# The prompt is intentionally a short resume instruction owned by the caller;
+# this function only maps the abstract operation onto each agent CLI.
+# Usage: provider_task_resume_cmd <provider> <prompt_file> <work_dir> [model]
+provider_task_resume_cmd() {
+    local provider="$1" prompt_file="$2" work_dir="$3" model="${4:-}"
+
+    local flags env
+    flags=$(provider_flags "$provider" "$model")
+    env=$(_provider_env_setup)
+
+    case "$provider" in
+        claude)
+            echo "cd '${work_dir}' && ${env} && claude --continue${flags:+ $flags} \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
+            ;;
+        codex)
+            echo "cd '${work_dir}' && ${env} && codex${flags:+ $flags} resume --last \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
+            ;;
+        *)
+            # Generic providers do not have a known resume primitive; use the
+            # normal task launch contract so the caller still gets a pane.
+            provider_task_cmd "$provider" "$prompt_file" "$work_dir" "$model"
+            ;;
+    esac
+}
+
 # Build the tmux command to launch an architect session
 # Usage: provider_architect_cmd <provider> <skill_file> <work_dir>
 provider_architect_cmd() {

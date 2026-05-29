@@ -16,20 +16,24 @@ _diffhub_ready() {
     curl -fsS "${url%/}/api/health" >/dev/null 2>&1
 }
 
+_diffhub_start_local_review() {
+    local worktree
+    worktree="$(_diffhub_worktree)"
+    [[ -n "$worktree" ]] || return 0
+    (
+        cd "$worktree" || exit 0
+        if ! _diffhub_ready "$worktree"; then
+            "$PLUGIN_DIR/scripts/launch-diffhub" --repo "$worktree" >/dev/null 2>&1 || true
+        fi
+    )
+    craft_hook_start_helper_once "$worktree" "$PLUGIN_DIR/scripts/babysit-diffhub" babysit-diffhub --worktree "$worktree"
+}
+
 on_stage_start() {
     craft_hook_parse_stage_args "$@"
     case "$STAGE" in
         local_review)
-            local worktree
-            worktree="$(_diffhub_worktree)"
-            [[ -n "$worktree" ]] || return 0
-            (
-                cd "$worktree" || exit 0
-                if ! _diffhub_ready "$worktree"; then
-                    "$PLUGIN_DIR/scripts/launch-diffhub" --repo "$worktree" >/dev/null 2>&1 || true
-                fi
-            )
-            craft_hook_start_helper_once "$worktree" "$PLUGIN_DIR/scripts/babysit-diffhub" babysit-diffhub --worktree "$worktree"
+            _diffhub_start_local_review
             ;;
         cleanup|blocked|complete)
             local worktree
@@ -38,6 +42,12 @@ on_stage_start() {
             "$PLUGIN_DIR/scripts/cleanup-review-stage" --repo "$worktree" >/dev/null 2>&1 || true
             ;;
     esac
+}
+
+on_stage_resume() {
+    craft_hook_parse_stage_args "$@"
+    [[ "$STAGE" == "local_review" ]] || return 0
+    _diffhub_start_local_review
 }
 
 on_stage_end() {

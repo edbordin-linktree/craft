@@ -68,6 +68,21 @@ spawn_task_pane() {
     echo "$window_id"
 }
 
+resume_task_pane() {
+    local session="$1" task_id="$2" prompt_file="$3" work_dir="$4"
+    local agent="${5:-claude}"
+    local agent_model="${6:-}"
+
+    local cmd
+    cmd=$(provider_task_resume_cmd "$agent" "$prompt_file" "$work_dir" "$agent_model")
+
+    local window_id
+    window_id=$(tmux new-window -t "${session}:" -n "$task_id" -P -F '#{window_id}')
+    tmux send-keys -t "${session}:${task_id}" "$cmd" Enter
+
+    echo "$window_id"
+}
+
 # Check if a task pane is still running
 # Returns 0 if running, 1 if finished
 pane_is_running() {
@@ -146,10 +161,16 @@ mux_surface_focus() {
 
 mux_task_workspace_state() {
     local _project_dir="$1" task_id="$2" surface_id="${3:-agent}"
+    local session="${TMUX_SESSION}-$(basename "$_project_dir")" exists=false
+    if tmux has-session -t "$session" 2>/dev/null \
+        && tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -q "^${task_id}$"; then
+        exists=true
+    fi
     jq -n \
         --arg task_id "$task_id" \
         --arg surface_ref "$surface_id" \
-        '{task_id:$task_id, exists:true, attached:true, detached:false, surface_ref:$surface_ref, surface_exists:true}'
+        --argjson exists "$exists" \
+        '{task_id:$task_id, exists:$exists, attached:$exists, detached:false, surface_ref:$surface_ref, surface_exists:$exists}'
 }
 
 mux_surface_close() {

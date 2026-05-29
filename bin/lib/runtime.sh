@@ -185,6 +185,27 @@ runtime_stage_set() {
     echo "$stage"
 }
 
+runtime_stage_resume() {
+    local project_dir="$1" task_id="$2" reason="$3"
+    local task_file task_dir status workflow options_json stage
+    task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; return 1; }
+    task_dir="$(runtime_task_dir "$project_dir" "$task_id")"
+    status="$(runtime_task_status "$task_file")"
+    workflow="$(workflow_task_workflow "$task_file")"
+    options_json="$(workflow_task_options_json "$task_file")"
+    stage="$(runtime_task_stage "$task_file" || true)"
+    if [[ -z "$stage" ]]; then
+        stage="$(runtime_default_stage_for_status "$status")"
+    fi
+    [[ -n "$stage" ]] || { echo "stage_not_set: $task_id" >&2; return 2; }
+    runtime_hook "$project_dir" on_stage_resume \
+        --stage "$stage" --task-id "$task_id" --task-file "$task_file" \
+        --task-dir "$task_dir" --status "$status" --reason "$reason" \
+        --workflow "$workflow" --workflow-options-json "$options_json"
+
+    echo "$stage"
+}
+
 runtime_default_stage_for_status() {
     local status="$1"
     case "$status" in

@@ -186,6 +186,7 @@ commands. Do not use the npm package named `linear`, which is unrelated.
 | `on_milestone` | All tasks in a milestone completed | `--project-dir PATH --milestone ID` |
 | `on_stage_end` | Before Craft leaves the previous task stage | `--project-dir PATH --stage PREVIOUS --next-stage NEXT --task-id ID --task-file PATH --task-dir PATH --status STATUS --reason REASON --workflow NAME --workflow-options-json JSON` |
 | `on_stage_start` | After Craft enters the new task stage | `--project-dir PATH --stage STAGE --previous-stage PREVIOUS --task-id ID --task-file PATH --task-dir PATH --status STATUS --reason REASON --workflow NAME --workflow-options-json JSON` |
+| `on_stage_resume` | After Craft recreates a missing task agent surface without changing stage | `--project-dir PATH --stage STAGE --task-id ID --task-file PATH --task-dir PATH --status STATUS --reason REASON --workflow NAME --workflow-options-json JSON` |
 
 Task-related hooks include `--task-file`, `--task-dir`, and `--pr-url` when Craft can derive them from the queue file and project layout. Hook handlers should ignore unknown arguments so this contract can grow without breaking existing plugins.
 

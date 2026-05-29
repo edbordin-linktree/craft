@@ -239,6 +239,18 @@ cmd_task() {
                     _require_reason "$reason"
                     runtime_stage_advance "$project_dir" "$task_id" "$reason" >/dev/null
                     ;;
+                resume)
+                    local task_id="${1:?task id required}" reason=""
+                    shift || true
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --reason) reason="${2:-}"; shift 2 ;;
+                            *) echo "craft task stage resume: unknown arg: $1" >&2; exit 2 ;;
+                        esac
+                    done
+                    _require_reason "$reason"
+                    runtime_stage_resume "$project_dir" "$task_id" "$reason" >/dev/null
+                    ;;
                 block)
                     local task_id="${1:?task id required}" reason=""
                     shift || true
@@ -263,7 +275,7 @@ cmd_task() {
                     runtime_stage_set "$project_dir" "$task_id" complete "$reason" complete >/dev/null
                     ;;
                 *)
-                    echo "Usage: craft task stage get|set|advance|block|complete ..." >&2
+                    echo "Usage: craft task stage get|set|advance|resume|block|complete ..." >&2
                     exit 2
                     ;;
             esac

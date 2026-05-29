@@ -137,6 +137,7 @@ Use only these lifecycle hooks:
 ```bash
 on_stage_start --stage <stage> ...
 on_stage_end   --stage <stage> ...
+on_stage_resume --stage <stage> ...
 ```
 
 There are no `on_stage_before` or `on_stage_after` hooks.
@@ -158,6 +159,12 @@ Transition flow:
   "reason": "operator advanced"
 }
 ```
+
+Resume flow is separate from transition flow. When the orchestrator detects
+that an already-started task no longer has an agent workspace/surface, it may
+recreate the task agent via the provider resume primitive, run
+`on_stage_resume --stage "$current"`. It must not run `on_stage_start`,
+because start hooks may launch one-shot actions such as bot reviews.
 
 `craft task stage advance` walks only the resolved happy path. It must not
 advance into failure states.

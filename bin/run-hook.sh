@@ -4,8 +4,10 @@
 # Usage:
 #   bin/run-hook.sh <hook-name> [--project-dir PATH] [args...]
 #
-# Hook names: on_started, on_waiting, on_ready, on_done, on_blocked,
-# on_milestone, on_poll, on_install.
+# Hook names include task lifecycle hooks (on_started, on_waiting, on_done),
+# stage hooks (on_stage_start, on_stage_end, on_stage_resume), polling hooks,
+# event hooks, and plugin install hooks. Plugins may ignore hooks they do not
+# implement.
 #
 # Plugins live at $CRAFT_ROOT/plugins/<plugin>/hooks.sh — shared across all
 # projects in this craft installation. The project's craft.conf controls which

@@ -80,6 +80,7 @@ export FAKE_CMUX_STATE="$TMPDIR/cmux-state.json"
 export CRAFT_ROOT="$REPO_ROOT"
 
 source "$REPO_ROOT/bin/lib/runtime.sh"
+source "$REPO_ROOT/bin/lib/providers.sh"
 
 echo ""
 echo "stage commands"
@@ -99,6 +100,15 @@ export CRAFT_HOOK_RUNNER="$hook_runner"
 assert_eq "stage set" "implement" "$(task_field "$QUEUE_DIR/in-progress/task-123.md" stage)"
 assert_eq "stage status set" "active" "$(task_field "$QUEUE_DIR/in-progress/task-123.md" stage_status)"
 assert_eq "start hook fired" "1" "$(grep -c '^on_stage_start ' "$hook_log")"
+
+start_hooks_before_resume="$(grep -c '^on_stage_start ' "$hook_log")"
+(
+    cd "$PROJECT_DIR" || exit 1
+    "$REPO_ROOT/bin/craft" task stage resume task-123 --reason "agent surface recreated"
+)
+assert_eq "resume hook fired" "1" "$(grep -c '^on_stage_resume ' "$hook_log")"
+assert_eq "resume does not fire start hook" "$start_hooks_before_resume" "$(grep -c '^on_stage_start ' "$hook_log")"
+assert_eq "resume preserves stage" "implement" "$(task_field "$QUEUE_DIR/in-progress/task-123.md" stage)"
 
 (
     cd "$PROJECT_DIR" || exit 1
@@ -151,6 +161,13 @@ assert_eq "wait-team preserves stage" "implement" "$(task_field "$QUEUE_DIR/in-p
 )
 assert_eq "unwait clears marker" "" "$(task_field "$QUEUE_DIR/in-progress/task-123.md" waiting_on)"
 assert_eq "unwait preserves stage" "implement" "$(task_field "$QUEUE_DIR/in-progress/task-123.md" stage)"
+
+echo ""
+echo "provider resume commands"
+claude_resume_cmd="$(provider_task_resume_cmd claude "$TMPDIR/prompt.txt" "$PROJECT_DIR/tasks/task-123" "sonnet")"
+codex_resume_cmd="$(provider_task_resume_cmd codex "$TMPDIR/prompt.txt" "$PROJECT_DIR/tasks/task-123" "gpt-5")"
+assert_true "claude uses continue resume" bash -c "grep -q 'claude --continue' <<< \"\$1\"" _ "$claude_resume_cmd"
+assert_true "codex uses resume --last" bash -c "grep -q 'codex.*resume --last' <<< \"\$1\"" _ "$codex_resume_cmd"
 
 echo ""
 echo "event queue"

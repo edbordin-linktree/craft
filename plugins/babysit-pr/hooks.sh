@@ -40,6 +40,16 @@ on_stage_start() {
     esac
 }
 
+on_stage_resume() {
+    craft_hook_parse_stage_args "$@"
+    [[ "$STAGE" == "pr_review" ]] || return 0
+    local worktree pr_url
+    worktree="$(_pr_review_worktree)"
+    [[ -n "$worktree" && -n "$TASK_FILE" ]] || return 0
+    pr_url="$(craft_hook_task_frontmatter_field "$TASK_FILE" pr 2>/dev/null || true)"
+    _pr_review_start "$worktree" "$pr_url"
+}
+
 on_stage_end() {
     craft_hook_parse_stage_args "$@"
     [[ "$STAGE" == "pr_review" ]] || return 0

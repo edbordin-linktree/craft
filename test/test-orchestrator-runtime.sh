@@ -239,6 +239,61 @@ assert_eq "terminal event type" "pr_review" "$(jq -r '.[0].type' <<< "$terminal"
 assert_eq "terminal event keeps snapshot" "MERGED" "$(jq -r '.[0].payload.snapshot.state' <<< "$terminal")"
 
 echo ""
+echo "orchestrator task resume"
+RESUME_PROJECT="$TMPDIR/resume-project"
+RESUME_QUEUE="$RESUME_PROJECT/queue"
+RESUME_TASK_DIR="$RESUME_PROJECT/tasks/task-resume"
+RESUME_STATE="$TMPDIR/cmux-resume-state.json"
+RESUME_HOOK_LOG="$TMPDIR/resume-hooks.log"
+mkdir -p "$RESUME_QUEUE"/{drafts,pending,approved,in-progress,local-review,waiting,done,blocked,archive}
+mkdir -p "$RESUME_TASK_DIR"
+cat > "$RESUME_PROJECT/craft.conf" <<'EOF'
+MULTIPLEXER=cmux
+PLUGINS=
+DEFAULT_AGENT=claude
+EOF
+cat > "$RESUME_QUEUE/in-progress/task-resume.md" <<'EOF'
+---
+id: task-resume
+status: in-progress
+stage: implement
+stage_status: active
+repos: [craft]
+branch: resume/runtime
+---
+
+## Summary
+Resume missing workspace fixture.
+EOF
+cat > "$TMPDIR/resume-hook-runner" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$RESUME_HOOK_LOG"
+EOF
+chmod +x "$TMPDIR/resume-hook-runner"
+(
+    export FAKE_CMUX_STATE="$RESUME_STATE"
+    export CRAFT_HOOK_RUNNER="$TMPDIR/resume-hook-runner"
+    export CRAFT_ROOT="$REPO_ROOT"
+    export CRAFT_INNER_SESSION=1
+    unset DASHBOARD_CMD CRAFT_DASHBOARD_PORT CRAFT_DASHBOARD_URL
+    "$REPO_ROOT/bin/orchestrator.sh" "$RESUME_PROJECT" --max-parallel 1 --poll-interval 1 \
+        > "$TMPDIR/resume-orchestrator.log" 2>&1 &
+    orch_pid=$!
+    sleep 6
+    kill -TERM "$orch_pid" 2>/dev/null || true
+    wait "$orch_pid" 2>/dev/null || true
+)
+assert_eq "resume created task workspace" "1" \
+    "$(jq '[.windows[].workspaces[] | select(.metadata["craft:project-id"] == "resume-project" and .metadata["craft:task-id"] == "task-resume")] | length' "$RESUME_STATE")"
+assert_eq "resume records agent surface metadata" "agent" \
+    "$(jq -r '.windows[].workspaces[] | select(.metadata["craft:project-id"] == "resume-project" and .metadata["craft:task-id"] == "task-resume").panes[].surfaces[] | select(.metadata["craft:semantic"] == "agent").metadata["craft:semantic"]' "$RESUME_STATE" | head -1)"
+assert_true "resume uses provider resume command" \
+    bash -c "jq -e '.sent[] | select(.text | contains(\"claude --continue\"))' '$RESUME_STATE'"
+assert_eq "resume hook fired from orchestrator" "1" "$(grep -c '^on_stage_resume ' "$RESUME_HOOK_LOG")"
+assert_eq "resume did not fire stage start hook" "0" "$(grep -c '^on_stage_start ' "$RESUME_HOOK_LOG" || true)"
+assert_true "resume appends work log" grep -q '^### Agent Session Resumed' "$RESUME_QUEUE/in-progress/task-resume.md"
+
+echo ""
 echo "normal workflow docs"
 assert_true "normal work-task docs do not reference await scripts" bash -c "! grep -Eq 'await-diffhub-review|await-pr-event' '$REPO_ROOT/templates/.claude/commands/work-task.md'"
 assert_true "normal work-task docs render resolved workflow" grep -q 'craft workflow render' "$REPO_ROOT/templates/.claude/commands/work-task.md"

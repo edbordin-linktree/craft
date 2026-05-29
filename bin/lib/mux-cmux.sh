@@ -1172,6 +1172,28 @@ spawn_task_pane() {
     echo "$surface_id"
 }
 
+resume_task_pane() {
+    local session="$1" task_id="$2" prompt_file="$3" work_dir="$4"
+    local agent="${5:-claude}"
+    local agent_model="${6:-}"
+
+    local ws_ref
+    ws_ref=$(_mux_ws_ref "$session")
+    [[ -n "$ws_ref" ]] || { echo "resume_task_pane: no workspace titled '$session'" >&2; return 1; }
+
+    local cmd
+    cmd=$(provider_task_resume_cmd "$agent" "$prompt_file" "$work_dir" "$agent_model")
+
+    local surface_id
+    surface_id="$(_cmux_ensure_surface "$ws_ref" "agent" "terminal" "agent" \
+        --title "$task_id" \
+        --command "$cmd" \
+        --agent "$agent" \
+        --direction down)" || return 1
+
+    echo "$surface_id"
+}
+
 _mux_surface_by_tab_title() {
     local ws_ref="$1" semantic="$2" surface_json
     surface_json="$(_cmux_surface_from_metadata "$ws_ref" "$semantic" 2>/dev/null || true)"

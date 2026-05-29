@@ -19,6 +19,10 @@
 #     → Create a new pane/surface and run the agent command in it.
 #       Returns a pane/surface identifier.
 #
+#   resume_task_pane <session> <task-id> <prompt-file> <work-dir> [agent]
+#     → Create a new pane/surface and run the provider's resume command in it.
+#       Returns a pane/surface identifier.
+#
 #   pane_is_running <session> <task-id>
 #     → Returns 0 if the task's pane is still alive, 1 if finished.
 #
