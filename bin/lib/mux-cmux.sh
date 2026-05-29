@@ -699,11 +699,12 @@ _cmux_pick_dashboard_port() {
 _cmux_ensure_dashboard_server() {
     local project_dir="$1"
     local state_dir="$project_dir/.state/dashboard"
+    local run_dir="$project_dir/.orchestrator"
     local pid_file="$state_dir/pid"
     local port_file="$state_dir/port"
     local url_file="$state_dir/url"
-    local log_file="$state_dir/server.log"
-    local pid port url
+    local log_file="$run_dir/dashboard.log"
+    local run_bg pid port url
 
     [[ -n "${DASHBOARD_CMD:-}" ]] || return 1
     command -v curl >/dev/null 2>&1 || {
@@ -711,7 +712,7 @@ _cmux_ensure_dashboard_server() {
         return 1
     }
 
-    mkdir -p "$state_dir"
+    mkdir -p "$state_dir" "$run_dir"
 
     if [[ -f "$pid_file" && -f "$port_file" ]]; then
         pid="$(cat "$pid_file" 2>/dev/null || true)"
@@ -727,15 +728,21 @@ _cmux_ensure_dashboard_server() {
     port="$(_cmux_pick_dashboard_port)"
     url="http://127.0.0.1:${port}"
 
-    # Keep Bun as a direct child of the orchestrator process so the dashboard
-    # can still call the cmux CLI for focus actions.
+    run_bg="$(_cmux_craft_root)/bin/run-bg"
     (
-        export PROJECT_DIR CRAFT_ROOT
+        cd "$project_dir" || exit 1
+        export PROJECT_DIR="$project_dir" CRAFT_ROOT="${CRAFT_ROOT:-$(_cmux_craft_root)}"
         export CRAFT_DASHBOARD_PORT="$port"
         export CRAFT_DASHBOARD_URL="$url"
-        bash -lc "$DASHBOARD_CMD"
-    ) >"$log_file" 2>&1 &
-    echo "$!" > "$pid_file"
+        "$run_bg" stop dashboard >/dev/null 2>&1 || true
+        "$run_bg" --name dashboard bash -lc "$DASHBOARD_CMD"
+    ) >/dev/null 2>&1 || {
+        echo "ensure_session: failed to launch web dashboard via run-bg (see $log_file)" >&2
+        return 1
+    }
+    if [[ -f "$run_dir/dashboard.pid" ]]; then
+        cat "$run_dir/dashboard.pid" > "$pid_file"
+    fi
 
     for _ in $(seq 1 30); do
         if _cmux_dashboard_ready "$port"; then

@@ -382,6 +382,41 @@ assert_file_contains "task dir value" "$hook_args" "$PROJECT_DIR/tasks/task-123"
 assert_file_contains "pr url flag" "$hook_args" "--pr-url"
 assert_file_contains "pr url value" "$hook_args" "https://github.com/example/repo/pull/1"
 
+echo ""
+echo "run-bg lifecycle"
+RUN_BG_WORK="$TMPDIR/run-bg-work"
+mkdir -p "$RUN_BG_WORK"
+cat > "$RUN_BG_WORK/helper.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$$" > helper.pid
+trap '' HUP TERM
+while true; do sleep 5; done
+EOF
+chmod +x "$RUN_BG_WORK/helper.sh"
+(
+    cd "$RUN_BG_WORK" || exit 1
+    "$REPO_ROOT/bin/run-bg" --name helper ./helper.sh >/dev/null
+)
+for _ in 1 2 3 4 5; do
+    [[ -s "$RUN_BG_WORK/.orchestrator/helper.child.pid" ]] && break
+    sleep 0.1
+done
+assert_true "run-bg writes runner pid" test -s "$RUN_BG_WORK/.orchestrator/helper.pid"
+assert_true "run-bg writes child pid" test -s "$RUN_BG_WORK/.orchestrator/helper.child.pid"
+assert_true "run-bg status sees runner" bash -c "cd '$RUN_BG_WORK' && '$REPO_ROOT/bin/run-bg' status helper >/dev/null"
+runner_pid="$(cat "$RUN_BG_WORK/.orchestrator/helper.pid")"
+child_pid="$(cat "$RUN_BG_WORK/.orchestrator/helper.child.pid")"
+assert_true "run-bg runner is alive" kill -0 "$runner_pid"
+assert_true "run-bg child is alive" kill -0 "$child_pid"
+(
+    cd "$RUN_BG_WORK" || exit 1
+    "$REPO_ROOT/bin/run-bg" stop helper >/dev/null
+)
+sleep 0.2
+assert_false "run-bg stop clears status" bash -c "cd '$RUN_BG_WORK' && '$REPO_ROOT/bin/run-bg' status helper >/dev/null"
+assert_false "run-bg stop kills runner" kill -0 "$runner_pid"
+assert_false "run-bg stop kills child" kill -0 "$child_pid"
+
 # --- Summary ---
 
 echo ""
