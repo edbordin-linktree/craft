@@ -166,12 +166,19 @@ _cmux_tree_json() {
 }
 
 _cmux_project_workspace_ref() {
-    local project_id="$1" candidate task_id
+    local project_id="$1" candidate task_id workspace_ref
     while IFS= read -r candidate; do
         [[ -n "$candidate" ]] || continue
         task_id="$(_cmux_metadata_get "$candidate" "craft:task-id" 2>/dev/null || true)"
         if [[ -z "$task_id" ]]; then
-            echo "$candidate"
+            workspace_ref="$(_cmux_tree_json "$candidate" \
+                | jq -r --arg project "$project_id" '
+                    .windows[].workspaces[]
+                    | select((.metadata["craft:project-id"] // "") == $project)
+                    | select((.metadata["craft:task-id"] // "") == "")
+                    | .ref // .workspace_ref // .workspace_id // .id // empty
+                ' 2>/dev/null | head -1)"
+            echo "${workspace_ref:-$candidate}"
             return 0
         fi
     done < <(
@@ -1115,8 +1122,17 @@ ensure_session() {
     local title="${CMUX_PREFIX}-${project_name}"
 
     [[ -n "${PROJECT_NAME:-}" ]] || PROJECT_NAME="$project_name"
-    local ws_ref
-    ws_ref="$(_cmux_project_workspace_ref "$project_name" 2>/dev/null || true)"
+    local ws_ref="" existing_project="" existing_task=""
+    if [[ -n "${CRAFT_INNER_SESSION:-}" ]] && _cmux_running_in_surface \
+        && _cmux_surface_exists "$CMUX_WORKSPACE_ID" "$CMUX_SURFACE_ID"; then
+        existing_project="$(_cmux_metadata_get "$CMUX_WORKSPACE_ID" "craft:project-id" 2>/dev/null || true)"
+        existing_task="$(_cmux_metadata_get "$CMUX_WORKSPACE_ID" "craft:task-id" 2>/dev/null || true)"
+        if [[ -z "$existing_task" && ( -z "$existing_project" || "$existing_project" == "$project_name" ) ]]; then
+            ws_ref="$CMUX_WORKSPACE_ID"
+        fi
+    fi
+
+    [[ -n "$ws_ref" ]] || ws_ref="$(_cmux_project_workspace_ref "$project_name" 2>/dev/null || true)"
 
     if [[ -z "$ws_ref" ]]; then
         local raw

@@ -308,6 +308,11 @@ CMUX_WORKSPACE_ID=workspace:adopt CMUX_SURFACE_ID=surface:adopt \
     mux_adopt_current_orchestrator_workspace adopted "$PROJECT_DIR" >/dev/null
 assert_eq "current cmux workspace adopted for orchestrator" "adopted" "$(jq -r '.windows[0].workspaces[] | select(.ref == "workspace:adopt").metadata["craft:project-id"]' "$FAKE_CMUX_STATE")"
 assert_eq "current cmux surface recorded as orchestrator" "orchestrator" "$(jq -r '.windows[0].workspaces[] | select(.ref == "workspace:adopt").panes[].surfaces[] | select(.ref == "surface:adopt").metadata["craft:semantic"]' "$FAKE_CMUX_STATE")"
+workspace_count_before="$(jq '[.windows[0].workspaces[]] | length' "$FAKE_CMUX_STATE")"
+CMUX_WORKSPACE_ID=workspace:adopt CMUX_SURFACE_ID=surface:adopt CRAFT_INNER_SESSION=1 \
+    ensure_session adopted "$PROJECT_DIR" >/dev/null
+assert_eq "inner cmux ensure reuses current workspace" "$workspace_count_before" "$(jq '[.windows[0].workspaces[]] | length' "$FAKE_CMUX_STATE")"
+unset CMUX_WORKSPACE_ID CMUX_SURFACE_ID CRAFT_INNER_SESSION PROJECT_NAME SESSION
 jq '
   .windows[0].workspaces += [{
     id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -470,6 +475,8 @@ assert_eq "workflow default model selected" "opus" "$(task_agent_model "$DISCOVE
 
 echo ""
 echo "dashboard command"
+rm -rf "$PROJECT_DIR/.state/dashboard"
+rm -f "$PROJECT_DIR"/.orchestrator/dashboard.* "$PROJECT_DIR/dashboard-invoked"
 for _ in $(seq 1 20); do
     CRAFT_DASHBOARD_PORT=$((30000 + RANDOM % 20000))
     if ! curl -sS -o /dev/null -m 1 "http://127.0.0.1:${CRAFT_DASHBOARD_PORT}/healthz" 2>/dev/null; then
@@ -479,7 +486,9 @@ done
 export CRAFT_DASHBOARD_PORT
 export DASHBOARD_CMD='printf "%s %s\n" "$PROJECT_DIR" "$CRAFT_DASHBOARD_PORT" > "$PROJECT_DIR/dashboard-invoked"'
 source "$REPO_ROOT/bin/lib/mux-cmux.sh"
-_cmux_ensure_dashboard_server "$PROJECT_DIR" >/dev/null
+CMUX_WORKSPACE_ID=workspace:dashboard-test CMUX_SURFACE_ID=surface:dashboard-test \
+    _cmux_ensure_dashboard_server "$PROJECT_DIR" >/dev/null
+unset CMUX_WORKSPACE_ID CMUX_SURFACE_ID
 for _ in $(seq 1 20); do
     [[ -f "$PROJECT_DIR/dashboard-invoked" ]] && break
     sleep 0.1
