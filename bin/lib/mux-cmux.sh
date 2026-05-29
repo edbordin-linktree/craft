@@ -109,7 +109,8 @@ _cmux_metadata_get() {
     raw="$(cmux metadata get --workspace "$ws_ref" "$key" --json 2>/dev/null)" || return 1
     jq -r '
         def value:
-          if type == "object" and has("value") then .value
+          if type == "object" and .exists == false then empty
+          elif type == "object" and has("value") then .value
           elif type == "object" and has("entry") then .entry.value
           else .
           end;
