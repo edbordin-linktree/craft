@@ -61,7 +61,6 @@ mkdir -p "$QUEUE_DIR"/{drafts,pending,approved,in-progress,done,blocked,archive}
 cat > "$QUEUE_DIR/pending/task-001.md" << 'EOF'
 ---
 id: task-001
-type: pr
 milestone: m1-foundation
 status: pending
 depends_on: []
@@ -84,7 +83,6 @@ EOF
 cat > "$QUEUE_DIR/pending/task-002.md" << 'EOF'
 ---
 id: task-002
-type: pr
 milestone: m1-foundation
 status: pending
 depends_on: [task-001]
@@ -101,7 +99,6 @@ EOF
 cat > "$QUEUE_DIR/approved/task-003.md" << 'EOF'
 ---
 id: task-003
-type: research
 milestone: m1-foundation
 status: approved
 depends_on: []
@@ -115,7 +112,6 @@ EOF
 cat > "$QUEUE_DIR/approved/task-004.md" << 'EOF'
 ---
 id: task-004
-type: pr
 milestone: m1-foundation
 status: approved
 depends_on: [task-003]
@@ -129,22 +125,20 @@ EOF
 cat > "$QUEUE_DIR/approved/task-007.md" << 'EOF'
 ---
 id: task-007
-type: plan
-title: Parent Plan
+title: Parent Task
 milestone: m1-foundation
 status: approved
-depends_on: []
+depends_on: [task-never]
 repos: []
-branch: plan/parent
+branch: parent/task
 ---
 
-# Parent plan
+# Parent task
 EOF
 
 cat > "$QUEUE_DIR/drafts/task-008.md" << 'EOF'
 ---
 id: task-008
-type: pr
 milestone: m1-foundation
 status: draft
 parent: task-007
@@ -160,18 +154,16 @@ EOF
 
 echo "task_field"
 assert_eq "extracts id" "task-001" "$(task_field "$QUEUE_DIR/pending/task-001.md" "id")"
-assert_eq "extracts type" "pr" "$(task_field "$QUEUE_DIR/pending/task-001.md" "type")"
 assert_eq "extracts milestone" "m1-foundation" "$(task_field "$QUEUE_DIR/pending/task-001.md" "milestone")"
 assert_eq "extracts status" "pending" "$(task_field "$QUEUE_DIR/pending/task-001.md" "status")"
 assert_eq "extracts branch" "feat/add-auth" "$(task_field "$QUEUE_DIR/pending/task-001.md" "branch")"
 assert_eq "returns empty for missing field" "" "$(task_field "$QUEUE_DIR/pending/task-001.md" "nonexistent")"
 
 echo ""
-echo "task_id / task_status / task_milestone / task_type"
+echo "task_id / task_status / task_milestone"
 assert_eq "task_id" "task-001" "$(task_id "$QUEUE_DIR/pending/task-001.md")"
 assert_eq "task_status" "pending" "$(task_status "$QUEUE_DIR/pending/task-001.md")"
 assert_eq "task_milestone" "m1-foundation" "$(task_milestone "$QUEUE_DIR/pending/task-001.md")"
-assert_eq "task_type" "pr" "$(task_type "$QUEUE_DIR/pending/task-001.md")"
 
 echo ""
 echo "task_depends_on"
@@ -217,7 +209,7 @@ assert_eq "picks task after dep met" "task-004" "$(task_id "$next")"
 
 rm "$QUEUE_DIR/approved/task-004.md"
 next=$(next_ready_task "$QUEUE_DIR" || true)
-assert_eq "skips plan tasks" "" "$next"
+assert_eq "skips tasks with unmet deps" "" "$next"
 
 echo ""
 echo "promote_draft_task"
@@ -230,7 +222,6 @@ echo "move_task"
 cat > "$QUEUE_DIR/approved/task-009.md" << 'EOF'
 ---
 id: task-009
-type: pr
 milestone: m1-foundation
 status: approved
 depends_on: []
@@ -243,7 +234,7 @@ EOF
 new_file=$(move_task "$QUEUE_DIR/approved/task-009.md" "$QUEUE_DIR/in-progress" "in-progress")
 assert_eq "moves file" "$QUEUE_DIR/in-progress/task-009.md" "$new_file"
 assert_eq "updates status" "in-progress" "$(task_status "$new_file")"
-assert_eq "approved keeps plan only" "1" "$(count_tasks "$QUEUE_DIR/approved")"
+assert_eq "approved keeps parent only" "1" "$(count_tasks "$QUEUE_DIR/approved")"
 
 echo ""
 echo "append_work_log"
@@ -255,7 +246,6 @@ echo "move_task timestamps"
 cat > "$QUEUE_DIR/approved/task-005.md" << 'EOF'
 ---
 id: task-005
-type: pr
 milestone: m1-foundation
 status: approved
 depends_on: []
@@ -293,7 +283,6 @@ echo "move_task blocked sets one_shot false"
 cat > "$QUEUE_DIR/in-progress/task-006.md" << 'EOF'
 ---
 id: task-006
-type: pr
 milestone: m1-foundation
 status: in-progress
 depends_on: []

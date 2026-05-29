@@ -122,7 +122,6 @@ Tasks are markdown with YAML frontmatter:
 ```yaml
 ---
 id: task-001
-type: pr
 milestone: m1-foundation
 status: pending
 workflow: standard-pr
@@ -148,7 +147,6 @@ Key fields:
 | Field | Description |
 |---|---|
 | `id` | Sequential ID: `task-001`, `task-002`, etc. |
-| `type` | `pr` (creates a PR) or `research` (investigation only) |
 | `milestone` | Which milestone this belongs to, e.g. `m1-foundation` |
 | `depends_on` | Task IDs that must complete first |
 | `workflow` | Workflow preset to execute; defaults to `standard-pr` |
@@ -158,6 +156,7 @@ Key fields:
 | `branch` | Git branch name for the PR |
 | `qa` | What validation to run before creating the PR |
 | `agent` | Override the default agent for this task (optional) |
+| `agent_model` | Override the workflow or provider default model for this task (optional) |
 
 Draft tasks live in `queue/drafts/` with `status: draft`. They reserve task IDs but are not executed until promoted:
 
@@ -165,7 +164,7 @@ Draft tasks live in `queue/drafts/` with `status: draft`. They reserve task IDs 
 craft task promote-draft task-001
 ```
 
-Planning/grouping records use `type: plan` plus a human-readable `title:`. Plan tasks are never executed by the orchestrator; `parent:` on child tasks is only dashboard grouping metadata. Use `depends_on` for real execution dependencies.
+Task behavior comes from `workflow:`. Parent records can use a human-readable `title:` and child tasks can point at them with `parent:` for dashboard grouping. Keep execution ordering in `depends_on`.
 
 Set `skill:` only for one-off legacy command dispatch. When `skill:` is absent, Craft renders the selected workflow preset into the launch prompt.
 

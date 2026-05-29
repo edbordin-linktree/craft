@@ -22,7 +22,7 @@ Generated task frontmatter must use the normal execution workflow. Do not set `w
 
 Task files should include:
 
-- `id`, `type: pr`, `status: pending`, `depends_on`, `repos`, `branch`, and `qa`.
+- `id`, `status: pending`, `depends_on`, `repos`, `branch`, and `qa`.
 - Optional `linear_id` only when the operator supplied one.
 - A concrete Summary, Background, Outcomes, Dependencies, Scope, Notes for the executor, and Work Log section.
 

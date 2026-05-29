@@ -288,9 +288,9 @@ run_task() {
 
     # Determine which agent provider to use (task-level override or project default)
     local agent
-    agent=$(task_agent "$new_file")
+    agent=$(task_agent "$new_file" "$PROJECT_DIR")
     local agent_model
-    agent_model=$(task_agent_model "$new_file")
+    agent_model=$(task_agent_model "$new_file" "$PROJECT_DIR")
 
     # Ensure the project workspace (orchestrator + architect) exists. Idempotent.
     ensure_session "$PROJECT_NAME" "$PROJECT_DIR" >/dev/null

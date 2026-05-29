@@ -267,7 +267,8 @@ plugins/buildkite-status/
   scripts/show-build-status
 
 plugins/planning/
-  commands/init-discoverer.md
+  workflows/discovery/workflow.conf
+  stages/discover.md
   skills/plan-reviewer/SKILL.md
 
 plugins/craft-dashboard/

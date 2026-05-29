@@ -32,11 +32,6 @@ task_milestone() {
     task_field "$1" "milestone"
 }
 
-# Get the task type from a task file
-task_type() {
-    task_field "$1" "type"
-}
-
 task_workflow() {
     local workflow
     workflow="$(task_field "$1" "workflow")"
@@ -223,9 +218,6 @@ count_tasks() {
 next_ready_task() {
     local queue_dir="$1"
     for task in $(list_tasks "$queue_dir/approved"); do
-        if [[ "$(task_type "$task")" == "plan" ]]; then
-            continue
-        fi
         if task_deps_met "$task"; then
             echo "$task"
             return 0

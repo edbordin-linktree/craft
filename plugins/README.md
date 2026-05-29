@@ -58,7 +58,9 @@ craft task stage complete task-123
 
 Task agents also get a task-scoped runtime directory under `tasks/<task-id>/.orchestrator/`. Craft writes `task-session.json` before launching the agent so background tools can find the task workspace and canonical task pane without relying on display titles.
 
-The default workflow preset is core-bundled at `workflows/standard-pr/`. Tasks without `workflow:` use `standard-pr`. Enabled plugins can also contribute workflow presets under `plugins/<plugin>/workflows/<workflow>/workflow.conf`. Tasks with `skill:` bypass workflow rendering and keep the legacy direct command dispatch behavior; prefer a dedicated `workflow:` plus `agent:`/`agent_model:` for new variants.
+The default workflow preset is core-bundled at `workflows/standard-pr/`. Tasks without `workflow:` use `standard-pr`. Enabled plugins can also contribute workflow presets under `plugins/<plugin>/workflows/<workflow>/workflow.conf`. Workflow presets can set default `AGENT` and `AGENT_MODEL`; task frontmatter `agent:` and `agent_model:` override those defaults. Tasks with `skill:` bypass workflow rendering and keep the legacy direct command dispatch behavior; prefer a dedicated `workflow:` plus agent defaults for new variants.
+
+Use `workflow:` for task behavior and `agent:` / `agent_model:` for execution defaults or overrides.
 
 Workflow prompt fragments and deterministic hooks are deliberately separate:
 
@@ -100,7 +102,7 @@ queue_state: in-progress
 ---
 ```
 
-The `planning` plugin uses this shape for discovery work: `start-discoverer` creates a normal approved task with `workflow: discovery` and optional `agent`/`agent_model` from `DISCOVERY_AGENT` and `DISCOVERY_AGENT_MODEL`. The orchestrator then launches it through the regular task workspace and semantic `agent` surface.
+The `planning` plugin uses this shape for discovery work. Choose it directly in task frontmatter with `workflow: discovery`; its workflow config provides the default discovery agent/model, and normal per-task `agent:` and `agent_model:` fields can override them. The orchestrator launches it through the regular task workspace and semantic `agent` surface.
 
 The supported agent wake-up path is a pending-only typed event queue:
 

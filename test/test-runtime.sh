@@ -57,7 +57,6 @@ EOF
 cat > "$QUEUE_DIR/in-progress/task-123.md" <<'EOF'
 ---
 id: task-123
-type: pr
 status: in-progress
 depends_on: []
 repos: [craft]
@@ -261,9 +260,26 @@ assert_false "task state script reports provider status failure" bash -c "cd '$P
 
 echo ""
 echo "provider commands"
+source "$REPO_ROOT/bin/lib/workflow.sh"
 source "$REPO_ROOT/bin/lib/providers.sh"
 assert_true "hyphenated provider env var is safe" bash -c "source '$REPO_ROOT/bin/lib/providers.sh' && SMOKE_AGENT_APPROVAL_MODE=never provider_task_cmd smoke-agent /tmp/prompt /tmp/work >/dev/null"
 assert_true "task agent model becomes provider flag" bash -c "source '$REPO_ROOT/bin/lib/providers.sh' && provider_task_cmd claude /tmp/prompt /tmp/work opus | grep -q -- '--model opus'"
+DISCOVERY_PROJECT="$TMPDIR/discovery-project"
+mkdir -p "$DISCOVERY_PROJECT/queue"/{approved,pending,in-progress,waiting,done,blocked,archive}
+cat > "$DISCOVERY_PROJECT/craft.conf" <<'EOF'
+PLUGINS=planning
+DEFAULT_AGENT=codex
+EOF
+cat > "$DISCOVERY_PROJECT/queue/in-progress/task-discovery.md" <<'EOF'
+---
+id: task-discovery
+status: in-progress
+workflow: discovery
+---
+EOF
+load_provider_config "$DISCOVERY_PROJECT"
+assert_eq "workflow default agent selected" "claude" "$(task_agent "$DISCOVERY_PROJECT/queue/in-progress/task-discovery.md" "$DISCOVERY_PROJECT")"
+assert_eq "workflow default model selected" "opus" "$(task_agent_model "$DISCOVERY_PROJECT/queue/in-progress/task-discovery.md" "$DISCOVERY_PROJECT")"
 
 echo ""
 echo "dashboard command"

@@ -5,7 +5,6 @@ import matter from "gray-matter";
 export interface Task {
   id: string;
   status: string;
-  type?: string;
   title?: string;
   parent?: string;
   workflow?: string;
@@ -81,7 +80,6 @@ export function scanProject(projectDir: string): Task[] {
       tasks.push({
         id: (fm.id as string) ?? file.replace(/\.md$/, ""),
         status: (fm.status as string) ?? dir,
-        type: fm.type as string | undefined,
         title: fm.title as string | undefined,
         parent: fm.parent as string | undefined,
         workflow: (fm.workflow as string | undefined) ?? "standard-pr",

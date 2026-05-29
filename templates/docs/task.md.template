@@ -1,6 +1,5 @@
 ---
 id: task-{{NUMBER}}
-type: pr
 milestone: {{MILESTONE_ID}}
 status: pending
 workflow: standard-pr

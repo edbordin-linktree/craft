@@ -48,7 +48,6 @@ EOF
 cat > "$QUEUE_DIR/in-progress/task-123.md" <<'EOF'
 ---
 id: task-123
-type: pr
 status: in-progress
 repos: [craft]
 branch: refactor/runtime
@@ -186,7 +185,6 @@ mkdir -p "$BOT_WORKTREE/.orchestrator"
 cat > "$QUEUE_DIR/in-progress/task-456.md" <<'EOF'
 ---
 id: task-456
-type: pr
 status: in-progress
 depends_on: []
 repos: [craft]

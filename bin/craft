@@ -376,7 +376,6 @@ Usage:
 Keys:
   DEFAULT_AGENT    Agent CLI for tasks (default: claude)
   ARCHITECT_AGENT  Agent CLI for architect window (default: claude)
-  DISCOVERY_AGENT  Agent CLI for discovery workflow tasks (default: ARCHITECT_AGENT)
   *_MODEL          Optional model flag for matching agent, e.g. CLAUDE_MODEL=opus
   MULTIPLEXER      Terminal multiplexer: tmux (default) or cmux
   AGENT_TIMEOUT    Max seconds per task before auto-block (default: none)

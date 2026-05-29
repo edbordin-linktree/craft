@@ -115,7 +115,7 @@ provider_architect_cmd() {
 
 # Load project-level provider config
 # Usage: load_provider_config <project_dir>
-# Sets: DEFAULT_AGENT, ARCHITECT_AGENT, DISCOVERY_AGENT, MULTIPLEXER
+# Sets: DEFAULT_AGENT, ARCHITECT_AGENT, MULTIPLEXER
 load_provider_config() {
     local project_dir="$1"
     local config_file="$project_dir/craft.conf"
@@ -130,23 +130,31 @@ load_provider_config() {
         source "$config_file"
     fi
 
-    DISCOVERY_AGENT="${DISCOVERY_AGENT:-$ARCHITECT_AGENT}"
-
     # Resolve operator name: config > git > $USER
     OPERATOR_NAME="${OPERATOR_NAME:-$(git config user.name 2>/dev/null || echo "${USER:-operator}")}"
-    export OPERATOR_NAME MULTIPLEXER DISCOVERY_AGENT
+    export OPERATOR_NAME MULTIPLEXER
 }
 
 # Get the agent provider for a specific task (task-level override or project default)
 # Usage: task_agent <task_file>
 task_agent() {
-    local file="$1"
-    local agent
+    local file="$1" project_dir="${2:-}"
+    local agent workflow_agent
     agent=$(task_field "$file" "agent")
+    if [[ -z "$agent" && -n "$project_dir" ]] && declare -f workflow_default_agent >/dev/null 2>&1; then
+        workflow_agent="$(workflow_default_agent "$project_dir" "$file" 2>/dev/null || true)"
+        agent="$workflow_agent"
+    fi
     echo "${agent:-$DEFAULT_AGENT}"
 }
 
 task_agent_model() {
-    local file="$1"
-    task_field "$file" "agent_model"
+    local file="$1" project_dir="${2:-}"
+    local model workflow_model
+    model="$(task_field "$file" "agent_model")"
+    if [[ -z "$model" && -n "$project_dir" ]] && declare -f workflow_default_agent_model >/dev/null 2>&1; then
+        workflow_model="$(workflow_default_agent_model "$project_dir" "$file" 2>/dev/null || true)"
+        model="$workflow_model"
+    fi
+    echo "$model"
 }

@@ -68,6 +68,32 @@ workflow_base_stages() {
     printf '%s\n' "$stages" | tr ',' ' ' | xargs -n1
 }
 
+workflow_config_value() {
+    local project_dir="$1" workflow="$2" key="$3" preset_dir conf
+    [[ "$workflow" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+    preset_dir="$(workflow_preset_dir "$project_dir" "$workflow")" || return 1
+    conf="$preset_dir/workflow.conf"
+    [[ -f "$conf" ]] || return 1
+    (
+        unset STAGES AGENT AGENT_MODEL
+        # shellcheck source=/dev/null
+        source "$conf"
+        printf '%s' "${!key:-}"
+    )
+}
+
+workflow_default_agent() {
+    local project_dir="$1" task_file="$2" workflow
+    workflow="$(workflow_task_workflow "$task_file")"
+    workflow_config_value "$project_dir" "$workflow" AGENT
+}
+
+workflow_default_agent_model() {
+    local project_dir="$1" task_file="$2" workflow
+    workflow="$(workflow_task_workflow "$task_file")"
+    workflow_config_value "$project_dir" "$workflow" AGENT_MODEL
+}
+
 workflow_task_options_json() {
     task_workflow_options_json "$1"
 }
@@ -342,7 +368,7 @@ $(printf '%s\n' "$stages" | sed 's/^/- /')
 
 ## Before The First Stage
 
-Read the task file and parse its frontmatter before acting: \`id\`, \`type\`, \`milestone\`, \`depends_on\`, \`repos\`, \`branch\`, \`base\`, \`qa\`, \`pr\`, and any workflow options.
+Read the task file and parse its frontmatter before acting: \`id\`, \`workflow\`, \`milestone\`, \`depends_on\`, \`repos\`, \`branch\`, \`base\`, \`qa\`, \`pr\`, and any workflow options.
 
 Read project context first:
 

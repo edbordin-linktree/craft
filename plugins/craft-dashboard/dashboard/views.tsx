@@ -27,10 +27,9 @@ const STYLES = `
   .task { padding: 0.7rem 0.8rem; border: 1px solid #1f242a; border-radius: 8px; margin-bottom: 0.6rem; background: #11151a; }
   .task.waiting-team { opacity: 0.72; }
   .task.child { margin-left: 0.8rem; border-left-color: #334155; }
-  .plan-group { border: 1px solid #1f242a; border-radius: 8px; margin-bottom: 0.7rem; background: #0d1117; overflow: hidden; }
-  .plan-group > .task { border: 0; border-radius: 0; margin-bottom: 0; background: #11151a; }
-  .plan-children { padding: 0.65rem 0.7rem 0.1rem 0.7rem; border-top: 1px solid #1f242a; }
-  .plan-title { font-size: 0.78rem; color: #cbd5e1; font-weight: 600; margin-left: 0.2rem; }
+  .parent-group { border: 1px solid #1f242a; border-radius: 8px; margin-bottom: 0.7rem; background: #0d1117; overflow: hidden; }
+  .parent-group > .task { border: 0; border-radius: 0; margin-bottom: 0; background: #11151a; }
+  .parent-children { padding: 0.65rem 0.7rem 0.1rem 0.7rem; border-top: 1px solid #1f242a; }
   .task-header { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
   .task-id { font-family: 'SF Mono', monospace; font-weight: 600; }
   .task-id a { color: #93c5fd; text-decoration: none; cursor: pointer; }
@@ -258,16 +257,16 @@ export function Dashboard({ projectName, tasks }: { projectName: string; tasks: 
 }
 
 function renderQueueItems(tasks: Task[], tasksById: Map<string, Task>) {
-  // Build planParents from the global tasksById map so that a plan task in a
-  // different queue column (e.g. approved) is still recognised as a parent of
-  // child tasks that have advanced to in-progress or beyond.
-  const planParents = new Map<string, Task>(
-    [...tasksById.values()].filter(t => t.type === "plan").map(t => [t.id, t])
+  const parentIds = new Set(
+    [...tasksById.values()].map(t => t.parent).filter((id): id is string => Boolean(id))
+  );
+  const parentTasks = new Map<string, Task>(
+    [...tasksById.values()].filter(t => parentIds.has(t.id)).map(t => [t.id, t])
   );
 
   const childrenByParent = new Map<string, Task[]>();
   for (const t of tasks) {
-    if (t.parent && planParents.has(t.parent)) {
+    if (t.parent && parentTasks.has(t.parent)) {
       if (!childrenByParent.has(t.parent)) childrenByParent.set(t.parent, []);
       childrenByParent.get(t.parent)!.push(t);
     }
@@ -276,17 +275,17 @@ function renderQueueItems(tasks: Task[], tasksById: Map<string, Task>) {
   const rendered = new Set<string>();
   const out = [];
   for (const task of tasks) {
-    if (task.type === "plan") {
+    if (parentTasks.has(task.id)) {
       if (rendered.has(task.id)) continue;
       rendered.add(task.id);
       const children = childrenByParent.get(task.id) ?? [];
-      out.push(<PlanGroup parent={task} children={children} />);
+      out.push(<ParentGroup parent={task} children={children} />);
       continue;
     }
-    if (task.parent && planParents.has(task.parent)) {
+    if (task.parent && parentTasks.has(task.parent)) {
       if (rendered.has(task.parent)) continue;
       rendered.add(task.parent);
-      out.push(<PlanGroup parent={planParents.get(task.parent)!} children={childrenByParent.get(task.parent) ?? []} />);
+      out.push(<ParentGroup parent={parentTasks.get(task.parent)!} children={childrenByParent.get(task.parent) ?? []} />);
       continue;
     }
     out.push(<TaskCard task={task} />);
@@ -294,12 +293,12 @@ function renderQueueItems(tasks: Task[], tasksById: Map<string, Task>) {
   return out;
 }
 
-function PlanGroup({ parent, children }: { parent: Task; children: Task[] }) {
+function ParentGroup({ parent, children }: { parent: Task; children: Task[] }) {
   return (
-    <div class="plan-group">
+    <div class="parent-group">
       <TaskCard task={parent} />
       {children.length > 0 && (
-        <div class="plan-children">
+        <div class="parent-children">
           {children.map(child => <TaskCard task={child} nested />)}
         </div>
       )}
@@ -311,7 +310,6 @@ function TaskCard({ task, nested = false }: { task: Task; nested?: boolean }) {
   const color = statusColor[task.queueDir] ?? "#6b7280";
   const isDone = task.queueDir === "done";
   const isActive = !isDone;
-  const isPlan = task.type === "plan";
   const waitingOnTeam = isWaitingOnTeam(task);
   const summaryClamp = isDone ? "lines-1" : "lines-2";
 
@@ -347,7 +345,6 @@ function TaskCard({ task, nested = false }: { task: Task; nested?: boolean }) {
         </span>
         <span class="badge" style={{ background: color }}>{task.queueDir}</span>
         {waitingOnTeam && <span class="wait-pill">waiting on team</span>}
-        {isPlan && <span class="plan-title">{task.title ?? "plan"}</span>}
         {task.linearTickets.map(t => {
           const linearUrl = `https://linear.app/${LINEAR_ORG}/issue/${t}`;
           return (
@@ -388,7 +385,7 @@ function TaskCard({ task, nested = false }: { task: Task; nested?: boolean }) {
         <DepsLine task={task} />
       )}
 
-      {isActive && !isPlan && (
+      {isActive && (
         <div class="actions">
           {task.queueDir === "drafts" ? (
             <button
@@ -527,12 +524,6 @@ function TaskCard({ task, nested = false }: { task: Task; nested?: boolean }) {
               </>
             )}
             {/* PR is surfaced as a pill in the card header, not duplicated here. */}
-            {task.type && (
-              <>
-                <b>type</b>
-                <span>{task.type}</span>
-              </>
-            )}
             {Object.keys(task.qa).length > 0 && (
               <>
                 <b>qa</b>

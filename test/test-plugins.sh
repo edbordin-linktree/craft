@@ -162,7 +162,6 @@ old_craft_root="$CRAFT_ROOT"
 CRAFT_ROOT="$REPO_ROOT"
 assert_true "split plugins sync through generic assets" plugin_sync_project_assets "$real_project"
 assert_false "planning does not override architect command" test -e "$real_project/.claude/commands/init-architect.md"
-assert_true "planning discoverer command linked" test -L "$real_project/.claude/commands/init-discoverer.md"
 assert_true "bot-review claude skill linked" test -L "$real_project/.claude/skills/review-pr"
 assert_eq "bot-review claude skill target" "$REPO_ROOT/plugins/bot-review/skills/review-pr" "$(readlink "$real_project/.claude/skills/review-pr")"
 assert_true "babysit-pr codex skill linked" test -L "$real_project/.codex/skills/babysit-pr"
@@ -172,15 +171,6 @@ assert_false "retired monolith plugin removed" test -d "$REPO_ROOT/plugins/$reti
 orchestrator_states="$(plugin_queue_states "$real_project" | sort | paste -sd, -)"
 expected_orchestrator_states="$(printf '%s\n' drafts pending approved in-progress waiting done blocked archive local-review diffhub-review | sort | paste -sd, -)"
 assert_eq "plugins declare their queue states" "$expected_orchestrator_states" "$orchestrator_states"
-mkdir -p "$real_project/queue"/{approved,pending,in-progress,waiting,done,blocked,archive}
-cat >> "$real_project/craft.conf" <<'EOF'
-DISCOVERY_AGENT=claude
-DISCOVERY_AGENT_MODEL=opus
-EOF
-assert_true "planning discoverer queues workflow task" bash -c "CRAFT_ROOT='$REPO_ROOT' PROJECT_DIR='$real_project' '$REPO_ROOT/plugins/planning/scripts/start-discoverer' smoke-topic 'Smoke topic' 'Extra framing' > '$TMPDIR/discoverer.out'"
-assert_true "discoverer writes approved task" test -f "$real_project/queue/approved/task-001.md"
-assert_file_contains "discoverer task workflow" "$real_project/queue/approved/task-001.md" "workflow: discovery"
-assert_file_contains "discoverer task agent model" "$real_project/queue/approved/task-001.md" 'agent_model: "opus"'
 CRAFT_ROOT="$old_craft_root"
 
 echo ""
@@ -362,7 +352,6 @@ mkdir -p "$PROJECT_DIR/tasks/task-123"
 cat > "$task_file" << 'EOF'
 ---
 id: task-123
-type: pr
 status: waiting
 pr: https://github.com/example/repo/pull/1
 ---

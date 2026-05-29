@@ -99,18 +99,13 @@ on_waiting() {
     local task_file
     task_file=$(_find_task_file "$task_id") || return 0
 
-    local pr_url task_type task_title project_name
+    local pr_url task_title project_name
     pr_url=$(grep '^pr:' "$task_file" | sed 's/^pr:[[:space:]]*//')
-    task_type=$(grep '^type:' "$task_file" | sed 's/^type:[[:space:]]*//')
     task_title=$(_task_title "$task_file")
     project_name=$(basename "$PROJECT_DIR")
 
     local msg
-    if [[ "$task_type" == "research" ]]; then
-        msg="*[$project_name]* Research task *$task_id* has findings ready"
-        [[ -n "$task_title" ]] && msg="${msg}"$'\n'"${task_title}"
-        msg="${msg}"$'\n'"Check Craft task \`$task_id\` in project \`$project_name\`"
-    elif [[ -n "$pr_url" ]]; then
+    if [[ -n "$pr_url" ]]; then
         msg="*[$project_name]* Draft PR ready for review - *$task_id*: ${pr_url}"
         [[ -n "$task_title" ]] && msg="${msg}"$'\n'"${task_title}"
     else

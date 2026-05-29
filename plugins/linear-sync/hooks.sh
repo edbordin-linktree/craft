@@ -127,7 +127,6 @@ on_poll() {
         cat > "$task_file" << TASK_EOF
 ---
 id: ${task_id}
-type: pr
 status: approved
 linear_id: ${issue_id}
 depends_on: []

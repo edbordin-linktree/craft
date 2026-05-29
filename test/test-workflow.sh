@@ -79,6 +79,8 @@ EOF
 
 cat > "$CRAFT_ROOT/plugins/example/workflows/discovery/workflow.conf" <<'EOF'
 STAGES="discover complete"
+AGENT="claude"
+AGENT_MODEL="opus"
 EOF
 
 cat > "$CRAFT_ROOT/plugins/example/stages/discover.md" <<'EOF'
@@ -104,7 +106,6 @@ EOF
 cat > "$QUEUE_DIR/in-progress/task-123.md" <<'EOF'
 ---
 id: task-123
-type: pr
 status: in-progress
 workflow: standard-pr
 workflow_options:
@@ -121,7 +122,6 @@ EOF
 cat > "$QUEUE_DIR/in-progress/task-124.md" <<'EOF'
 ---
 id: task-124
-type: pr
 status: in-progress
 workflow: standard-pr
 workflow_options:
@@ -138,7 +138,6 @@ EOF
 cat > "$QUEUE_DIR/in-progress/task-125.md" <<'EOF'
 ---
 id: task-125
-type: pr
 status: in-progress
 workflow: ../../evil
 depends_on: []
@@ -153,7 +152,6 @@ EOF
 cat > "$QUEUE_DIR/in-progress/task-126.md" <<'EOF'
 ---
 id: task-126
-type: discovery
 status: in-progress
 workflow: discovery
 workflow_options:
@@ -180,6 +178,8 @@ stages="$(workflow_resolve_stages "$PROJECT_DIR" "$QUEUE_DIR/in-progress/task-12
 assert_eq "plugin stage inserted" "implement,qa,pr_review,watching_prod_deploy,complete" "$stages"
 discovery_stages="$(workflow_resolve_stages "$PROJECT_DIR" "$QUEUE_DIR/in-progress/task-126.md" | paste -sd, -)"
 assert_eq "plugin workflow resolves own stage" "discover,complete" "$discovery_stages"
+assert_eq "plugin workflow default agent" "claude" "$(workflow_default_agent "$PROJECT_DIR" "$QUEUE_DIR/in-progress/task-126.md")"
+assert_eq "plugin workflow default agent model" "opus" "$(workflow_default_agent_model "$PROJECT_DIR" "$QUEUE_DIR/in-progress/task-126.md")"
 
 PROJECT_NO_PLUGINS="$TMPDIR/project-no-plugins"
 mkdir -p "$PROJECT_NO_PLUGINS/tasks/task-124" "$PROJECT_NO_PLUGINS/queue"/{drafts,pending,approved,in-progress,waiting,done,blocked,archive}
