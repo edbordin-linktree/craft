@@ -58,7 +58,7 @@ craft task stage complete task-123
 
 Task agents also get a task-scoped runtime directory under `tasks/<task-id>/.orchestrator/`. Craft writes `task-session.json` before launching the agent so background tools can find the task workspace and canonical task pane without relying on display titles.
 
-The default workflow preset is core-bundled at `workflows/standard-pr/`. Tasks without `workflow:` use `standard-pr`. Tasks with `skill:` bypass workflow rendering and keep the legacy direct command dispatch behavior.
+The default workflow preset is core-bundled at `workflows/standard-pr/`. Tasks without `workflow:` use `standard-pr`. Enabled plugins can also contribute workflow presets under `plugins/<plugin>/workflows/<workflow>/workflow.conf`. Tasks with `skill:` bypass workflow rendering and keep the legacy direct command dispatch behavior; prefer a dedicated `workflow:` plus `agent:`/`agent_model:` for new variants.
 
 Workflow prompt fragments and deterministic hooks are deliberately separate:
 
@@ -90,6 +90,17 @@ queue_state: waiting
 ```
 
 `queue_state:` is optional. When present, entering that stage projects the task into the named `queue/<state>/` folder without changing the stage again. Stage and event IDs come from filenames. `stages/qa.md` defines `qa`; `plugins/buildkite/fragments/stages/qa.md` extends it. Event definitions live in `events/<event>.md` or `plugins/<plugin>/events/<event>.md`, with fragments in `plugins/<plugin>/fragments/events/<event>.md`.
+
+Workflow-owned plugin stages that are not inserted into `standard-pr` should declare their owning workflow instead of `insert`, for example:
+
+```yaml
+---
+workflow: discovery
+queue_state: in-progress
+---
+```
+
+The `planning` plugin uses this shape for discovery work: `start-discoverer` creates a normal approved task with `workflow: discovery` and optional `agent`/`agent_model` from `DISCOVERY_AGENT` and `DISCOVERY_AGENT_MODEL`. The orchestrator then launches it through the regular task workspace and semantic `agent` surface.
 
 The supported agent wake-up path is a pending-only typed event queue:
 
@@ -145,6 +156,20 @@ PLUGINS=slack-daily-thread
 ```
 
 Then configure the plugin by editing its `plugin.conf` if it has one.
+
+### Linear CLI
+
+The `linear-sync` plugin expects `schpet/linear-cli`, which installs a binary
+named `linear`.
+
+```bash
+brew install schpet/tap/linear
+linear auth login
+```
+
+On Linux hosts without Homebrew or sudo, install the matching release tarball
+into `~/.local/bin`; see `plugins/linear-sync/plugin.conf` for the exact
+commands. Do not use the npm package named `linear`, which is unrelated.
 
 ## Available Hooks
 

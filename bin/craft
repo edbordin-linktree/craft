@@ -376,6 +376,8 @@ Usage:
 Keys:
   DEFAULT_AGENT    Agent CLI for tasks (default: claude)
   ARCHITECT_AGENT  Agent CLI for architect window (default: claude)
+  DISCOVERY_AGENT  Agent CLI for discovery workflow tasks (default: ARCHITECT_AGENT)
+  *_MODEL          Optional model flag for matching agent, e.g. CLAUDE_MODEL=opus
   MULTIPLEXER      Terminal multiplexer: tmux (default) or cmux
   AGENT_TIMEOUT    Max seconds per task before auto-block (default: none)
   OPERATOR_NAME    Your name, used in prompts
@@ -717,16 +719,56 @@ cmd_doctor() {
         cat << 'HELP'
 craft doctor — Check dependencies and environment
 
-Verifies that all required tools are installed and reports their versions.
+Usage:
+  craft doctor [project-name]
+  craft doctor --project-dir <path>
+
+Verifies that all required tools are installed and reports their versions. When
+a project is provided, or when run from inside a Craft project, also validates
+the enabled plugins without mutating the project.
 
 Required:  bash, git, tmux or cmux, gh, jq
 Agents:    claude, codex (at least one needed)
-Optional:  linear-cli (for the linear-sync plugin), cmux (alternative to tmux)
+Optional:  linear (for the linear-sync plugin), cmux (alternative to tmux)
 
 Also checks that craft is on your PATH and shows environment info.
 HELP
         exit 0
     fi
+
+    local project_arg="" project_dir="" project_label=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project-dir)
+                project_arg="${2:-}"
+                [[ -n "$project_arg" ]] || { echo "craft doctor: --project-dir requires a value" >&2; exit 2; }
+                shift 2
+                ;;
+            *)
+                if [[ -z "$project_arg" ]]; then
+                    project_arg="$1"
+                    shift
+                else
+                    echo "craft doctor: unknown arg: $1" >&2
+                    exit 2
+                fi
+                ;;
+        esac
+    done
+
+    if [[ -n "$project_arg" ]]; then
+        if [[ -f "$project_arg/craft.conf" ]]; then
+            project_dir="$(cd "$project_arg" && pwd -P)"
+        elif [[ -f "$CRAFT_PROJECTS/$project_arg/craft.conf" ]]; then
+            project_dir="$(cd "$CRAFT_PROJECTS/$project_arg" && pwd -P)"
+        else
+            echo "craft doctor: project not found: $project_arg" >&2
+            exit 2
+        fi
+    else
+        project_dir="$(runtime_project_dir "$PWD" 2>/dev/null || true)"
+    fi
+    [[ -n "$project_dir" ]] && project_label="$(basename "$project_dir")"
 
     echo "craft doctor (v${CRAFT_VERSION})"
     echo ""
@@ -784,7 +826,7 @@ HELP
 
     echo ""
     echo "Optional:"
-    for cmd in linear-cli; do
+    for cmd in linear; do
         if command -v "$cmd" > /dev/null 2>&1; then
             printf "  %-12s ✓  installed\n" "$cmd"
         else
@@ -797,6 +839,65 @@ HELP
     printf "  %-12s %s\n" "CRAFT_ROOT" "$CRAFT_ROOT"
     printf "  %-12s %s\n" "shell" "$SHELL"
     printf "  %-12s %s\n" "platform" "$(uname -s) $(uname -m)"
+    if [[ -n "$project_dir" ]]; then
+        printf "  %-12s %s\n" "project" "$project_dir"
+    fi
+
+    if [[ -n "$project_dir" ]]; then
+        echo ""
+        echo "Plugin diagnostics ($project_label):"
+        local plugin plugins_seen=false plugin_ok=true
+        while IFS= read -r plugin; do
+            [[ -n "$plugin" ]] || continue
+            plugins_seen=true
+            local plugin_dir="$CRAFT_ROOT/plugins/$plugin"
+            local hooks_file="$plugin_dir/hooks.sh"
+            local missing_deps output status
+            if [[ ! -d "$plugin_dir" ]]; then
+                printf "  %-24s ✗  plugin directory not found\n" "$plugin"
+                plugin_ok=false
+                continue
+            fi
+            missing_deps="$(plugin_missing_dependencies "$project_dir" "$plugin" | paste -sd, -)"
+            if [[ -n "$missing_deps" ]]; then
+                printf "  %-24s ✗  missing DEPENDS_ON plugin(s): %s\n" "$plugin" "$missing_deps"
+                plugin_ok=false
+                continue
+            fi
+            if [[ ! -f "$hooks_file" ]]; then
+                printf "  %-24s ✓  no hooks\n" "$plugin"
+                continue
+            fi
+            if output="$(
+                PROJECT_DIR="$project_dir" CRAFT_ROOT="$CRAFT_ROOT" bash -c '
+                    hooks_file="$1"
+                    # shellcheck source=/dev/null
+                    source "$hooks_file" 2>/dev/null || exit 2
+                    if declare -f check_deps >/dev/null 2>&1; then
+                        check_deps
+                    else
+                        exit 3
+                    fi
+                ' bash "$hooks_file" 2>&1
+            )"; then
+                printf "  %-24s ✓  check_deps passed\n" "$plugin"
+            else
+                status=$?
+                if [[ "$status" -eq 3 ]]; then
+                    printf "  %-24s ✓  no dep check defined\n" "$plugin"
+                else
+                    printf "  %-24s ✗  check_deps failed\n" "$plugin"
+                    [[ -n "$output" ]] && printf '%s\n' "$output" | sed 's/^/    /'
+                    plugin_ok=false
+                fi
+            fi
+        done < <(plugin_enabled_plugins "$project_dir")
+        if ! $plugins_seen; then
+            echo "  none enabled"
+        elif ! $plugin_ok; then
+            all_ok=false
+        fi
+    fi
 
     # Check if craft is on PATH
     local craft_path
@@ -812,7 +913,8 @@ HELP
     if $all_ok; then
         echo "All good. Run 'craft init <project-name>' to get started."
     else
-        echo "Some dependencies are missing. Install them and re-run 'craft doctor'."
+        echo "Some checks failed. Fix them and re-run 'craft doctor'."
+        exit 1
     fi
 }
 

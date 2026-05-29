@@ -8,12 +8,15 @@
 # Looks for <PROVIDER>_APPROVAL_MODE (e.g. CODEX_APPROVAL_MODE=bypass).
 # Usage: provider_flags <provider>
 provider_flags() {
-    local provider="$1"
+    local provider="$1" model_override="${2:-}"
     local upper
-    upper=$(echo "$provider" | tr '[:lower:]' '[:upper:]')
+    upper=$(echo "$provider" | tr '[:lower:]' '[:upper:]' | sed -E 's/[^A-Z0-9_]/_/g')
 
     local approval_var="${upper}_APPROVAL_MODE"
     local approval="${!approval_var:-}"
+    local model_var="${upper}_MODEL"
+    local model="${model_override:-${!model_var:-}}"
+    local flags=""
 
     case "$provider" in
         codex)
@@ -22,17 +25,21 @@ provider_flags() {
             # full-auto: model decides when to ask, sandboxed (--full-auto)
             # auto-edit, on-request, untrusted: passed through to -a
             if [[ "$approval" == "bypass" ]]; then
-                echo "--dangerously-bypass-approvals-and-sandbox"
+                flags="--dangerously-bypass-approvals-and-sandbox"
             elif [[ "$approval" == "full-auto" ]]; then
-                echo "--full-auto"
+                flags="--full-auto"
             elif [[ -n "$approval" ]]; then
-                echo "-a $approval"
+                flags="-a $approval"
             fi
+            [[ -n "$model" ]] && flags="${flags:+$flags }--model $(printf '%q' "$model")"
+            echo "$flags"
             ;;
         claude)
             if [[ "$approval" == "bypass" || "$approval" == "full-auto" ]]; then
-                echo "--dangerously-skip-permissions"
+                flags="--dangerously-skip-permissions"
             fi
+            [[ -n "$model" ]] && flags="${flags:+$flags }--model $(printf '%q' "$model")"
+            echo "$flags"
             ;;
     esac
 }
@@ -64,10 +71,10 @@ _provider_env_setup() {
 # Build the tmux command to launch an agent for a task
 # Usage: provider_task_cmd <provider> <prompt_file> <work_dir>
 provider_task_cmd() {
-    local provider="$1" prompt_file="$2" work_dir="$3"
+    local provider="$1" prompt_file="$2" work_dir="$3" model="${4:-}"
 
     local flags env
-    flags=$(provider_flags "$provider")
+    flags=$(provider_flags "$provider" "$model")
     env=$(_provider_env_setup)
 
     case "$provider" in
@@ -87,10 +94,10 @@ provider_task_cmd() {
 # Build the tmux command to launch an architect session
 # Usage: provider_architect_cmd <provider> <skill_file> <work_dir>
 provider_architect_cmd() {
-    local provider="$1" skill_file="$2" work_dir="$3"
+    local provider="$1" skill_file="$2" work_dir="$3" model="${4:-${ARCHITECT_AGENT_MODEL:-}}"
 
     local flags env
-    flags=$(provider_flags "$provider")
+    flags=$(provider_flags "$provider" "$model")
     env=$(_provider_env_setup)
 
     case "$provider" in
@@ -108,7 +115,7 @@ provider_architect_cmd() {
 
 # Load project-level provider config
 # Usage: load_provider_config <project_dir>
-# Sets: DEFAULT_AGENT, ARCHITECT_AGENT, MULTIPLEXER
+# Sets: DEFAULT_AGENT, ARCHITECT_AGENT, DISCOVERY_AGENT, MULTIPLEXER
 load_provider_config() {
     local project_dir="$1"
     local config_file="$project_dir/craft.conf"
@@ -123,9 +130,11 @@ load_provider_config() {
         source "$config_file"
     fi
 
+    DISCOVERY_AGENT="${DISCOVERY_AGENT:-$ARCHITECT_AGENT}"
+
     # Resolve operator name: config > git > $USER
     OPERATOR_NAME="${OPERATOR_NAME:-$(git config user.name 2>/dev/null || echo "${USER:-operator}")}"
-    export OPERATOR_NAME MULTIPLEXER
+    export OPERATOR_NAME MULTIPLEXER DISCOVERY_AGENT
 }
 
 # Get the agent provider for a specific task (task-level override or project default)
@@ -135,4 +144,9 @@ task_agent() {
     local agent
     agent=$(task_field "$file" "agent")
     echo "${agent:-$DEFAULT_AGENT}"
+}
+
+task_agent_model() {
+    local file="$1"
+    task_field "$file" "agent_model"
 }

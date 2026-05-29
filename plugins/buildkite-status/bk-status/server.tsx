@@ -441,7 +441,6 @@ function BuildPage({ tickPath, title, externalUrl, build, prSummary, error }: {
                 href={externalUrl}
                 hx-post={`/open?url=${encodeURIComponent(externalUrl)}`}
                 hx-swap="none"
-                onclick="event.preventDefault()"
                 title="Open the Buildkite web UI in your system browser (cmux's in-app browser cannot complete Okta SSO)"
               >open in Buildkite ↗</a>
             ) : null}

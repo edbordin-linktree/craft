@@ -24,8 +24,9 @@ ensure_session() {
         if [[ -n "${project_dir:-}" ]]; then
             local skill_file="${project_dir}/.claude/commands/init-architect.md"
             local architect_agent="${ARCHITECT_AGENT:-claude}"
+            local architect_agent_model="${ARCHITECT_AGENT_MODEL:-}"
             local cmd
-            cmd=$(provider_architect_cmd "$architect_agent" "$skill_file" "$project_dir")
+            cmd=$(provider_architect_cmd "$architect_agent" "$skill_file" "$project_dir" "$architect_agent_model")
             # Use send-keys so the agent runs inside an interactive shell.
             # Passing the command to new-window runs it as the window's initial
             # process, which breaks TUI input (arrow keys, etc.) for agents
@@ -52,9 +53,10 @@ ensure_task_session() {
 spawn_task_pane() {
     local session="$1" task_id="$2" prompt_file="$3" work_dir="$4"
     local agent="${5:-claude}"
+    local agent_model="${6:-}"
 
     local cmd
-    cmd=$(provider_task_cmd "$agent" "$prompt_file" "$work_dir")
+    cmd=$(provider_task_cmd "$agent" "$prompt_file" "$work_dir" "$agent_model")
 
     # Create window with a shell first, then send the command via send-keys.
     # This ensures the agent runs inside an interactive shell pty, so TUI
@@ -145,4 +147,8 @@ mux_surface_focus() {
 mux_surface_close() {
     echo "surface_unsupported: tmux provider does not manage browser surfaces" >&2
     return 3
+}
+
+mux_task_status_set() {
+    return 0
 }

@@ -7,6 +7,11 @@
 
 set -uo pipefail
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'
+    exit 0
+fi
+
 URL="${1:-}"
 [[ -n "$URL" && "$URL" != --* ]] || { echo "Usage: open-pr-surface <pr-url> [--repo <worktree>]" >&2; exit 2; }
 shift
@@ -15,7 +20,6 @@ REPO="$(pwd)"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --repo) REPO="$2"; shift 2 ;;
-        -h|--help) sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "open-pr-surface: unknown arg: $1" >&2; exit 2 ;;
     esac
 done

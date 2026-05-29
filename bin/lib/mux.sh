@@ -46,6 +46,10 @@
 #   mux_surface_close <project-dir> <task-id> <surface-id>
 #     → Manage logical task surfaces. cmux owns browser surfaces; tmux returns
 #       a clean unsupported status.
+#
+#   mux_task_status_set <project-name> <task-id> <status> <icon> <color>
+#     → Set a visible task status banner. cmux writes a workspace status pill;
+#       tmux is a no-op.
 
 MUX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

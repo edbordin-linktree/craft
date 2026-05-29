@@ -19,6 +19,20 @@ if [[ ! -f "$STATE" ]]; then
         {
           "ref": "workspace:1",
           "title": "craft-project-task-123",
+          "metadata": {
+            "craft:schema-version": "1",
+            "craft:project-id": "project",
+            "craft:project-dir": "/tmp/project",
+            "craft:task-id": "task-123",
+            "craft:task-dir": "/tmp/project/tasks/task-123",
+            "craft:surface:agent": {
+              "surface_id": "surface:1",
+              "type": "terminal",
+              "purpose": "agent",
+              "title": "task-123",
+              "placement": "left"
+            }
+          },
           "panes": [
             {
               "ref": "pane:1",
@@ -90,9 +104,150 @@ url_arg() {
     return 1
 }
 
+type_arg() {
+    local prev=""
+    for arg in "$@"; do
+        if [[ "$prev" == "--type" ]]; then
+            echo "$arg"
+            return 0
+        fi
+        prev="$arg"
+    done
+    echo "terminal"
+}
+
+flag_value() {
+    local flag="$1"
+    shift
+    local prev=""
+    for arg in "$@"; do
+        if [[ "$prev" == "$flag" ]]; then
+            echo "$arg"
+            return 0
+        fi
+        prev="$arg"
+    done
+    return 1
+}
+
+metadata_args_json() {
+    local args_json="[]" prev=""
+    for arg in "$@"; do
+        if [[ "$prev" == "--metadata" ]]; then
+            args_json="$(jq --arg item "$arg" '. + [$item]' <<< "$args_json")"
+        fi
+        prev="$arg"
+    done
+    echo "$args_json"
+}
+
 case "${1:-}" in
     tree)
         cat "$STATE"
+        ;;
+    workspace)
+        sub="${2:-}"
+        if [[ "$sub" == "lookup" ]]; then
+            filters="$(metadata_args_json "$@")"
+            jq --argjson filters "$filters" '
+                def matches_filter($ws; $f):
+                  ($f | split("=")) as $parts
+                  | ($parts[0]) as $key
+                  | ($parts[1:] | join("=")) as $value
+                  | (($ws.metadata[$key] // "") | tostring) == $value;
+                {
+                  matches: [
+                    .windows[].workspaces[]
+                    | . as $ws
+                    | select(all($filters[]; matches_filter($ws; .)))
+                    | {ref, id: .ref, title}
+                  ]
+                }
+            ' "$STATE"
+        else
+            echo "fake-cmux: unsupported command: $*" >&2
+            exit 2
+        fi
+        ;;
+    metadata)
+        sub="${2:-}"
+        ws="$(workspace_arg "$@")"
+        case "$sub" in
+            get)
+                key="${@: -2:1}"
+                if [[ "$key" == "--json" ]]; then key="${@: -3:1}"; fi
+                jq --arg ws "$ws" --arg key "$key" '
+                    .windows[].workspaces[]
+                    | select(.ref == $ws)
+                    | {key: $key, value: (.metadata[$key] // null)}
+                ' "$STATE"
+                ;;
+            set)
+                key="${@: -2:1}"
+                value="${@: -1}"
+                if [[ "$key" == "--value-json" ]]; then
+                    key="${@: -3:1}"
+                    save --arg ws "$ws" --arg key "$key" --argjson value "$value" '
+                        (.windows[].workspaces[] | select(.ref == $ws).metadata[$key]) = $value
+                    '
+                else
+                    save --arg ws "$ws" --arg key "$key" --arg value "$value" '
+                        (.windows[].workspaces[] | select(.ref == $ws).metadata[$key]) = $value
+                    '
+                fi
+                ;;
+            clear)
+                key="${@: -1}"
+                save --arg ws "$ws" --arg key "$key" '
+                    del(.windows[].workspaces[] | select(.ref == $ws).metadata[$key])
+                '
+                ;;
+            *)
+                echo "fake-cmux: unsupported command: $*" >&2
+                exit 2
+                ;;
+        esac
+        ;;
+    ssh)
+        ws="workspace:$(jq -r '.next_workspace' "$STATE")"
+        pane="pane:$(jq -r '.next_pane' "$STATE")"
+        surface="surface:$(jq -r '.next_surface' "$STATE")"
+        title="$(flag_value --name "$@" || true)"
+        save --arg ws "$ws" --arg pane "$pane" --arg surface "$surface" --arg title "$title" '
+            .next_workspace += 1
+            | .next_pane += 1
+            | .next_surface += 1
+            | .windows[0].workspaces += [{
+                ref: $ws,
+                id: $ws,
+                title: $title,
+                metadata: {},
+                panes: [{ref: $pane, surfaces: [{ref: $surface, type: "terminal", title: ""}]}]
+              }]
+        '
+        if [[ " $* " == *" --json "* ]]; then
+            jq -n --arg workspace_id "$ws" --arg workspace_ref "$ws" --arg surface_id "$surface" --arg surface_ref "$surface" \
+                '{workspace_id:$workspace_id, workspace_ref:$workspace_ref, surface_id:$surface_id, surface_ref:$surface_ref}'
+        else
+            echo "OK workspace=$ws"
+        fi
+        ;;
+    new-workspace)
+        ws="workspace:$(jq -r '.next_workspace' "$STATE")"
+        pane="pane:$(jq -r '.next_pane' "$STATE")"
+        surface="surface:$(jq -r '.next_surface' "$STATE")"
+        save --arg ws "$ws" --arg pane "$pane" --arg surface "$surface" '
+            .next_workspace += 1
+            | .next_pane += 1
+            | .next_surface += 1
+            | .windows[0].workspaces += [{
+                ref: $ws,
+                title: "",
+                metadata: {},
+                panes: [{ref: $pane, surfaces: [{ref: $surface, type: "terminal", title: ""}]}]
+              }]
+        '
+        echo "OK $ws"
         ;;
     new-split)
         ws="$(workspace_arg "$@")"
@@ -106,16 +261,46 @@ case "${1:-}" in
         '
         echo "OK $surface $ws"
         ;;
-    new-surface)
-        pane="$(pane_arg "$@")"
-        url="$(url_arg "$@")"
+    new-pane)
+        ws="$(workspace_arg "$@")"
+        url="$(url_arg "$@" || true)"
+        kind="$(type_arg "$@")"
+        pane="pane:$(jq -r '.next_pane' "$STATE")"
         surface="surface:$(jq -r '.next_surface' "$STATE")"
-        save --arg pane "$pane" --arg surface "$surface" --arg url "$url" '
+        save --arg ws "$ws" --arg pane "$pane" --arg surface "$surface" --arg url "$url" --arg kind "$kind" '
+            .next_pane += 1
+            | .next_surface += 1
+            | (.windows[].workspaces[] | select(.ref == $ws).panes) +=
+              [{ref: $pane, surfaces: [{ref: $surface, type: $kind, title: "", url: $url}]}]
+        '
+        echo "OK $surface $pane $ws"
+        ;;
+    new-surface)
+        pane="$(pane_arg "$@" || true)"
+        ws="$(workspace_arg "$@" || true)"
+        url="$(url_arg "$@" || true)"
+        kind="$(type_arg "$@")"
+        surface="surface:$(jq -r '.next_surface' "$STATE")"
+        if [[ -z "$pane" && -n "$ws" ]]; then
+            pane="$(jq -r --arg ws "$ws" '.windows[].workspaces[] | select(.ref == $ws).panes[0].ref' "$STATE")"
+        fi
+        save --arg pane "$pane" --arg surface "$surface" --arg url "$url" --arg kind "$kind" '
             .next_surface += 1
             | (.windows[].workspaces[].panes[] | select(.ref == $pane).surfaces) +=
-              [{ref: $surface, type: "browser", title: "", url: $url}]
+              [{ref: $surface, type: $kind, title: "", url: $url}]
         '
-        echo "OK $surface"
+        if [[ " $* " == *" --json "* ]]; then
+            jq -n --arg surface_id "$surface" '{surface_id: $surface_id}'
+        else
+            echo "OK $surface"
+        fi
+        ;;
+    rename-workspace)
+        ws="$(workspace_arg "$@")"
+        title="${@: -1}"
+        save --arg ws "$ws" --arg title "$title" '
+            (.windows[].workspaces[] | select(.ref == $ws).title) = $title
+        '
         ;;
     rename-tab)
         ws="$(workspace_arg "$@")"
@@ -153,7 +338,25 @@ case "${1:-}" in
             .sent += [{workspace: $ws, surface: $surface, text: $text}]
         '
         ;;
-    send-key|workspace-action|move-workspace-to-window|select-workspace|set-status|clear-status)
+    set-status)
+        if [[ "${FAKE_CMUX_FAIL_SET_STATUS:-}" == "1" ]]; then
+            echo "fake-cmux: set-status failed" >&2
+            exit 1
+        fi
+        key="${2:-}"
+        value="${3:-}"
+        ws="$(workspace_arg "$@")"
+        icon="$(flag_value --icon "$@" || true)"
+        color="$(flag_value --color "$@" || true)"
+        save --arg ws "$ws" --arg key "$key" --arg value "$value" --arg icon "$icon" --arg color "$color" '
+            (.windows[].workspaces[] | select(.ref == $ws).status[$key]) = {
+              value: $value,
+              icon: $icon,
+              color: $color
+            }
+        '
+        ;;
+    send-key|workspace-action|move-workspace-to-window|select-workspace|clear-status)
         ;;
     list-status)
         ;;

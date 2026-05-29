@@ -19,19 +19,12 @@ _bk_status_surface_title() {
 }
 
 _bk_status_close_surface() {
-    local pr_url="$1" title surface
-    [[ -n "$pr_url" ]] || return 0
-    command -v cmux >/dev/null || return 0
-    title="$(_bk_status_surface_title "$pr_url" 2>/dev/null || true)"
-    [[ -n "$title" ]] || return 0
-    surface="$(cmux tree --all --json 2>/dev/null \
-        | jq -r --arg title "$title" '
-            .windows[].workspaces[].panes[].surfaces[]
-            | select(.title == $title)
-            | .ref' 2>/dev/null \
-        | head -1)"
-    [[ -n "$surface" ]] || return 0
-    cmux close-surface --surface "$surface" >/dev/null 2>&1 || true
+    local _pr_url="$1"
+    [[ -n "${TASK_DIR:-}" && -n "${TASK_ID:-}" ]] || return 0
+    (
+        cd "${PROJECT_DIR:-$TASK_DIR}" || exit 0
+        "$CRAFT_ROOT/bin/craft-mux" close "$TASK_ID" buildkite-status >/dev/null 2>&1 || true
+    )
 }
 
 on_stage_start() {

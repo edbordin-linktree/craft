@@ -8,12 +8,17 @@ PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=/dev/null
 source "$PLUGIN_DIR/plugin.conf"
+LINEAR_BIN="${LINEAR_BIN:-linear}"
 
 check_deps() {
     local ok=true
-    if ! command -v linear-cli > /dev/null 2>&1; then
-        echo "  linear-sync: 'linear-cli' is required but not found" >&2
-        echo "    Install: npm install -g @anthropic/linear-cli" >&2
+    if ! command -v "$LINEAR_BIN" > /dev/null 2>&1; then
+        echo "  linear-sync: '$LINEAR_BIN' is required but not found" >&2
+        echo "    Install: brew install schpet/tap/linear" >&2
+        ok=false
+    elif ! "$LINEAR_BIN" issue query --help >/dev/null 2>&1 || ! "$LINEAR_BIN" issue comment add --help >/dev/null 2>&1; then
+        echo "  linear-sync: '$LINEAR_BIN' does not look like schpet/linear-cli" >&2
+        echo "    Expected command shape: $LINEAR_BIN issue query --json ... / $LINEAR_BIN issue comment add ..." >&2
         ok=false
     fi
     if [[ -z "${LINEAR_PROJECT:-}" ]]; then
@@ -27,14 +32,6 @@ check_deps() {
 if [[ -z "$LINEAR_PROJECT" ]]; then
     return 0 2>/dev/null || exit 0
 fi
-
-# Build common linear-cli flags
-_linear_flags() {
-    local flags=""
-    [[ -n "$LINEAR_TEAM" ]] && flags="$flags --team $LINEAR_TEAM"
-    [[ -n "$LINEAR_WORKSPACE" ]] && flags="$flags --workspace $LINEAR_WORKSPACE"
-    echo "$flags"
-}
 
 # Check if a Linear issue already has a task file in the queue
 _issue_has_task() {
@@ -68,21 +65,25 @@ on_poll() {
     local queue_dir="$PROJECT_DIR/queue"
 
     # Build the list command
-    local cmd="linear-cli issue list --project $LINEAR_PROJECT --state $LINEAR_READY_STATE --json --no-pager"
-    [[ -n "$LINEAR_ASSIGNEE" ]] && cmd="$cmd --assignee $LINEAR_ASSIGNEE"
-    [[ -n "$LINEAR_TEAM" ]] && cmd="$cmd --team $LINEAR_TEAM"
-    [[ -n "$LINEAR_WORKSPACE" ]] && cmd="$cmd --workspace $LINEAR_WORKSPACE"
+    local cmd=("$LINEAR_BIN" issue query --project "$LINEAR_PROJECT" --state "$LINEAR_READY_STATE" --json --no-pager)
+    [[ -n "$LINEAR_ASSIGNEE" ]] && cmd+=(--assignee "$LINEAR_ASSIGNEE")
+    if [[ -n "$LINEAR_TEAM" ]]; then
+        cmd+=(--team "$LINEAR_TEAM")
+    else
+        cmd+=(--all-teams)
+    fi
+    [[ -n "$LINEAR_WORKSPACE" ]] && cmd+=(--workspace "$LINEAR_WORKSPACE")
 
     local issues
-    issues=$(eval "$cmd" 2>/dev/null) || return 0
+    issues=$("${cmd[@]}" 2>/dev/null) || return 0
 
     # Parse each issue from JSON array
     local count
-    count=$(echo "$issues" | jq 'length' 2>/dev/null) || return 0
+    count=$(echo "$issues" | jq '.nodes | length' 2>/dev/null) || return 0
 
     for (( i=0; i<count; i++ )); do
         local issue
-        issue=$(echo "$issues" | jq ".[$i]")
+        issue=$(echo "$issues" | jq ".nodes[$i]")
 
         local issue_id title description labels priority
         issue_id=$(echo "$issue" | jq -r '.identifier')
@@ -99,7 +100,7 @@ on_poll() {
         if [[ -n "$LINEAR_LABEL" ]]; then
             local has_label
             has_label=$(echo "$issue" | jq -r --arg label "$LINEAR_LABEL" \
-                '.labels[]?.name // empty | select(. == $label)' 2>/dev/null)
+                '.labels.nodes[]?.name // empty | select(. == $label)' 2>/dev/null)
             if [[ -z "$has_label" ]]; then
                 continue
             fi
@@ -159,12 +160,13 @@ TASK_EOF
 # Update Linear issue state helper
 _update_linear_state() {
     local task_file="$1" new_state="$2"
+    [[ -n "$new_state" ]] || return 0
     local linear_id
     linear_id=$(grep '^linear_id:' "$task_file" 2>/dev/null | sed 's/^linear_id:[[:space:]]*//')
     if [[ -n "$linear_id" ]]; then
-        local cmd="linear-cli issue update $linear_id --state $new_state"
-        [[ -n "$LINEAR_WORKSPACE" ]] && cmd="$cmd --workspace $LINEAR_WORKSPACE"
-        eval "$cmd" 2>/dev/null || true
+        local cmd=("$LINEAR_BIN" issue update "$linear_id" --state "$new_state")
+        [[ -n "$LINEAR_WORKSPACE" ]] && cmd+=(--workspace "$LINEAR_WORKSPACE")
+        "${cmd[@]}" 2>/dev/null || true
     fi
 }
 
@@ -243,7 +245,7 @@ on_blocked() {
         local linear_id
         linear_id=$(grep '^linear_id:' "$task_file" 2>/dev/null | sed 's/^linear_id:[[:space:]]*//')
         if [[ -n "$linear_id" ]]; then
-            linear-cli issue comment "$linear_id" -m "Blocked by craft: $reason" 2>/dev/null || true
+            "$LINEAR_BIN" issue comment add "$linear_id" --body "Blocked by craft: $reason" 2>/dev/null || true
         fi
     fi
 }

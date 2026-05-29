@@ -1,6 +1,9 @@
 # Project instances (stateful, per-user)
 projects/
 
+# Local tool checkouts used by plugins, for example vendor/diffhub
+vendor/
+
 # Runtime state and logs
 .state/
 logs/

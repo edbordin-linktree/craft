@@ -75,6 +75,8 @@ trap 'rm -rf "$TMPDIR"' EXIT
 export CRAFT_ROOT="$TMPDIR/craft"
 PROJECT_DIR="$TMPDIR/project"
 QUEUE_DIR="$PROJECT_DIR/queue"
+mkdir -p "$CRAFT_ROOT"
+ln -s "$REPO_ROOT/bin" "$CRAFT_ROOT/bin"
 mkdir -p "$CRAFT_ROOT/plugins/example/project/.claude/commands"
 mkdir -p "$CRAFT_ROOT/plugins/example/skills/example-skill"
 mkdir -p "$CRAFT_ROOT/plugins/duplicate/skills/example-skill"
@@ -170,6 +172,15 @@ assert_false "retired monolith plugin removed" test -d "$REPO_ROOT/plugins/$reti
 orchestrator_states="$(plugin_queue_states "$real_project" | sort | paste -sd, -)"
 expected_orchestrator_states="$(printf '%s\n' drafts pending approved in-progress waiting done blocked archive local-review diffhub-review | sort | paste -sd, -)"
 assert_eq "plugins declare their queue states" "$expected_orchestrator_states" "$orchestrator_states"
+mkdir -p "$real_project/queue"/{approved,pending,in-progress,waiting,done,blocked,archive}
+cat >> "$real_project/craft.conf" <<'EOF'
+DISCOVERY_AGENT=claude
+DISCOVERY_AGENT_MODEL=opus
+EOF
+assert_true "planning discoverer queues workflow task" bash -c "CRAFT_ROOT='$REPO_ROOT' PROJECT_DIR='$real_project' '$REPO_ROOT/plugins/planning/scripts/start-discoverer' smoke-topic 'Smoke topic' 'Extra framing' > '$TMPDIR/discoverer.out'"
+assert_true "discoverer writes approved task" test -f "$real_project/queue/approved/task-001.md"
+assert_file_contains "discoverer task workflow" "$real_project/queue/approved/task-001.md" "workflow: discovery"
+assert_file_contains "discoverer task agent model" "$real_project/queue/approved/task-001.md" 'agent_model: "opus"'
 CRAFT_ROOT="$old_craft_root"
 
 echo ""
@@ -184,6 +195,155 @@ cat > "$PROJECT_DIR/craft.conf" << 'EOF'
 PLUGINS=example,needs-example
 EOF
 assert_true "dependency validation passes" plugin_validate_dependencies "$PROJECT_DIR"
+
+echo ""
+echo "craft doctor plugin diagnostics"
+DOCTOR_BIN="$TMPDIR/doctor-bin"
+mkdir -p "$DOCTOR_BIN" "$TMPDIR/projects/doctor-ok" "$TMPDIR/projects/doctor-bad" "$CRAFT_ROOT/plugins/doctor-fail"
+cat > "$DOCTOR_BIN/git" <<'EOF'
+#!/usr/bin/env bash
+echo "git version 2.0.0"
+EOF
+cat > "$DOCTOR_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "gh version 2.0.0"
+EOF
+cat > "$DOCTOR_BIN/jq" <<'EOF'
+#!/usr/bin/env bash
+echo "jq-1.7"
+EOF
+cat > "$DOCTOR_BIN/tmux" <<'EOF'
+#!/usr/bin/env bash
+echo "tmux 3.4"
+EOF
+cat > "$DOCTOR_BIN/craft" <<'EOF'
+#!/usr/bin/env bash
+echo "craft stub"
+EOF
+chmod +x "$DOCTOR_BIN"/{git,gh,jq,tmux,craft}
+cat > "$TMPDIR/projects/doctor-ok/craft.conf" <<'EOF'
+PLUGINS=example,no-hooks
+EOF
+cat > "$CRAFT_ROOT/plugins/doctor-fail/hooks.sh" <<'EOF'
+check_deps() {
+    echo "doctor-fail missing tool"
+    return 1
+}
+EOF
+cat > "$TMPDIR/projects/doctor-bad/craft.conf" <<'EOF'
+PLUGINS=doctor-fail
+EOF
+doctor_ok="$TMPDIR/doctor-ok.txt"
+doctor_bad="$TMPDIR/doctor-bad.txt"
+assert_true "doctor checks enabled plugins" bash -c "PATH='$DOCTOR_BIN':\$PATH CRAFT_ROOT='$CRAFT_ROOT' CRAFT_PROJECTS='$TMPDIR/projects' '$REPO_ROOT/bin/craft' doctor doctor-ok > '$doctor_ok' 2>&1"
+assert_true "doctor reports plugin diagnostics" grep -q 'Plugin diagnostics (doctor-ok)' "$doctor_ok"
+assert_true "doctor reports passing plugin check" grep -q 'example.*check_deps passed' "$doctor_ok"
+assert_true "doctor reports no-hooks plugin" grep -q 'no-hooks.*no hooks' "$doctor_ok"
+assert_false "doctor fails failing plugin check" bash -c "PATH='$DOCTOR_BIN':\$PATH CRAFT_ROOT='$CRAFT_ROOT' CRAFT_PROJECTS='$TMPDIR/projects' '$REPO_ROOT/bin/craft' doctor doctor-bad > '$doctor_bad' 2>&1"
+assert_true "doctor shows failing plugin reason" grep -q 'doctor-fail missing tool' "$doctor_bad"
+
+echo ""
+echo "linear-sync cli contract"
+LINEAR_ROOT="$TMPDIR/linear-craft"
+LINEAR_PROJECT_DIR="$TMPDIR/linear-project"
+LINEAR_BIN="$TMPDIR/linear-bin"
+mkdir -p "$LINEAR_ROOT/plugins/linear-sync" "$LINEAR_PROJECT_DIR/queue"/{approved,in-progress,waiting,done,blocked,pending} "$LINEAR_BIN"
+cp "$REPO_ROOT/plugins/linear-sync/hooks.sh" "$LINEAR_ROOT/plugins/linear-sync/hooks.sh"
+cat > "$LINEAR_ROOT/plugins/linear-sync/plugin.conf" <<'EOF'
+LINEAR_BIN="linear"
+LINEAR_PROJECT="Craft Smoke"
+LINEAR_TEAM=""
+LINEAR_WORKSPACE=""
+LINEAR_READY_STATE="unstarted"
+LINEAR_IN_PROGRESS_STATE="started"
+LINEAR_WAITING_STATE="started"
+LINEAR_DONE_STATE="completed"
+LINEAR_BLOCKED_STATE=""
+LINEAR_ASSIGNEE=""
+LINEAR_LABEL=""
+EOF
+cat > "$LINEAR_BIN/linear" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$TMPDIR/linear.log"
+if [[ "\$*" == issue\\ query* ]]; then
+  cat <<'JSON'
+{
+  "nodes": [
+    {
+      "identifier": "LIN-123",
+      "title": "Fix sync path",
+      "description": "Exercise current linear command shape",
+      "priority": 2,
+      "labels": {
+        "nodes": [{"name":"craft"}]
+      }
+    }
+  ]
+}
+JSON
+fi
+EOF
+chmod +x "$LINEAR_BIN/linear"
+cat > "$LINEAR_PROJECT_DIR/craft.conf" <<'EOF'
+BRANCH_PREFIX="ed/"
+EOF
+(
+    export CRAFT_ROOT="$LINEAR_ROOT" PROJECT_DIR="$LINEAR_PROJECT_DIR" PATH="$LINEAR_BIN:$PATH"
+    source "$LINEAR_ROOT/plugins/linear-sync/hooks.sh"
+    on_poll
+)
+assert_true "linear on_poll creates task" test -f "$LINEAR_PROJECT_DIR/queue/approved/task-001.md"
+assert_true "linear uses current issue query command" grep -q '^issue query ' "$TMPDIR/linear.log"
+assert_true "linear queries portable ready state type" grep -q -- '--state unstarted' "$TMPDIR/linear.log"
+assert_file_contains "linear task id" "$LINEAR_PROJECT_DIR/queue/approved/task-001.md" "linear_id: LIN-123"
+mv "$LINEAR_PROJECT_DIR/queue/approved/task-001.md" "$LINEAR_PROJECT_DIR/queue/in-progress/task-001.md"
+(
+    export CRAFT_ROOT="$LINEAR_ROOT" PROJECT_DIR="$LINEAR_PROJECT_DIR" PATH="$LINEAR_BIN:$PATH"
+    source "$LINEAR_ROOT/plugins/linear-sync/hooks.sh"
+    on_started --task-id task-001
+    on_blocked --task-id task-001 --reason "needs input"
+)
+assert_true "linear uses current issue update command" grep -q '^issue update LIN-123 --state started$' "$TMPDIR/linear.log"
+assert_true "linear uses current issue comment command" grep -q '^issue comment add LIN-123 --body Blocked by craft: needs input$' "$TMPDIR/linear.log"
+
+echo ""
+echo "devin helper contract"
+DEVIN_BIN="$TMPDIR/devin-bin"
+DEVIN_WORK="$TMPDIR/devin-work"
+mkdir -p "$DEVIN_BIN" "$DEVIN_WORK/out"
+cat > "$DEVIN_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"-X POST"* && "$args" == *"/v1/sessions"* ]]; then
+  printf '%s\n' '{"session_id":"devin-test","url":"https://app.devin.ai/sessions/devin-test"}'
+  exit 0
+fi
+if [[ "$args" == *"/v1/sessions/devin-test"* ]]; then
+  cat <<'JSON'
+{
+  "status": "running",
+  "status_enum": "blocked",
+  "structured_output": {
+    "summary": "Smoke complete",
+    "markdown": "# Smoke complete"
+  }
+}
+JSON
+  exit 0
+fi
+echo "unexpected curl args: $args" >&2
+exit 1
+EOF
+chmod +x "$DEVIN_BIN/curl"
+cat > "$DEVIN_WORK/prompt.md" <<'EOF'
+Return structured output.
+EOF
+cat > "$DEVIN_WORK/schema.json" <<'EOF'
+{"type":"object","required":["summary","markdown"],"properties":{"summary":{"type":"string"},"markdown":{"type":"string"}}}
+EOF
+assert_true "devin accepts blocked response with structured output" bash -c "PATH='$DEVIN_BIN':\$PATH DEVIN_API_KEY=fake CRAFT_TASK_ID=/ '$REPO_ROOT/plugins/devin/scripts/delegate-to-devin' --prompt-file '$DEVIN_WORK/prompt.md' --schema-file '$DEVIN_WORK/schema.json' --output '$DEVIN_WORK/out/result.md' --poll-timeout 1 --poll-interval 1 > '$TMPDIR/devin.out' 2> '$TMPDIR/devin.err'"
+assert_file_contains "devin writes markdown output" "$DEVIN_WORK/out/result.md" "# Smoke complete"
+assert_true "devin prints pointer json" bash -c "jq -e '.session_id == \"devin-test\" and .summary == \"Smoke complete\"' '$TMPDIR/devin.out' >/dev/null"
 
 echo ""
 echo "plugin_queue_states"

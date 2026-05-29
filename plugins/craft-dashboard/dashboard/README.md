@@ -80,6 +80,8 @@ manually:
 ```bash
 cd $CRAFT_ROOT/vendor/diffhub
 git pull
+npm install
+npm run build
 ```
 
 `DIFFHUB_SOURCE_DIR` still overrides the vendored checkout for local testing.

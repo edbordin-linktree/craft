@@ -9,6 +9,7 @@ export interface FocusResult {
   workspaceRef?: string;
   surfaceRef?: string;
   fallback?: boolean;
+  code?: string;
   error?: string;
 }
 
@@ -140,6 +141,72 @@ function loadTree(): { ok: true; tree: CmuxTree } | { ok: false; error: string }
   }
 }
 
+function loadWorkspaceTree(workspaceRef: string): { ok: true; tree: CmuxTree } | { ok: false; error: string } {
+  const r = cmux("tree", "--workspace", workspaceRef, "--json");
+  if (!r.ok) return { ok: false, error: r.stderr.trim() || `cmux tree exited ${r.stderr || "non-zero"}` };
+  try {
+    return { ok: true, tree: JSON.parse(r.stdout) as CmuxTree };
+  } catch (err) {
+    return { ok: false, error: `failed to parse cmux workspace tree JSON: ${String(err)}` };
+  }
+}
+
+function cmuxUiUnavailable(error: string): FocusResult {
+  return { ok: false, code: "cmux_ui_unavailable", error };
+}
+
+function isUiUnavailable(error: string): boolean {
+  return /Failed to write to socket|broken pipe|Connection reset|failed to connect|connection refused|dial tcp|relay|socket|Swift|detached|unavailable|not attached/i.test(error);
+}
+
+function workspaceLookupByMetadata(projectName: string, taskId?: string): { ok: true; workspaceRef: string } | { ok: false; error: string } {
+  const args = [
+    "workspace",
+    "lookup",
+    "--metadata",
+    `craft:project-id=${projectName}`,
+    "--include-detached",
+    "--json",
+  ];
+  if (taskId) args.splice(4, 0, "--metadata", `craft:task-id=${taskId}`);
+  const r = cmux(...args);
+  if (!r.ok) return { ok: false, error: r.stderr.trim() || "cmux workspace lookup failed" };
+  try {
+    const parsed = JSON.parse(r.stdout);
+    const candidates = [
+      ...(Array.isArray(parsed.matches) ? parsed.matches : []),
+      ...(Array.isArray(parsed.workspaces) ? parsed.workspaces : []),
+      parsed,
+    ].filter(v => v && typeof v === "object");
+    for (const candidate of candidates) {
+      const ref = candidate.workspace_id ?? candidate.workspaceId ?? candidate.id ?? candidate.workspace_ref ?? candidate.workspaceRef ?? candidate.ref;
+      if (typeof ref === "string" && ref.length > 0) return { ok: true, workspaceRef: ref };
+    }
+    return { ok: false, error: `no cmux workspace metadata match for project=${projectName}${taskId ? ` task=${taskId}` : ""}` };
+  } catch (err) {
+    return { ok: false, error: `failed to parse cmux workspace lookup JSON: ${String(err)}` };
+  }
+}
+
+function metadataJson(workspaceRef: string, key: string): unknown | null {
+  const r = cmux("metadata", "get", "--workspace", workspaceRef, key, "--json");
+  if (!r.ok) return null;
+  try {
+    const parsed = JSON.parse(r.stdout);
+    const value = parsed?.value ?? parsed?.entry?.value ?? parsed;
+    if (typeof value === "string") {
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
 function findWorkspaceByTitle(title: string): LookupResult<{
   workspaceRef: string;
   windowRef: string;
@@ -202,47 +269,17 @@ function lookupStatus(workspaceRef: string, key: string): string | null {
 }
 
 /**
- * Bring a surface to the front: makes it the selected tab inside its pane,
- * focuses that pane, selects its workspace, AND brings its window to the
- * foreground. `cmux move-surface --focus true` covers everything except the
- * cross-window switch — without an explicit `focus-window`, clicking a task
- * in the dashboard "works" but the user's cmux UI stays on whichever window
- * they were viewing.
+ * Bring a surface to the front inside its current workspace. Callers that know
+ * the workspace/window should still select/focus them separately.
  *
  * `cmux focus-pane` is NOT the right tool here — it takes a pane ref, not a
  * surface ref, and even when given the right pane it doesn't switch which
  * tab is selected inside that pane.
  */
 function focusSurface(surfaceRef: string): { ok: boolean; error?: string } {
-  // Three operations are needed to actually "focus" a surface from a
-  // dashboard tab that may live in a different workspace and/or window:
-  //
-  //   1. move-surface --focus true   — selects the surface within its pane
-  //                                    AND focuses that pane.
-  //   2. select-workspace            — switches the cmux UI to show this
-  //                                    workspace.
-  //   3. focus-window                — switches cmux windows when the
-  //                                    workspace lives in a different
-  //                                    window than where the user is.
-  //
-  // We extract the workspace/window from move-surface's own response
-  // ("OK surface=... pane=... workspace=workspace:N window=window:M")
-  // rather than a separate `tree --all --json` lookup. Saves one cmux
-  // subprocess (~50-80ms) per focus action.
-  const moved = cmux("move-surface", "--surface", surfaceRef, "--focus", "true");
-  if (!moved.ok) {
-    return { ok: false, error: moved.stderr.trim() };
-  }
-  const wsMatch = moved.stdout.match(/workspace=(\S+)/);
-  const winMatch = moved.stdout.match(/window=(\S+)/);
-  if (wsMatch) {
-    cmux("select-workspace", "--workspace", wsMatch[1]);
-  }
-  if (winMatch) {
-    const windowRef = winMatch[1];
-    // window:1 → index 0, window:2 → index 1 in cmux's CLI conventions.
-    const m = windowRef.match(/^window:(\d+)$/);
-    if (m) focusWindowByIndex(Number(m[1]) - 1);
+  const focused = cmux("focus-surface", surfaceRef);
+  if (!focused.ok) {
+    return { ok: false, error: focused.stderr.trim() };
   }
   return { ok: true };
 }
@@ -258,15 +295,16 @@ function focusSurface(surfaceRef: string): { ok: boolean; error?: string } {
  * at least lands in the right place.
  */
 /**
- * Single tree --all --json call that answers everything we need to know
- * about the target task:
+ * Targeted tree lookup that answers everything we need to know about the
+ * task workspace:
  *   • does the workspace exist?
  *   • is the recorded surface still alive?
  *   • is the surface already the active one (so we can short-circuit)?
  *   • what window/workspace/pane is it in?
  *
- * Collapses the previous lookup chain (tree + list-status + tree-again)
- * into one cmux subprocess for the common case where nothing has shifted.
+ * The workspace is resolved by metadata first, then inspected with
+ * `tree --workspace`. Avoid `tree --all` here because remote/headless cmux
+ * wrappers only guarantee detached-safe targeted tree inspection.
  */
 function resolveTaskState(
   projectName: string,
@@ -280,31 +318,23 @@ function resolveTaskState(
   workspaceAlreadySelected: boolean;
 } | { kind: "missing"; titlesSeen: string[] }
   | { kind: "error"; error: string } {
-  const wsPrefix = `${CMUX_PREFIX}-${projectName}-${taskId}`;
-  const loaded = loadTree();
+  const wsLookup = workspaceLookupByMetadata(projectName, taskId);
+  if (!wsLookup.ok) return { kind: "error", error: wsLookup.error };
+  const recorded = metadataJson(wsLookup.workspaceRef, "craft:surface:agent");
+  const recordedSurfaceRef = typeof recorded === "object" && recorded !== null
+    ? String((recorded as { surface_id?: unknown }).surface_id ?? "")
+    : "";
+  const loaded = loadWorkspaceTree(wsLookup.workspaceRef);
   if (!loaded.ok) return { kind: "error", error: loaded.error };
   const titlesSeen: string[] = [];
   for (const w of loaded.tree.windows) {
     for (const ws of w.workspaces) {
       titlesSeen.push(ws.title);
-      // Match exact OR with a `· human suffix` appended. Mirrors the
-      // prefix-match behavior in bash's `_mux_ws_ref` so human-readable
-      // workspace titles still resolve via the structured prefix key.
-      const matches = ws.title === wsPrefix
-        || ws.title.startsWith(wsPrefix + " ")
-        || ws.title.startsWith(wsPrefix + "·");
-      if (!matches) continue;
-      // Find the agent surface by its tab title — `spawn_task_pane` renames
-      // the tab to the task id via `cmux rename-tab --surface <s> "<task-id>"`.
-      // We previously did `cmux list-status` to read a registered
-      // `craft:pane:<task-id>` entry, but that call alone is ~490ms (most
-      // of the focus latency), and the title-based lookup is free since
-      // we're already iterating the tree.
       let surfaceRef: string | null = null;
       let surfaceAlreadyActive = false;
       for (const p of ws.panes) {
         for (const s of p.surfaces) {
-          if (s.title === taskId) {
+          if (recordedSurfaceRef && s.ref === recordedSurfaceRef) {
             surfaceRef = s.ref;
             surfaceAlreadyActive =
               !!s.selected && !!p.focused && !!ws.selected && !!w.active;
@@ -316,7 +346,7 @@ function resolveTaskState(
       return {
         kind: "found",
         workspaceRef: ws.ref,
-        windowIndex: w.index,
+        windowIndex: w.index ?? 0,
         surfaceRef,
         surfaceAlreadyActive,
         workspaceAlreadySelected: !!ws.selected && !!w.active,
@@ -329,7 +359,9 @@ function resolveTaskState(
 export function focusTaskSurface(projectName: string, taskId: string): FocusResult {
   const state = resolveTaskState(projectName, taskId);
   if (state.kind === "error") {
-    return { ok: false, error: `cmux: ${state.error} (try again — usually clears after a moment)` };
+    return isUiUnavailable(state.error)
+      ? cmuxUiUnavailable(state.error)
+      : { ok: false, error: `cmux: ${state.error} (try again — usually clears after a moment)` };
   }
   if (state.kind === "missing") {
     const craftTitles = state.titlesSeen.filter(t => t.startsWith(CMUX_PREFIX)).join(", ") || "(none)";
@@ -349,7 +381,10 @@ export function focusTaskSurface(projectName: string, taskId: string): FocusResu
   // No recorded surface (or it died). Fall back to just selecting the
   // workspace + focusing the window.
   if (!surfaceRef) {
-    if (!workspaceAlreadySelected) cmux("select-workspace", "--workspace", ws);
+    if (!workspaceAlreadySelected) {
+      const selected = cmux("select-workspace", "--workspace", ws);
+      if (!selected.ok && isUiUnavailable(selected.stderr)) return cmuxUiUnavailable(selected.stderr.trim());
+    }
     focusWindowByIndex(windowIndex);
     return {
       ok: true,
@@ -362,16 +397,23 @@ export function focusTaskSurface(projectName: string, taskId: string): FocusResu
   // Surface exists but isn't focused — do the full activation chain.
   const r = focusSurface(surfaceRef);
   if (!r.ok) {
-    if (!workspaceAlreadySelected) cmux("select-workspace", "--workspace", ws);
+    if (isUiUnavailable(r.error ?? "")) return cmuxUiUnavailable(r.error ?? "cmux UI relay unavailable");
+    const selected = cmux("select-workspace", "--workspace", ws);
+    if (!selected.ok && isUiUnavailable(selected.stderr)) return cmuxUiUnavailable(selected.stderr.trim());
     focusWindowByIndex(windowIndex);
     return {
       ok: true,
       workspaceRef: ws,
       surfaceRef,
       fallback: true,
-      error: `move-surface failed (${r.error}); selected workspace as fallback`,
+      error: `focus-surface failed (${r.error}); selected workspace as fallback`,
     };
   }
+  if (!workspaceAlreadySelected) {
+    const selected = cmux("select-workspace", "--workspace", ws);
+    if (!selected.ok && isUiUnavailable(selected.stderr)) return cmuxUiUnavailable(selected.stderr.trim());
+  }
+  focusWindowByIndex(windowIndex);
   return { ok: true, workspaceRef: ws, surfaceRef };
 }
 

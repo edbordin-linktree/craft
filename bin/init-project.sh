@@ -91,7 +91,7 @@ done
 
 # Replace placeholders in non-template files (skills, docs)
 while IFS= read -r -d '' mdfile; do
-    _sed_i "s/{{OPERATOR_NAME}}/$OPERATOR_NAME/g; s/{{GITHUB_REVIEWER}}/$GITHUB_REVIEWER/g; s|{{BRANCH_PREFIX}}|$BRANCH_PREFIX|g" "$mdfile"
+    _sed_i "s/\\{\\{OPERATOR_NAME\\}\\}/$OPERATOR_NAME/g; s/\\{\\{GITHUB_REVIEWER\\}\\}/$GITHUB_REVIEWER/g; s|\\{\\{BRANCH_PREFIX\\}\\}|$BRANCH_PREFIX|g" "$mdfile"
 done < <(find "$PROJECT_DIR" -name '*.md' -type f -print0)
 
 echo ""

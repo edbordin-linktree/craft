@@ -130,8 +130,29 @@ echo ""
 echo "buildkite-status stage cleanup"
 tmp_state="$TMPDIR/cmux-bk.json"
 jq '.windows[0].workspaces[0].panes[0].surfaces +=
-    [{ref:"surface:77", type:"browser", title:"bk:repo#7", url:"http://127.0.0.1:27435/pr/example/repo/7"}]' \
+    [{ref:"surface:77", type:"browser", title:"bk:repo#7", url:"http://127.0.0.1:27435/pr/example/repo/7"}]
+    | .windows[0].workspaces[0].metadata["craft:surface:buildkite-status"] = {
+        surface_id: "surface:77",
+        type: "browser",
+        purpose: "buildkite-status",
+        title: "bk:repo#7",
+        url: "http://127.0.0.1:27435/pr/example/repo/7"
+      }' \
     "$FAKE_CMUX_STATE" > "$tmp_state" && mv "$tmp_state" "$FAKE_CMUX_STATE"
+jq '."buildkite-status" = {
+      surface_id: "buildkite-status",
+      kind: "browser",
+      label: "bk:repo#7",
+      owner: "buildkite-status",
+      stage: "pr_review",
+      url: "http://127.0.0.1:27435/pr/example/repo/7",
+      url_match: "prefix",
+      expected_workspace_id: "craft-project-task-123",
+      cached_surface_ref: "surface:77",
+      status: "open"
+    }' \
+    "$PROJECT_DIR/tasks/task-123/.orchestrator/surfaces.json" > "$tmp_state" \
+    && mv "$tmp_state" "$PROJECT_DIR/tasks/task-123/.orchestrator/surfaces.json"
 (
     export CRAFT_ROOT="$REPO_ROOT" PROJECT_DIR="$PROJECT_DIR"
     source "$REPO_ROOT/plugins/buildkite-status/hooks.sh"

@@ -36,12 +36,17 @@
 #
 # Usage:
 #   launch-diffhub [--repo <dir>] [--timeout <seconds>] [--version <n.n.n>] [--source <dir>] [--port <port>]
+#
+# Source preference:
+#   1. --source / DIFFHUB_SOURCE_DIR
+#   2. $CRAFT_ROOT/vendor/diffhub
+#   3. npx -y diffhub@$VERSION fallback
 
 set -uo pipefail
 
 REPO="$(pwd)"
 TIMEOUT=30
-VERSION="0.1.21"
+VERSION="0.1.23"
 PORT="${DIFFHUB_PORT:-2047}"
 PORT_WAS_EXPLICIT=0
 SOURCE_DIR="${DIFFHUB_SOURCE_DIR:-}"

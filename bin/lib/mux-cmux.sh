@@ -2,7 +2,8 @@
 # mux-cmux.sh — cmux multiplexer provider for the craft orchestrator
 #
 # Uses cmux workspaces and surfaces instead of tmux sessions and windows.
-# Requires cmux to be running (it's a macOS GUI app, not a daemon).
+# Identity lives in hidden cmux metadata so the same helpers work for attached
+# Swift UI workspaces and detached remote snapshots.
 
 # Requires bash 4+ (associative arrays in primitives, lowercase parameter expansion).
 if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
@@ -12,6 +13,7 @@ fi
 
 # Workspace name prefix
 CMUX_PREFIX="craft"
+CMUX_CRAFT_SCHEMA_VERSION="1"
 
 if ! declare -f runtime_task_session_value >/dev/null 2>&1; then
     # shellcheck source=bin/lib/runtime.sh
@@ -24,6 +26,455 @@ _cmux_craft_root() {
         return
     fi
     cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P
+}
+
+_cmux_surface_key() {
+    echo "craft:surface:$1"
+}
+
+_cmux_now_utc() {
+    date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+_cmux_workspace_ref_from_json() {
+    jq -r '
+        [
+          .matches[]?,
+          .workspaces[]?,
+          .
+        ]
+        | map(select(type == "object"))
+        | .[]
+        | .workspace_id // .workspaceId // .id // .workspace_ref // .workspaceRef // .ref // empty
+    ' 2>/dev/null | head -1
+}
+
+_cmux_workspace_id_from_output() {
+    jq -r '.workspace_id // .workspaceId // .id // .workspace_ref // .workspaceRef // .ref // empty' 2>/dev/null | head -1
+}
+
+_cmux_workspace_lookup_by_metadata() {
+    local args=("--include-detached" "--json")
+    local pair
+    for pair in "$@"; do
+        [[ -n "$pair" ]] || continue
+        args+=("--metadata" "$pair")
+    done
+    cmux workspace lookup "${args[@]}" 2>/dev/null | _cmux_workspace_ref_from_json
+}
+
+_cmux_running_in_remote_workspace() {
+    [[ -n "${CMUX_WORKSPACE_ID:-}" && -n "${CMUX_REMOTE_DAEMON_SLOT:-}" ]]
+}
+
+_cmux_same_host_destination() {
+    local user host
+    user="${USER:-}"
+    [[ -n "$user" ]] || user="$(id -un 2>/dev/null || true)"
+    host="$(hostname 2>/dev/null || true)"
+    [[ -n "$host" ]] || host="localhost"
+    if [[ -n "$user" ]]; then
+        echo "${user}@${host}"
+    else
+        echo "$host"
+    fi
+}
+
+_cmux_metadata_get() {
+    local ws_ref="$1" key="$2"
+    local raw
+    raw="$(cmux metadata get --workspace "$ws_ref" "$key" --json 2>/dev/null)" || return 1
+    jq -r '
+        def value:
+          if type == "object" and has("value") then .value
+          elif type == "object" and has("entry") then .entry.value
+          else .
+          end;
+        value
+        | if . == null then empty
+          elif type == "string" then .
+          else @json
+          end
+    ' <<< "$raw" 2>/dev/null
+}
+
+_cmux_metadata_set() {
+    local ws_ref="$1" key="$2" value="$3"
+    cmux metadata set --workspace "$ws_ref" "$key" "$value" >/dev/null 2>&1
+}
+
+_cmux_metadata_set_json() {
+    local ws_ref="$1" key="$2" json="$3"
+    cmux metadata set --workspace "$ws_ref" "$key" --value-json "$json" >/dev/null 2>&1
+}
+
+_cmux_metadata_clear() {
+    local ws_ref="$1" key="$2"
+    cmux metadata clear --workspace "$ws_ref" "$key" >/dev/null 2>&1 || true
+}
+
+_cmux_tree_json() {
+    local ws_ref="$1"
+    cmux tree --workspace "$ws_ref" --json 2>/dev/null
+}
+
+_cmux_project_workspace_ref() {
+    local project_id="$1" candidate task_id
+    while IFS= read -r candidate; do
+        [[ -n "$candidate" ]] || continue
+        task_id="$(_cmux_metadata_get "$candidate" "craft:task-id" 2>/dev/null || true)"
+        if [[ -z "$task_id" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done < <(
+        cmux workspace lookup \
+            --metadata "craft:project-id=${project_id}" \
+            --include-detached \
+            --json 2>/dev/null \
+            | jq -r '
+                [
+                  .matches[]?,
+                  .workspaces[]?,
+                  .
+                ]
+                | map(select(type == "object"))
+                | .[]
+                | .workspace_id // .workspaceId // .id // .workspace_ref // .workspaceRef // .ref // empty
+            ' 2>/dev/null
+    )
+    return 1
+}
+
+_cmux_task_workspace_ref() {
+    local project_id="$1" task_id="$2"
+    _cmux_workspace_lookup_by_metadata \
+        "craft:project-id=${project_id}" \
+        "craft:task-id=${task_id}"
+}
+
+_cmux_session_project_id() {
+    local session="$1" prefix="${CMUX_PREFIX:-craft}-"
+    if [[ -n "${PROJECT_NAME:-}" ]]; then
+        echo "$PROJECT_NAME"
+        return
+    fi
+    session="${session#"$prefix"}"
+    echo "${session%%-*}"
+}
+
+_cmux_session_task_id() {
+    local session="$1" project_id="${2:-${PROJECT_NAME:-}}" prefix
+    [[ -n "$project_id" ]] || return 1
+    prefix="${CMUX_PREFIX:-craft}-${project_id}-"
+    [[ "$session" == "$prefix"* ]] || return 1
+    echo "${session#"$prefix"}"
+}
+
+_cmux_write_workspace_identity() {
+    local ws_ref="$1" project_id="$2" project_dir="$3" task_id="${4:-}" task_dir="${5:-}"
+    _cmux_metadata_set "$ws_ref" "craft:schema-version" "$CMUX_CRAFT_SCHEMA_VERSION" || return 1
+    _cmux_metadata_set "$ws_ref" "craft:project-id" "$project_id" || return 1
+    if [[ -n "$project_dir" ]]; then
+        _cmux_metadata_set "$ws_ref" "craft:project-dir" "$project_dir" || return 1
+    fi
+    if [[ -n "$task_id" ]]; then
+        _cmux_metadata_set "$ws_ref" "craft:task-id" "$task_id" || return 1
+        if [[ -n "$task_dir" ]]; then
+            _cmux_metadata_set "$ws_ref" "craft:task-dir" "$task_dir" || return 1
+        fi
+    fi
+}
+
+_cmux_surface_exists() {
+    local ws_ref="$1" surface_id="$2"
+    [[ -n "$surface_id" ]] || return 1
+    _cmux_tree_json "$ws_ref" \
+        | jq -e --arg ref "$surface_id" '
+            .windows[].workspaces[].panes[].surfaces[]
+            | select((.ref // .id // .surface_id // .surfaceId) == $ref)
+        ' >/dev/null 2>&1
+}
+
+_cmux_surface_from_metadata() {
+    local ws_ref="$1" semantic="$2" key value surface_id
+    key="$(_cmux_surface_key "$semantic")"
+    value="$(_cmux_metadata_get "$ws_ref" "$key" 2>/dev/null || true)"
+    [[ -n "$value" ]] || return 1
+    surface_id="$(jq -r '.surface_id // .surface_ref // .ref // empty' <<< "$value" 2>/dev/null)"
+    [[ -n "$surface_id" ]] || return 1
+    _cmux_surface_exists "$ws_ref" "$surface_id" || return 1
+    echo "$value"
+}
+
+_cmux_record_surface() {
+    local ws_ref="$1" semantic="$2" surface_id="$3" type="$4" purpose="$5" title="${6:-}" url="${7:-}" agent="${8:-}" placement="${9:-}"
+    local json
+    [[ -n "$placement" ]] || placement="$(_cmux_default_placement "$semantic")"
+    json="$(jq -n \
+        --arg surface_id "$surface_id" \
+        --arg type "$type" \
+        --arg purpose "$purpose" \
+        --arg title "$title" \
+        --arg url "$url" \
+        --arg agent "$agent" \
+        --arg placement "$placement" \
+        --arg updated_at "$(_cmux_now_utc)" \
+        '{
+          surface_id: $surface_id,
+          type: $type,
+          purpose: $purpose,
+          updated_at: $updated_at
+        }
+        | if $title != "" then .title = $title else . end
+        | if $url != "" then .url = $url else . end
+        | if $agent != "" then .agent = $agent else . end
+        | if $placement != "" then .placement = $placement else . end')"
+    _cmux_metadata_set_json "$ws_ref" "$(_cmux_surface_key "$semantic")" "$json"
+}
+
+_cmux_surface_id_from_output() {
+    jq -r '.surface_ref // .surfaceRef // .ref // .surface_id // .surfaceId // empty' 2>/dev/null | head -1
+}
+
+_cmux_send_command_to_surface() {
+    local ws_ref="$1" surface_id="$2" command="$3"
+    [[ -n "$command" ]] || return 0
+    cmux send --workspace "$ws_ref" --surface "$surface_id" "$command" >/dev/null 2>&1 || return 1
+    cmux send-key --workspace "$ws_ref" --surface "$surface_id" enter >/dev/null 2>&1 || return 1
+}
+
+_cmux_pane_id_from_output() {
+    jq -r '.pane_ref // .paneRef // .pane_id // .paneId // empty' 2>/dev/null | head -1
+}
+
+_cmux_default_placement() {
+    local semantic="$1"
+    if [[ "$semantic" == "agent" ]]; then
+        echo "left"
+    else
+        echo "right"
+    fi
+}
+
+_cmux_agent_surface_id() {
+    local ws_ref="$1" surface_json
+    surface_json="$(_cmux_surface_from_metadata "$ws_ref" "agent" 2>/dev/null || true)"
+    [[ -n "$surface_json" ]] || return 1
+    jq -r '.surface_id // empty' <<< "$surface_json"
+}
+
+_cmux_first_pane() {
+    local ws_ref="$1"
+    _cmux_tree_json "$ws_ref" \
+        | jq -r '.windows[].workspaces[].panes[].ref' 2>/dev/null \
+        | head -1
+}
+
+_cmux_pane_for_placement() {
+    local ws_ref="$1" placement="$2"
+    local agent_surface
+    agent_surface="$(_cmux_agent_surface_id "$ws_ref" 2>/dev/null || true)"
+
+    if [[ "$placement" == "left" ]]; then
+        if [[ -n "$agent_surface" ]]; then
+            _cmux_pane_for_surface "$ws_ref" "$agent_surface"
+            return
+        fi
+        _cmux_first_pane "$ws_ref"
+        return
+    fi
+
+    local pane
+    pane="$(_cmux_tree_json "$ws_ref" \
+        | jq -r --arg agent "$agent_surface" '
+            .windows[].workspaces[].panes[]
+            | select(if $agent == "" then true else all(.surfaces[]?; .ref != $agent) end)
+            | select(.surfaces[]? | .type == "browser")
+            | .ref
+          ' 2>/dev/null \
+        | head -1)"
+    if [[ -n "$pane" ]]; then
+        echo "$pane"
+        return
+    fi
+
+    _cmux_any_non_agent_pane "$ws_ref"
+}
+
+_cmux_first_terminal_surface_in_pane() {
+    local ws_ref="$1" pane="$2"
+    _cmux_tree_json "$ws_ref" \
+        | jq -r --arg pane "$pane" '
+            .windows[].workspaces[].panes[]
+            | select((.ref // .id // .pane_id // .paneId) == $pane)
+            | .surfaces[]?
+            | select(.type == "terminal")
+            | .ref // .id // .surface_id // .surfaceId // empty
+          ' 2>/dev/null \
+        | head -1
+}
+
+_cmux_any_non_agent_pane() {
+    local ws_ref="$1"
+    local agent_surface
+    agent_surface="$(_cmux_agent_surface_id "$ws_ref" 2>/dev/null || true)"
+    if [[ -n "$agent_surface" ]]; then
+        _cmux_tree_json "$ws_ref" \
+            | jq -r --arg agent "$agent_surface" '
+                .windows[].workspaces[].panes[]
+                | select(all(.surfaces[]?; .ref != $agent))
+                | .ref
+              ' 2>/dev/null \
+            | head -1
+        return
+    fi
+
+    _cmux_tree_json "$ws_ref" \
+        | jq -r '[.windows[].workspaces[].panes[].ref] | .[1] // empty' 2>/dev/null
+}
+
+_cmux_new_surface_in_pane() {
+    local ws_ref="$1" pane="$2" type="$3" url="$4" command="$5"
+    local raw sid args
+    args=(new-surface --workspace "$ws_ref" --pane "$pane" --type "$type" --focus false)
+    [[ "$type" == "browser" && -n "$url" ]] && args+=(--url "$url")
+    raw="$(cmux "${args[@]}" 2>&1)"
+    sid="$(printf '%s' "$raw" | _cmux_surface_id_from_output)"
+    [[ -n "$sid" ]] || sid="$(printf '%s' "$raw" | grep -oE 'surface:[0-9]+' | head -1)"
+    if [[ -z "$sid" ]]; then
+        echo "surface_create_failed: $raw" >&2
+        return 1
+    fi
+    if [[ "$type" != "browser" && -n "$command" ]]; then
+        _cmux_send_command_to_surface "$ws_ref" "$sid" "$command" || true
+    fi
+    echo "$sid"
+}
+
+_cmux_create_surface() {
+    local ws_ref="$1" type="$2" title="$3" url="$4" command="$5" direction="${6:-down}" placement="${7:-right}"
+    local raw="" sid="" pane="" split_surface=""
+
+    pane="$(_cmux_pane_for_placement "$ws_ref" "$placement" 2>/dev/null || true)"
+    if [[ -n "$pane" ]]; then
+        if [[ "$placement" == "left" && "$type" == "terminal" ]]; then
+            sid="$(_cmux_first_terminal_surface_in_pane "$ws_ref" "$pane" 2>/dev/null || true)"
+            if [[ -n "$sid" ]]; then
+                _cmux_send_command_to_surface "$ws_ref" "$sid" "$command" || true
+                [[ -n "$title" ]] && cmux rename-tab --workspace "$ws_ref" --surface "$sid" "$title" >/dev/null 2>&1 || true
+                echo "$sid"
+                return 0
+            fi
+        fi
+        sid="$(_cmux_new_surface_in_pane "$ws_ref" "$pane" "$type" "$url" "$command")" || return 1
+        [[ -n "$title" ]] && cmux rename-tab --workspace "$ws_ref" --surface "$sid" "$title" >/dev/null 2>&1 || true
+        echo "$sid"
+        return 0
+    fi
+
+    if [[ "$placement" == "right" ]]; then
+        local args=(new-pane --direction right --workspace "$ws_ref" --type "$type" --focus false)
+        [[ "$type" == "browser" && -n "$url" ]] && args+=(--url "$url")
+        raw="$(cmux "${args[@]}" 2>&1)"
+    else
+        raw="$(cmux new-split "$direction" --workspace "$ws_ref" 2>&1)"
+    fi
+    split_surface="$(printf '%s' "$raw" | _cmux_surface_id_from_output)"
+    [[ -n "$split_surface" ]] || split_surface="$(printf '%s' "$raw" | grep -oE 'surface:[^[:space:]",}]+' | head -1)"
+    if [[ -n "$split_surface" ]]; then
+        pane="$(printf '%s' "$raw" | _cmux_pane_id_from_output)"
+        [[ -n "$pane" ]] || pane="$(_cmux_pane_for_surface "$ws_ref" "$split_surface")"
+        if [[ "$type" == "terminal" ]]; then
+            sid="$split_surface"
+            _cmux_send_command_to_surface "$ws_ref" "$sid" "$command" || true
+        elif [[ "$placement" == "right" ]]; then
+            sid="$split_surface"
+        elif [[ -n "$pane" ]]; then
+            sid="$(_cmux_new_surface_in_pane "$ws_ref" "$pane" "$type" "$url" "$command")" || return 1
+            cmux close-surface --workspace "$ws_ref" --surface "$split_surface" >/dev/null 2>&1 || true
+        fi
+    fi
+    if [[ -z "$sid" ]]; then
+        echo "surface_create_failed: $raw" >&2
+        return 1
+    fi
+    [[ -n "$title" ]] && cmux rename-tab --workspace "$ws_ref" --surface "$sid" "$title" >/dev/null 2>&1 || true
+    echo "$sid"
+}
+
+_cmux_ensure_surface() {
+    local ws_ref="$1" semantic="$2" type="$3" purpose="$4"
+    shift 4
+    local title="$semantic" url="" command="" agent="" direction="down" placement="" existing sid
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --title) title="${2:-}"; shift 2 ;;
+            --url) url="${2:-}"; shift 2 ;;
+            --command) command="${2:-}"; shift 2 ;;
+            --agent) agent="${2:-}"; shift 2 ;;
+            --direction) direction="${2:-down}"; shift 2 ;;
+            --placement) placement="${2:-}"; shift 2 ;;
+            *) echo "_cmux_ensure_surface: unknown arg: $1" >&2; return 2 ;;
+        esac
+    done
+    [[ -n "$placement" ]] || placement="$(_cmux_default_placement "$semantic")"
+
+    existing="$(_cmux_surface_from_metadata "$ws_ref" "$semantic" 2>/dev/null || true)"
+    if [[ -n "$existing" ]]; then
+        sid="$(jq -r '.surface_id // empty' <<< "$existing")"
+        [[ -n "$title" ]] && cmux rename-tab --workspace "$ws_ref" --surface "$sid" "$title" >/dev/null 2>&1 || true
+        if [[ "$type" == "browser" && -n "$url" ]]; then
+            cmux browser "$sid" navigate "$url" >/dev/null 2>&1 || true
+        fi
+        _cmux_record_surface "$ws_ref" "$semantic" "$sid" "$type" "$purpose" "$title" "$url" "$agent" "$placement" || true
+        echo "$sid"
+        return 0
+    fi
+
+    sid="$(_cmux_create_surface "$ws_ref" "$type" "$title" "$url" "$command" "$direction" "$placement")" || return 1
+    _cmux_record_surface "$ws_ref" "$semantic" "$sid" "$type" "$purpose" "$title" "$url" "$agent" "$placement" || true
+    echo "$sid"
+}
+
+_cmux_send_to_surface() {
+    local ws_ref="$1" semantic="$2" text="$3" surface_json sid type
+    surface_json="$(_cmux_surface_from_metadata "$ws_ref" "$semantic" 2>/dev/null)" || {
+        echo "surface_not_found: $semantic" >&2
+        return 1
+    }
+    sid="$(jq -r '.surface_id // empty' <<< "$surface_json")"
+    type="$(jq -r '.type // empty' <<< "$surface_json")"
+    [[ "$type" == "terminal" || "$type" == "agent" ]] || {
+        echo "surface_not_terminal: $semantic" >&2
+        return 2
+    }
+    cmux send --workspace "$ws_ref" --surface "$sid" "$text" >/dev/null 2>&1
+    cmux send-key --workspace "$ws_ref" --surface "$sid" enter >/dev/null 2>&1
+}
+
+_cmux_close_surface() {
+    local ws_ref="$1" semantic="$2" surface_json sid
+    surface_json="$(_cmux_surface_from_metadata "$ws_ref" "$semantic" 2>/dev/null || true)"
+    if [[ -n "$surface_json" ]]; then
+        sid="$(jq -r '.surface_id // empty' <<< "$surface_json")"
+        [[ -n "$sid" ]] && cmux close-surface --workspace "$ws_ref" --surface "$sid" >/dev/null 2>&1 || true
+    fi
+    _cmux_metadata_clear "$ws_ref" "$(_cmux_surface_key "$semantic")"
+}
+
+mux_task_status_set() {
+    local project_id="$1" task_id="$2" status_text="$3" icon="$4" color="$5"
+    local ws_ref
+    ws_ref="$(_cmux_task_workspace_ref "$project_id" "$task_id" 2>/dev/null || true)"
+    [[ -n "$ws_ref" ]] || {
+        echo "workspace_not_found: project=$project_id task=$task_id" >&2
+        return 1
+    }
+    cmux set-status task_state "$status_text" \
+        --icon "$icon" --color "$color" \
+        --workspace "$ws_ref" >/dev/null || return
+    echo "$ws_ref"
 }
 
 _cmux_port_is_free() {
@@ -125,7 +576,7 @@ _cmux_pane_for_surface() {
     cmux tree --workspace "$ws_ref" --json 2>/dev/null \
         | jq -r --arg s "$surface" '
             .windows[].workspaces[].panes[]
-            | select(.surfaces[]? | .ref == $s)
+            | select(.surfaces[]? | (.ref // .id // .surface_id // .surfaceId) == $s)
             | .ref
           ' 2>/dev/null \
         | head -1
@@ -154,38 +605,14 @@ _cmux_ensure_dashboard_surface() {
     local ws_ref="$1" project_dir="$2" url="$3"
     local state_dir="$project_dir/.state/dashboard"
     local surface_file="$state_dir/surface"
-    local existing pane out sid orchestrator
+    local sid orchestrator
 
-    existing=$(cmux tree --workspace "$ws_ref" --json 2>/dev/null \
-        | jq -r --arg u "$url" '
-            .windows[].workspaces[].panes[].surfaces[]
-            | select(.type == "browser"
-                     and (.title == "dashboard" or ((.url // "") | startswith($u))))
-            | .ref
-          ' 2>/dev/null \
-        | head -1)
-
-    if [[ -n "$existing" ]]; then
-        cmux browser "$existing" navigate "$url" >/dev/null 2>&1 || true
-        cmux rename-tab --workspace "$ws_ref" --surface "$existing" "dashboard" >/dev/null 2>&1 || true
-        echo "$existing" > "$surface_file"
-        return 0
-    fi
-
-    pane="$(_cmux_left_dashboard_pane "$ws_ref")"
-    if [[ -n "$pane" ]]; then
-        out=$(cmux new-surface --type browser --pane "$pane" --url "$url" 2>&1)
-    else
-        out=$(cmux new-surface --type browser --workspace "$ws_ref" --url "$url" 2>&1)
-    fi
-
-    sid=$(echo "$out" | grep -oE 'surface:[0-9]+' | head -1)
-    if [[ -z "$sid" ]]; then
-        echo "ensure_session: failed to create web dashboard browser surface: $out" >&2
+    sid="$(_cmux_ensure_surface "$ws_ref" "dashboard" "browser" "dashboard" \
+        --title "dashboard" \
+        --url "$url")" || {
+        echo "ensure_session: failed to create web dashboard browser surface" >&2
         return 1
-    fi
-
-    cmux rename-tab --workspace "$ws_ref" --surface "$sid" "dashboard" >/dev/null 2>&1 || true
+    }
     echo "$sid" > "$surface_file"
 
     orchestrator=$(_mux_surface_by_tab_title "$ws_ref" "orchestrator")
@@ -235,55 +662,122 @@ _cmux_ensure_project_dashboard() {
     _cmux_ensure_dashboard_surface "$ws_ref" "$project_dir" "$url" || true
 }
 
-# --- Workspace lookup ---
-#
-# The cmux CLI accepts `--workspace <id|ref|index>` but NOT title. We use the
-# workspace title as the stable external identifier (it survives cmux restarts;
-# refs do not), and translate title → ref internally on each call.
-
 _mux_ws_ref() {
-    # Print the workspace ref for a given title. Match exact OR by structured
-    # prefix — so workspaces whose title has a human-readable suffix appended
-    # (e.g. `craft-llm-classification-task-015 · Document dependabot omission`)
-    # still resolve when called with the structured part alone.
-    #
-    # Must search across ALL cmux windows, not just the current one — the
-    # orchestrator's shell is bound to one window, but `cmux new-workspace`
-    # picks the window via GUI focus, so a task workspace can end up in a
-    # different window than the orchestrator. `cmux list-workspaces` is
-    # current-window-only; `cmux tree --all --json` gives the full view.
-    local title="$1"
+    local session="$1" project_id task_id
+    project_id="$(_cmux_session_project_id "$session")"
+    task_id="$(_cmux_session_task_id "$session" "$project_id" 2>/dev/null || true)"
+    if [[ -n "$task_id" ]]; then
+        _cmux_task_workspace_ref "$project_id" "$task_id"
+    else
+        _cmux_project_workspace_ref "$project_id"
+    fi
+}
+
+# Attached-only helper for optional UI placement. Supervisor logic must not
+# depend on cmux window movement because detached snapshots have no Swift UI
+# window to focus or mutate.
+_mux_ws_window() {
+    local session="$1" ws_ref
+    ws_ref="$(_mux_ws_ref "$session")"
+    [[ -n "$ws_ref" ]] || return 1
     cmux tree --all --json 2>/dev/null \
-        | jq -r --arg t "$title" '
-            .windows[].workspaces[]
-            | select(.title == $t
-                     or (.title | startswith($t + " "))
-                     or (.title | startswith($t + "·")))
+        | jq -r --arg ws "$ws_ref" '
+            .windows[]
+            | select(.workspaces[]? | (.ref // .id // .workspace_id // .workspaceId) == $ws)
             | .ref
           ' 2>/dev/null \
         | head -1
 }
 
-# Print the window ref that contains a workspace whose title matches the
-# given structured prefix. Mirrors _mux_ws_ref's prefix matching so that
-# workspaces with human-readable suffixes (e.g.
-# `craft-llm-classification-task-015 · Add a short …`) still resolve when
-# looked up by the structured part alone — otherwise the co-locate-to-
-# project-window logic in ensure_task_session no-ops and new task
-# workspaces land in whichever cmux window has GUI focus.
-_mux_ws_window() {
-    local title="$1"
-    cmux tree --all --json 2>/dev/null \
-        | jq -r --arg t "$title" '
-            .windows[]
-            | select(.workspaces[]?
-                | .title == $t
-                  or (.title | startswith($t + " "))
-                  or (.title | startswith($t + "·"))
-              )
-            | .ref
-          ' 2>/dev/null \
-        | head -1
+_cmux_create_task_workspace() {
+    local task_dir="$1" title="$2"
+    local raw ws_ref destination
+
+    if _cmux_running_in_remote_workspace; then
+        destination="$(_cmux_same_host_destination)"
+        raw="$(cmux ssh "$destination" ${task_dir:+--cwd "$task_dir"} --name "$title" --json 2>&1)"
+        ws_ref="$(printf '%s' "$raw" | _cmux_workspace_id_from_output)"
+        if [[ -z "$ws_ref" ]]; then
+            echo "_cmux_create_task_workspace: failed to create remote cmux task workspace: $raw" >&2
+            return 1
+        fi
+        echo "$ws_ref"
+        return 0
+    fi
+
+    raw=$(cmux new-workspace ${task_dir:+--working-directory "$task_dir"} 2>&1)
+    ws_ref="$(printf '%s' "$raw" | _cmux_workspace_id_from_output)"
+    [[ -n "$ws_ref" ]] || ws_ref=$(echo "$raw" | grep -oE 'workspace:[0-9]+' | head -1)
+    if [[ -z "$ws_ref" ]]; then
+        echo "_cmux_create_task_workspace: failed to create cmux workspace: $raw" >&2
+        return 1
+    fi
+    echo "$ws_ref"
+}
+
+_cmux_create_project_workspace() {
+    local project_dir="$1" title="$2" command="${3:-}"
+    local raw ws_ref destination
+
+    if _cmux_running_in_remote_workspace; then
+        destination="$(_cmux_same_host_destination)"
+        local args=(ssh "$destination")
+        [[ -n "$project_dir" ]] && args+=(--cwd "$project_dir")
+        [[ -n "$title" ]] && args+=(--name "$title")
+        args+=(--json)
+        raw="$(cmux "${args[@]}" 2>&1)"
+        ws_ref="$(printf '%s' "$raw" | _cmux_workspace_id_from_output)"
+        if [[ -z "$ws_ref" ]]; then
+            echo "_cmux_create_project_workspace: failed to create remote cmux project workspace: $raw" >&2
+            return 1
+        fi
+        printf '%s\n' "$raw"
+        return 0
+    fi
+
+    raw="$(cmux new-workspace --working-directory "$project_dir" 2>&1)"
+    ws_ref="$(printf '%s' "$raw" | _cmux_workspace_id_from_output)"
+    [[ -n "$ws_ref" ]] || ws_ref="$(echo "$raw" | grep -oE 'workspace:[0-9]+' | head -1)"
+    if [[ -z "$ws_ref" ]]; then
+        echo "_cmux_create_project_workspace: failed to create cmux workspace: $raw" >&2
+        return 1
+    fi
+    printf '%s\n' "$raw"
+}
+
+mux_bootstrap_orchestrator() {
+    local project_name="$1" project_dir="$2" command="$3"
+    local title="${CMUX_PREFIX}-${project_name}" ws_ref raw surface_id
+    ws_ref="$(_cmux_project_workspace_ref "$project_name" 2>/dev/null || true)"
+    if [[ -z "$ws_ref" ]]; then
+        raw="$(_cmux_create_project_workspace "$project_dir" "$title" "$command")" || return 1
+        ws_ref="$(printf '%s' "$raw" | _cmux_workspace_id_from_output)"
+        [[ -n "$ws_ref" ]] || ws_ref="$(echo "$raw" | grep -oE 'workspace:[0-9]+' | head -1)"
+        if [[ -z "$ws_ref" ]]; then
+            echo "mux_bootstrap_orchestrator: failed to create cmux workspace: $raw" >&2
+            return 1
+        fi
+    fi
+    _cmux_write_workspace_identity "$ws_ref" "$project_name" "$project_dir" || {
+        echo "mux_bootstrap_orchestrator: failed to write cmux workspace metadata for project=$project_name" >&2
+        return 1
+    }
+    cmux rename-workspace --workspace "$ws_ref" "$title" >/dev/null 2>&1 || true
+    surface_id="$(printf '%s' "$raw" | _cmux_surface_id_from_output)"
+    if [[ -n "$surface_id" ]]; then
+        _cmux_record_surface "$ws_ref" "orchestrator" "$surface_id" "terminal" "orchestrator" "orchestrator" "" "" "left" || true
+        cmux rename-tab --workspace "$ws_ref" --surface "$surface_id" "orchestrator" >/dev/null 2>&1 || true
+        _cmux_send_command_to_surface "$ws_ref" "$surface_id" "$command" || true
+        cmux select-workspace --workspace "$ws_ref" >/dev/null 2>&1 || true
+        echo "$surface_id"
+        return 0
+    fi
+    surface_id="$(_cmux_ensure_surface "$ws_ref" "orchestrator" "terminal" "orchestrator" \
+        --title "orchestrator" \
+        --command "$command" \
+        --direction down)" || return 1
+    cmux select-workspace --workspace "$ws_ref" >/dev/null 2>&1 || true
+    echo "$surface_id"
 }
 
 # Ensure the cmux workspace exists, with orchestrator + architect surfaces.
@@ -294,21 +788,26 @@ ensure_session() {
     local project_dir="$2"
     local title="${CMUX_PREFIX}-${project_name}"
 
+    [[ -n "${PROJECT_NAME:-}" ]] || PROJECT_NAME="$project_name"
     local ws_ref
-    ws_ref=$(_mux_ws_ref "$title")
+    ws_ref="$(_cmux_project_workspace_ref "$project_name" 2>/dev/null || true)"
 
     if [[ -z "$ws_ref" ]]; then
-        # `cmux new-workspace` takes --cwd / --command — NOT a positional title.
-        # Capture the returned ref from "OK workspace:N" and rename to set title.
         local raw
-        raw=$(cmux new-workspace --cwd "$project_dir" 2>&1)
-        ws_ref=$(echo "$raw" | grep -oE 'workspace:[0-9]+' | head -1)
+        raw="$(_cmux_create_project_workspace "$project_dir" "$title")" || return 1
+        ws_ref="$(printf '%s' "$raw" | _cmux_workspace_id_from_output)"
+        [[ -n "$ws_ref" ]] || ws_ref=$(echo "$raw" | grep -oE 'workspace:[0-9]+' | head -1)
         if [[ -z "$ws_ref" ]]; then
             echo "ensure_session: failed to create cmux workspace: $raw" >&2
             return 1
         fi
         cmux rename-workspace --workspace "$ws_ref" "$title" >/dev/null 2>&1 || true
     fi
+    _cmux_write_workspace_identity "$ws_ref" "$project_name" "$project_dir" || {
+        echo "ensure_session: failed to write cmux workspace metadata for project=$project_name" >&2
+        return 1
+    }
+    cmux rename-workspace --workspace "$ws_ref" "$title" >/dev/null 2>&1 || true
 
     # Pin the project workspace so it stays anchored at the top of the cmux
     # sidebar even as task workspaces are created/closed beneath it. Without
@@ -319,45 +818,27 @@ ensure_session() {
 
     _cmux_ensure_project_dashboard "$ws_ref" "$project_dir"
 
-    # Ensure an architect surface exists in this workspace. We check by tab
-    # title rather than counting terminal surfaces — the project workspace
-    # may already have other terminals (orchestrator, dashboard, ad-hoc
-    # operator tabs), but as long as none of them is named "architect" we
-    # still need to create one.
-    local architect_exists=0
-    if cmux tree --workspace "$ws_ref" --json 2>/dev/null \
-        | jq -e '.windows[].workspaces[].panes[].surfaces[] | select(.title == "architect")' \
-        >/dev/null 2>&1; then
-        architect_exists=1
-    fi
-
-    if (( architect_exists == 0 )) && [[ -n "${project_dir:-}" ]]; then
+    if [[ -n "${project_dir:-}" ]] && ! _cmux_surface_from_metadata "$ws_ref" "architect" >/dev/null 2>&1; then
         local skill_file="${project_dir}/.claude/commands/init-architect.md"
         local architect_agent="${ARCHITECT_AGENT:-claude}"
+        local architect_agent_model="${ARCHITECT_AGENT_MODEL:-}"
         local cmd
-        cmd=$(provider_architect_cmd "$architect_agent" "$skill_file" "$project_dir")
+        cmd=$(provider_architect_cmd "$architect_agent" "$skill_file" "$project_dir" "$architect_agent_model")
 
-        local arch_raw arch_surface
-        arch_raw=$(cmux new-split right --workspace "$ws_ref" 2>&1)
-        arch_surface=$(echo "$arch_raw" | grep -oE 'surface:[0-9]+' | head -1)
-
-        if [[ -n "$arch_surface" ]]; then
-            cmux rename-tab --workspace "$ws_ref" --surface "$arch_surface" "architect" >/dev/null 2>&1 || true
-            cmux send --workspace "$ws_ref" --surface "$arch_surface" "$cmd" >/dev/null 2>&1 || true
-            cmux send-key --workspace "$ws_ref" --surface "$arch_surface" enter >/dev/null 2>&1 || true
-        else
-            echo "ensure_session: failed to create architect surface: $arch_raw" >&2
-        fi
+        _cmux_ensure_surface "$ws_ref" "architect" "terminal" "architect" \
+            --title "architect" \
+            --command "$cmd" \
+            --agent "$architect_agent" \
+            --direction right >/dev/null || true
     fi
 
     echo "$title"
 }
 
 # Ensure a per-task cmux workspace exists. Returns the *structured* portion
-# of the title (e.g. `craft-llm-classification-task-015`) — callers use this
-# as the lookup token. The actual title on the workspace may have a
-# human-readable suffix appended (` · <human_title>`) for sidebar readability;
-# _mux_ws_ref's prefix-matching keeps the lookup working either way.
+# of the title (e.g. `craft-llm-classification-task-015`) for compatibility
+# with existing runtime session files. The actual cmux workspace identity lives
+# in hidden metadata, not in this title.
 #
 # Args: <project_name> <task_id> [task_dir] [human_title]
 ensure_task_session() {
@@ -365,133 +846,84 @@ ensure_task_session() {
     local structured="${CMUX_PREFIX}-${project_name}-${task_id}"
     local title="$structured"
     [[ -n "$human_title" ]] && title="${structured} · ${human_title}"
+    [[ -n "${PROJECT_NAME:-}" ]] || PROJECT_NAME="$project_name"
 
     local ws_ref
-    ws_ref=$(_mux_ws_ref "$structured")
+    ws_ref="$(_cmux_task_workspace_ref "$project_name" "$task_id" 2>/dev/null || true)"
     if [[ -z "$ws_ref" ]]; then
-        local raw
-        raw=$(cmux new-workspace ${task_dir:+--cwd "$task_dir"} 2>&1)
-        ws_ref=$(echo "$raw" | grep -oE 'workspace:[0-9]+' | head -1)
-        if [[ -z "$ws_ref" ]]; then
-            echo "ensure_task_session: failed to create cmux workspace: $raw" >&2
-            return 1
-        fi
-        cmux rename-workspace --workspace "$ws_ref" "$title" >/dev/null 2>&1 || true
-    else
-        # Workspace already exists — refresh its title in case the human
-        # title (from task frontmatter) has changed since creation.
-        cmux rename-workspace --workspace "$ws_ref" "$title" >/dev/null 2>&1 || true
+        ws_ref="$(_cmux_create_task_workspace "$task_dir" "$title")" || return 1
     fi
+    local project_dir="${PROJECT_DIR:-}"
+    if [[ -z "$project_dir" && -n "$task_dir" ]]; then
+        project_dir="$(cd "$task_dir/../.." 2>/dev/null && pwd -P || true)"
+    fi
+    _cmux_write_workspace_identity "$ws_ref" "$project_name" "$project_dir" "$task_id" "$task_dir" || {
+        echo "ensure_task_session: failed to write cmux workspace metadata for project=$project_name task=$task_id" >&2
+        return 1
+    }
+    # Workspace titles are operator-facing only. Refresh them for readability,
+    # but never use them as lookup state.
+    cmux rename-workspace --workspace "$ws_ref" "$title" >/dev/null 2>&1 || true
 
     # Co-locate the task workspace in the same cmux window as the project
     # workspace. `cmux new-workspace` has no --window flag and picks "current
     # window" based on GUI focus, so without this the task workspace can land
     # in a different window than the project — confusing for the operator.
-    local project_title="${CMUX_PREFIX}-${project_name}"
     local task_win project_win
     task_win=$(_mux_ws_window "$structured")
-    project_win=$(_mux_ws_window "$project_title")
+    project_win=$(_mux_ws_window "${CMUX_PREFIX}-${project_name}")
     if [[ -n "$task_win" && -n "$project_win" && "$task_win" != "$project_win" ]]; then
         cmux move-workspace-to-window --workspace "$ws_ref" --window "$project_win" >/dev/null 2>&1 || true
     fi
 
-    # Callers pass `$structured` to subsequent mux primitives (pane_is_running,
-    # spawn_task_pane, kill_task_pane) — the prefix match in _mux_ws_ref
-    # tolerates the human suffix on the actual workspace title.
     echo "$structured"
 }
 
-# Create a new surface for a task and run the agent in it.
-#
-# The surface's tab title is set to `$task_id` and that is now the canonical
-# anchor for finding it later — `pane_is_running` / `kill_task_pane` walk
-# the cmux tree looking for a surface with this title, no separate status
-# entry needed. (Previous design wrote `craft:pane:<task-id>=<surface-ref>`
-# to workspace status; that data is now in the tree itself via the tab
-# title, and status was visually noisy in the sidebar.)
 spawn_task_pane() {
     local session="$1" task_id="$2" prompt_file="$3" work_dir="$4"
     local agent="${5:-claude}"
+    local agent_model="${6:-}"
 
     local ws_ref
     ws_ref=$(_mux_ws_ref "$session")
     [[ -n "$ws_ref" ]] || { echo "spawn_task_pane: no workspace titled '$session'" >&2; return 1; }
 
     local cmd
-    cmd=$(provider_task_cmd "$agent" "$prompt_file" "$work_dir")
+    cmd=$(provider_task_cmd "$agent" "$prompt_file" "$work_dir" "$agent_model")
 
-    # New cmux workspaces come with a single default terminal surface. Reuse
-    # it if it's the only surface (fresh workspace). If there's already an
-    # anchor surface tagged with this task_id, the task is being re-spawned —
-    # the existing one stays; we create an additional surface so we don't
-    # clobber an in-flight agent session.
     local surface_id
-    local anchor
-    anchor=$(_mux_surface_by_tab_title "$ws_ref" "$task_id")
-    if [[ -z "$anchor" ]]; then
-        local existing
-        existing=$(cmux list-pane-surfaces --workspace "$ws_ref" 2>/dev/null \
-            | grep -oE 'surface:[0-9]+')
-        if [[ $(echo "$existing" | wc -l) -eq 1 ]]; then
-            surface_id="$existing"
-        fi
-    fi
-
-    if [[ -z "$surface_id" ]]; then
-        local raw
-        raw=$(cmux new-split down --workspace "$ws_ref" 2>&1)
-        surface_id=$(echo "$raw" | grep -oE 'surface:[0-9]+' | head -1)
-        if [[ -z "$surface_id" ]]; then
-            echo "spawn_task_pane: failed to create surface: $raw" >&2
-            return 1
-        fi
-    fi
-
-    cmux rename-tab --workspace "$ws_ref" --surface "$surface_id" "$task_id" >/dev/null 2>&1 || true
-    cmux send --workspace "$ws_ref" --surface "$surface_id" "$cmd" >/dev/null 2>&1 || true
-    cmux send-key --workspace "$ws_ref" --surface "$surface_id" enter >/dev/null 2>&1 || true
+    surface_id="$(_cmux_ensure_surface "$ws_ref" "agent" "terminal" "agent" \
+        --title "$task_id" \
+        --command "$cmd" \
+        --agent "$agent" \
+        --direction down)" || return 1
 
     echo "$surface_id"
 }
 
-# Find a surface in a workspace by its tab title. Single tree call.
 _mux_surface_by_tab_title() {
-    local ws_ref="$1" title="$2"
-    cmux tree --workspace "$ws_ref" --json 2>/dev/null \
-        | jq -r --arg t "$title" '
-            .windows[].workspaces[].panes[].surfaces[]
-            | select(.title == $t) | .ref
-          ' 2>/dev/null \
-        | head -1
+    local ws_ref="$1" semantic="$2" surface_json
+    surface_json="$(_cmux_surface_from_metadata "$ws_ref" "$semantic" 2>/dev/null || true)"
+    [[ -n "$surface_json" ]] || return 1
+    jq -r '.surface_id // empty' <<< "$surface_json"
 }
 
-# Check if a task pane is still running. Finds the agent surface by its
-# tab title (== task_id, set by spawn_task_pane), then checks whether
-# it still appears in the workspace tree.
 pane_is_running() {
-    local session="$1" task_id="$2"
+    local session="$1" _task_id="$2"
     local ws_ref
     ws_ref=$(_mux_ws_ref "$session")
     [[ -n "$ws_ref" ]] || return 1
 
-    local surface_id
-    surface_id=$(_mux_surface_by_tab_title "$ws_ref" "$task_id")
-    [[ -n "$surface_id" ]] || return 1
-    return 0
+    _cmux_surface_from_metadata "$ws_ref" "agent" >/dev/null 2>&1
 }
 
-# Kill a task pane (real close API; no more "send exit" hack).
 kill_task_pane() {
-    local session="$1" task_id="$2"
+    local session="$1" _task_id="$2"
     local ws_ref
     ws_ref=$(_mux_ws_ref "$session")
     [[ -n "$ws_ref" ]] || return 0
 
-    local surface_id
-    surface_id=$(_mux_surface_by_tab_title "$ws_ref" "$task_id")
-    if [[ -n "$surface_id" ]]; then
-        cmux close-surface --workspace "$ws_ref" --surface "$surface_id" >/dev/null 2>&1 || true
-    fi
+    _cmux_close_surface "$ws_ref" "agent"
 }
 
 # Update the orchestrator display (no-op for cmux — dashboard renders in-terminal).
@@ -504,48 +936,31 @@ update_orchestrator_display() {
     fi
 }
 
-# --- Generic primitives for skills (not used by the orchestrator daemon) ---
-#
-# cmux surfaces don't have built-in stable names. We use cmux's own
-# workspace-level status store (set-status / list-status / clear-status) as
-# the name → surface-ref map. cmux is the single source of truth — no local
-# state files. Lost only when the workspace itself is closed, at which point
-# the surfaces are gone anyway.
-#
-# Status keys are namespaced as: craft:pane:<name>=<surface-ref>
-
-_mux_status_key() {
-    echo "craft:pane:$1"
-}
-
 _mux_lookup_ref() {
-    # Given a pane name in a workspace (by title), print the surface ref or empty.
     local session="$1" name="$2"
     local ws_ref
     ws_ref=$(_mux_ws_ref "$session")
     [[ -n "$ws_ref" ]] || return 1
-    local key
-    key=$(_mux_status_key "$name")
-    local recorded
-    recorded=$(cmux list-status --workspace "$ws_ref" 2>/dev/null \
-        | awk -F '=' -v k="$key" '$1==k {print $2; exit}'
-    )
-    if [[ -n "$recorded" ]] && _mux_surface_alive "$session" "$recorded"; then
-        echo "$recorded"
-        return 0
+    _mux_surface_by_tab_title "$ws_ref" "$(_cmux_semantic_for_pane "$session" "$name")"
+}
+
+_cmux_semantic_for_pane() {
+    local session="$1" name="$2" project_id task_id
+    project_id="$(_cmux_session_project_id "$session")"
+    task_id="$(_cmux_session_task_id "$session" "$project_id" 2>/dev/null || true)"
+    if [[ -n "$task_id" && "$name" == "$task_id" ]]; then
+        echo "agent"
+    else
+        echo "$name"
     fi
-    local by_title
-    by_title=$(_mux_surface_by_tab_title "$ws_ref" "$name")
-    [[ -n "$by_title" ]] && echo "$by_title"
 }
 
 _mux_surface_alive() {
-    # Returns 0 if <surface-ref> still appears anywhere in the workspace tree.
     local session="$1" sid="$2"
     local ws_ref
     ws_ref=$(_mux_ws_ref "$session")
     [[ -n "$ws_ref" ]] || return 1
-    cmux tree --workspace "$ws_ref" 2>/dev/null | grep -qE "\b${sid}\b"
+    _cmux_surface_exists "$ws_ref" "$sid"
 }
 
 mux_spawn_named_pane() {
@@ -555,33 +970,12 @@ mux_spawn_named_pane() {
     ws_ref=$(_mux_ws_ref "$session")
     [[ -n "$ws_ref" ]] || { echo "mux-cmux: no workspace titled '$session'" >&2; return 1; }
 
-    # Idempotent: if name is recorded and the surface is still alive, no-op.
-    local existing
-    existing=$(_mux_lookup_ref "$session" "$name")
-    if [[ -n "$existing" ]] && _mux_surface_alive "$session" "$existing"; then
-        return 0
-    fi
-
-    # Create a new surface in the target workspace. new-split prints
-    # "OK surface:N workspace:M" — grep the surface ref out.
     local sid
-    sid=$(cmux new-split down --workspace "$ws_ref" 2>/dev/null \
-        | grep -oE 'surface:[0-9]+' \
-        | head -1)
-
-    if [[ -z "$sid" ]]; then
-        echo "mux-cmux: failed to create new surface in $session" >&2
-        return 1
-    fi
-
-    # Run the command in the new surface.
-    cmux send --workspace "$ws_ref" --surface "$sid" "cd '$cwd' && $cmd" >/dev/null 2>&1 || true
-    cmux send-key --workspace "$ws_ref" --surface "$sid" enter >/dev/null 2>&1 || true
-
-    # Tag the surface with our name (cosmetic — visible to the operator) and
-    # record the authoritative name→ref map in workspace status.
-    cmux rename-tab --workspace "$ws_ref" --surface "$sid" "$name" >/dev/null 2>&1 || true
-    cmux set-status "$(_mux_status_key "$name")" "$sid" --workspace "$ws_ref" >/dev/null 2>&1 || true
+    sid="$(_cmux_ensure_surface "$ws_ref" "$name" "terminal" "$name" \
+        --title "$name" \
+        --command "cd '$cwd' && $cmd" \
+        --direction down)" || return 1
+    echo "$sid"
 }
 
 mux_send_to_pane() {
@@ -590,10 +984,11 @@ mux_send_to_pane() {
     ws_ref=$(_mux_ws_ref "$session")
     [[ -n "$ws_ref" ]] || { echo "mux-cmux: no workspace titled '$session'" >&2; return 1; }
     local sid
+    local semantic
+    semantic="$(_cmux_semantic_for_pane "$session" "$name")"
     sid=$(_mux_lookup_ref "$session" "$name")
     [[ -n "$sid" ]] || { echo "mux-cmux: no pane named '$name' in '$session'" >&2; return 1; }
-    cmux send --workspace "$ws_ref" --surface "$sid" "$text" >/dev/null 2>&1 || true
-    cmux send-key --workspace "$ws_ref" --surface "$sid" enter >/dev/null 2>&1 || true
+    _cmux_send_to_surface "$ws_ref" "$semantic" "$text"
 }
 
 mux_pane_exists() {
@@ -611,10 +1006,7 @@ mux_kill_named_pane() {
     [[ -n "$ws_ref" ]] || return 1
     local sid
     sid=$(_mux_lookup_ref "$session" "$name")
-    if [[ -n "$sid" ]]; then
-        cmux close-surface --workspace "$ws_ref" --surface "$sid" >/dev/null 2>&1 || true
-    fi
-    cmux clear-status "$(_mux_status_key "$name")" --workspace "$ws_ref" >/dev/null 2>&1 || true
+    _cmux_close_surface "$ws_ref" "$(_cmux_semantic_for_pane "$session" "$name")"
 }
 
 _cmux_surface_alive_in_workspace() {
@@ -693,10 +1085,17 @@ _cmux_task_workspace_id() {
     echo "$workspace_id"
 }
 
+_cmux_task_workspace_ref_for_project_dir() {
+    local project_dir="$1" task_id="$2"
+    local project_id
+    project_id="$(basename "$project_dir")"
+    _cmux_task_workspace_ref "$project_id" "$task_id"
+}
+
 mux_surface_open() {
     local project_dir="$1" task_id="$2" surface_id="$3"
     shift 3
-    local url="" label="$surface_id" owner="craft" stage="" url_match="exact" kind="browser"
+    local url="" label="$surface_id" owner="craft" stage="" url_match="exact" kind="browser" placement=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --url) url="${2:-}"; shift 2 ;;
@@ -705,37 +1104,23 @@ mux_surface_open() {
             --stage) stage="${2:-}"; shift 2 ;;
             --url-match) url_match="${2:-}"; shift 2 ;;
             --kind) kind="${2:-}"; shift 2 ;;
+            --placement) placement="${2:-}"; shift 2 ;;
             *) echo "surface open: unknown arg: $1" >&2; return 2 ;;
         esac
     done
     [[ "$kind" == "browser" ]] || { echo "surface_unsupported_kind: $kind" >&2; return 2; }
     [[ -n "$url" ]] || { echo "surface open: --url is required" >&2; return 2; }
 
-    local workspace_id ws_ref current cached found sid surface_json
+    local workspace_id ws_ref sid surface_json
     workspace_id="$(_cmux_task_workspace_id "$project_dir" "$task_id")"
-    ws_ref="$(_mux_ws_ref "$workspace_id")"
+    ws_ref="$(_cmux_task_workspace_ref_for_project_dir "$project_dir" "$task_id" 2>/dev/null || true)"
     [[ -n "$ws_ref" ]] || { echo "workspace_not_found: $workspace_id" >&2; return 1; }
 
-    current="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id" 2>/dev/null || true)"
-    cached="$(jq -r '.cached_surface_ref // empty' <<< "${current:-{}}")"
-    if [[ -n "$cached" ]] && _cmux_surface_alive_in_workspace "$ws_ref" "$cached"; then
-        cmux browser "$cached" navigate "$url" >/dev/null 2>&1 || true
-        cmux focus-surface "$cached" >/dev/null 2>&1 || true
-        runtime_surface_patch_ref "$project_dir" "$task_id" "$surface_id" "$cached" open 2>/dev/null || true
-        echo "$cached"
-        return 0
-    fi
-
-    found="$(_cmux_browser_surface_by_url "$ws_ref" "$url" "$url_match")"
-    if [[ -n "$found" ]]; then
-        cmux rename-tab --workspace "$ws_ref" --surface "$found" "$label" >/dev/null 2>&1 || true
-        cmux focus-surface "$found" >/dev/null 2>&1 || true
-        sid="$found"
-    else
-        sid="$(_cmux_new_browser_surface_right "$ws_ref" "$url")" || return 1
-        cmux rename-tab --workspace "$ws_ref" --surface "$sid" "$label" >/dev/null 2>&1 || true
-        cmux focus-surface "$sid" >/dev/null 2>&1 || true
-    fi
+    sid="$(_cmux_ensure_surface "$ws_ref" "$surface_id" "$kind" "$surface_id" \
+        --title "$label" \
+        --url "$url" \
+        ${placement:+--placement "$placement"})" || return 1
+    cmux focus-surface "$sid" >/dev/null 2>&1 || true
 
     surface_json="$(jq -n \
         --arg surface_id "$surface_id" \
@@ -745,29 +1130,45 @@ mux_surface_open() {
         --arg stage "$stage" \
         --arg url "$url" \
         --arg url_match "$url_match" \
+        --arg placement "$placement" \
         --arg expected_workspace_id "$workspace_id" \
         --arg cached_surface_ref "$sid" \
         '{surface_id:$surface_id, kind:$kind, label:$label, owner:$owner, stage:$stage,
           url:$url, url_match:$url_match, expected_workspace_id:$expected_workspace_id,
-          cached_surface_ref:$cached_surface_ref, status:"open"}')"
+          cached_surface_ref:$cached_surface_ref, status:"open"}
+          | if $placement != "" then .placement = $placement else . end')"
     runtime_surface_put "$project_dir" "$task_id" "$surface_json"
     echo "$sid"
 }
 
 mux_surface_focus() {
     local project_dir="$1" task_id="$2" surface_id="$3"
-    local workspace_id ws_ref surface kind url url_match cached found
+    local workspace_id ws_ref surface kind url url_match cached found recorded
     surface="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id" 2>/dev/null)" || {
         echo "surface_not_found: $surface_id" >&2
         return 4
     }
     workspace_id="$(jq -r '.expected_workspace_id // empty' <<< "$surface")"
     [[ -n "$workspace_id" ]] || workspace_id="$(_cmux_task_workspace_id "$project_dir" "$task_id")"
-    ws_ref="$(_mux_ws_ref "$workspace_id")"
+    ws_ref="$(_cmux_task_workspace_ref_for_project_dir "$project_dir" "$task_id" 2>/dev/null || true)"
     [[ -n "$ws_ref" ]] || { echo "workspace_not_found: $workspace_id" >&2; return 1; }
     kind="$(jq -r '.kind // "browser"' <<< "$surface")"
+
+    recorded="$(_cmux_surface_from_metadata "$ws_ref" "$surface_id" 2>/dev/null || true)"
+    if [[ -n "$recorded" ]]; then
+        cached="$(jq -r '.surface_id // empty' <<< "$recorded")"
+        cmux focus-surface "$cached" >/dev/null 2>&1 || true
+        runtime_surface_patch_ref "$project_dir" "$task_id" "$surface_id" "$cached" open 2>/dev/null || true
+        echo "$cached"
+        return 0
+    fi
+
     cached="$(jq -r '.cached_surface_ref // empty' <<< "$surface")"
     if [[ -n "$cached" ]] && _cmux_surface_alive_in_workspace "$ws_ref" "$cached"; then
+        _cmux_record_surface "$ws_ref" "$surface_id" "$cached" "$kind" "$surface_id" \
+            "$(jq -r '.label // .surface_id // empty' <<< "$surface")" \
+            "$(jq -r '.url // empty' <<< "$surface")" \
+            >/dev/null 2>&1 || true
         cmux focus-surface "$cached" >/dev/null 2>&1 || true
         echo "$cached"
         return 0
@@ -778,6 +1179,10 @@ mux_surface_focus() {
         found="$(_cmux_browser_surface_by_url "$ws_ref" "$url" "$url_match")"
         if [[ -n "$found" ]]; then
             runtime_surface_patch_ref "$project_dir" "$task_id" "$surface_id" "$found" open
+            _cmux_record_surface "$ws_ref" "$surface_id" "$found" "$kind" "$surface_id" \
+                "$(jq -r '.label // .surface_id // empty' <<< "$surface")" \
+                "$url" \
+                >/dev/null 2>&1 || true
             cmux focus-surface "$found" >/dev/null 2>&1 || true
             echo "$found"
             return 0
@@ -793,10 +1198,15 @@ mux_surface_close() {
     surface="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id" 2>/dev/null)" || return 0
     workspace_id="$(jq -r '.expected_workspace_id // empty' <<< "$surface")"
     [[ -n "$workspace_id" ]] || workspace_id="$(_cmux_task_workspace_id "$project_dir" "$task_id")"
-    ws_ref="$(_mux_ws_ref "$workspace_id")"
+    ws_ref="$(_cmux_task_workspace_ref_for_project_dir "$project_dir" "$task_id" 2>/dev/null || true)"
     cached="$(jq -r '.cached_surface_ref // empty' <<< "$surface")"
-    if [[ -n "$ws_ref" && -n "$cached" ]] && _cmux_surface_alive_in_workspace "$ws_ref" "$cached"; then
-        cmux close-surface --workspace "$ws_ref" --surface "$cached" >/dev/null 2>&1 || true
+    if [[ -n "$ws_ref" ]]; then
+        _cmux_close_surface "$ws_ref" "$surface_id"
+        if [[ -n "$cached" ]] && _cmux_surface_alive_in_workspace "$ws_ref" "$cached"; then
+            cmux close-surface --workspace "$ws_ref" --surface "$cached" >/dev/null 2>&1 || true
+        fi
+    elif [[ -n "$cached" ]]; then
+        cmux close-surface --surface "$cached" >/dev/null 2>&1 || true
     fi
     runtime_surface_patch_ref "$project_dir" "$task_id" "$surface_id" "$cached" closed 2>/dev/null || true
 }

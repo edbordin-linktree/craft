@@ -8,7 +8,7 @@ set -uo pipefail
 
 REPO=""
 PORT="${DIFFHUB_PORT:-2047}"
-VERSION="0.1.21"
+VERSION="0.1.23"
 SOURCE_DIR=""
 
 while [[ $# -gt 0 ]]; do
@@ -27,8 +27,8 @@ done
 if [[ -n "$SOURCE_DIR" ]]; then
     cd "$SOURCE_DIR" || { echo "diffhub-server: source dir not accessible: $SOURCE_DIR" >&2; exit 1; }
     export DIFFHUB_REPO="$REPO"
-    exec npm exec --workspace apps/cli -- next dev -p "$PORT"
+    exec npm exec --workspace apps/cli diffhub -- serve --repo "$REPO" --port "$PORT" --no-open
 fi
 
 cd "$REPO" || { echo "diffhub-server: repo not accessible: $REPO" >&2; exit 1; }
-exec npx -y "diffhub@${VERSION}" --repo "$REPO" --port "$PORT" --no-open
+exec npx -y "diffhub@${VERSION}" serve --repo "$REPO" --port "$PORT" --no-open

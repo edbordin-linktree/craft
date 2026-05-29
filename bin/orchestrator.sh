@@ -289,6 +289,8 @@ run_task() {
     # Determine which agent provider to use (task-level override or project default)
     local agent
     agent=$(task_agent "$new_file")
+    local agent_model
+    agent_model=$(task_agent_model "$new_file")
 
     # Ensure the project workspace (orchestrator + architect) exists. Idempotent.
     ensure_session "$PROJECT_NAME" "$PROJECT_DIR" >/dev/null
@@ -310,11 +312,20 @@ run_task() {
     task_session=$(ensure_task_session "$PROJECT_NAME" "$tid" "$task_dir" "$task_human_title")
     local workspace_title="$task_session"
     [[ -n "$task_human_title" && "$MULTIPLEXER" == "cmux" ]] && workspace_title="${task_session} · ${task_human_title}"
-    runtime_write_task_session "$PROJECT_DIR" "$tid" "$task_session" "$workspace_title" "$task_session" "$tid"
+    local runtime_workspace_id="$task_session"
+    if [[ "$MULTIPLEXER" == "cmux" ]]; then
+        local resolved_workspace
+        resolved_workspace="$(_mux_ws_ref "$task_session" 2>/dev/null || true)"
+        if [[ "$resolved_workspace" =~ ^[0-9A-Fa-f-]{36}$ ]]; then
+            resolved_workspace="$(printf '%s' "$resolved_workspace" | tr '[:upper:]' '[:lower:]')"
+        fi
+        [[ -n "$resolved_workspace" ]] && runtime_workspace_id="$resolved_workspace"
+    fi
+    runtime_write_task_session "$PROJECT_DIR" "$tid" "$runtime_workspace_id" "$workspace_title" "$task_session" "$tid"
 
     # Spawn the agent in the task workspace, working in the task directory.
     local window
-    window=$(spawn_task_pane "$task_session" "$tid" "$prompt_file" "$task_dir" "$agent")
+    window=$(spawn_task_pane "$task_session" "$tid" "$prompt_file" "$task_dir" "$agent" "$agent_model")
 
     # Track it
     ACTIVE_TASKS["$tid"]="$window"
@@ -510,29 +521,12 @@ fi
 # workspace's initial surface, so the dashboard lives next to the architect.
 # Mirrors the tmux re-exec pattern. The invoking shell exits.
 if [[ "$MULTIPLEXER" == "cmux" ]] && [[ -z "${CRAFT_INNER_SESSION:-}" ]]; then
-    _title="${CMUX_PREFIX:-craft}-${PROJECT_NAME}"
-    _ws_ref="$(_mux_ws_ref "$_title")"
-    if [[ -z "$_ws_ref" ]]; then
-        _raw="$(cmux new-workspace --cwd "$PROJECT_DIR" 2>&1)"
-        _ws_ref="$(echo "$_raw" | grep -oE 'workspace:[0-9]+' | head -1)"
-        if [[ -z "$_ws_ref" ]]; then
-            echo "Failed to create cmux workspace: $_raw" >&2
-            exit 1
-        fi
-        cmux rename-workspace --workspace "$_ws_ref" "$_title" >/dev/null 2>&1 || true
-    fi
-    # Find the workspace's first terminal surface to host the orchestrator.
-    _initial="$(cmux tree --workspace "$_ws_ref" 2>/dev/null | grep -oE 'surface:[0-9]+' | head -1)"
-    if [[ -n "$_initial" ]]; then
-        cmux rename-tab --workspace "$_ws_ref" --surface "$_initial" "orchestrator" >/dev/null 2>&1 || true
-        cmux send --workspace "$_ws_ref" --surface "$_initial" \
-            "CRAFT_INNER_SESSION=1 exec '$0' '$PROJECT_DIR' --max-parallel $MAX_PARALLEL --poll-interval $POLL_INTERVAL" >/dev/null 2>&1
-        cmux send-key --workspace "$_ws_ref" --surface "$_initial" enter >/dev/null 2>&1
-        cmux select-workspace --workspace "$_ws_ref" >/dev/null 2>&1 || true
+    _cmd="CRAFT_INNER_SESSION=1 exec '$0' '$PROJECT_DIR' --max-parallel $MAX_PARALLEL --poll-interval $POLL_INTERVAL"
+    if _initial="$(mux_bootstrap_orchestrator "$PROJECT_NAME" "$PROJECT_DIR" "$_cmd")" && [[ -n "$_initial" ]]; then
         exit 0
     fi
     # Fallback: couldn't find an initial surface — keep running in current terminal.
-    echo "cmux: no initial surface found in $_ws_ref; running orchestrator in this terminal" >&2
+    echo "cmux: could not bootstrap orchestrator surface; running orchestrator in this terminal" >&2
 fi
 
 # Ensure multiplexer session with orchestrator + planner windows.

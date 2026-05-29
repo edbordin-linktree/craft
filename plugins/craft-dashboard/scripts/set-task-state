@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # set-task-state — Update a task workspace's cmux sidebar badge so the queue
-# state is visible at a glance. Sets `craft:state=<state>` plus `icon=<sf>`
-# and `color=<hex>` workspace status entries; cmux renders them next to the
+# state is visible at a glance. The cmux provider writes a `task_state` status
+# entry with `icon=<sf>` and `color=<hex>`; cmux renders it next to the
 # workspace title in the sidebar.
 #
 # Usage:
@@ -18,6 +18,11 @@
 # The project name is auto-detected from CRAFT_ROOT / cwd if not given.
 
 set -uo pipefail
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'
+    exit 0
+fi
 
 [[ $# -ge 2 ]] || { echo "Usage: set-task-state <task-id> <state> [--project <name>]" >&2; exit 2; }
 
@@ -45,8 +50,6 @@ if [[ -z "$PROJECT" ]]; then
 fi
 [[ -n "$PROJECT" ]] || { echo "set-task-state: could not infer --project; pass it explicitly" >&2; exit 2; }
 
-command -v cmux >/dev/null || { echo "set-task-state: cmux not on PATH" >&2; exit 1; }
-
 case "$STATE" in
     in-progress)     ICON="hammer.fill";                    COLOR="#3b82f6" ;;
     local-review)    ICON="eye.fill";                       COLOR="#a855f7" ;;
@@ -57,31 +60,24 @@ case "$STATE" in
     *)               ICON="questionmark.circle";            COLOR="#6b7280" ;;
 esac
 
-# Find the task workspace via prefix-match on the structured title key. The
-# title may have a human suffix appended after ` · `; bash's _mux_ws_ref
-# tolerates it but we duplicate the logic here to stay shell-only.
-WSPREFIX="craft-${PROJECT}-${TASK_ID}"
-WS_REF=$(cmux tree --all --json 2>/dev/null \
-    | jq -r --arg t "$WSPREFIX" '
-        .windows[].workspaces[]
-        | select(.title == $t
-                 or (.title | startswith($t + " "))
-                 or (.title | startswith($t + "·")))
-        | .ref
-      ' 2>/dev/null \
-    | head -1)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+CRAFT_ROOT="${CRAFT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}"
+# shellcheck source=bin/lib/mux-cmux.sh
+source "$CRAFT_ROOT/bin/lib/mux-cmux.sh"
 
+STATUS_ERROR="$(mktemp)"
+WS_REF="$(mux_task_status_set "$PROJECT" "$TASK_ID" "$STATE" "$ICON" "$COLOR" 2>"$STATUS_ERROR")"
+status_rc=$?
+if [[ $status_rc -ne 0 ]]; then
+    cat "$STATUS_ERROR" >&2
+    rm -f "$STATUS_ERROR"
+    exit "$status_rc"
+fi
+rm -f "$STATUS_ERROR"
 if [[ -z "$WS_REF" ]]; then
     echo "set-task-state: no cmux workspace for project=$PROJECT task=$TASK_ID" >&2
     exit 1
 fi
-
-# `cmux set-status <key> <value> [--icon ... --color ...]` writes a single
-# sidebar pill. The key is the namespace ("task_state" here), the value is
-# what cmux renders inside the pill, and --icon/--color control the visual.
-cmux set-status task_state "$STATE" \
-    --icon "$ICON" --color "$COLOR" \
-    --workspace "$WS_REF" >/dev/null 2>&1 || true
 
 printf 'set-task-state: %s/%s → %s (icon=%s color=%s ws=%s)\n' \
     "$PROJECT" "$TASK_ID" "$STATE" "$ICON" "$COLOR" "$WS_REF"

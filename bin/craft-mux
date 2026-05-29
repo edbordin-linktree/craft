@@ -16,6 +16,7 @@
 #   craft-mux open <task-id> <surface-id> ...   Open/reuse a task web surface
 #   craft-mux focus <task-id> <surface-id>      Focus a registered task surface
 #   craft-mux close <task-id> <surface-id>      Close a registered task surface
+#   craft-mux status <task-id> <state> ...      Set a visible task status banner
 #
 # Auto-detects the craft project by walking up from $PWD looking for craft.conf.
 
@@ -69,7 +70,7 @@ fi
 
 # --- Dispatch ---
 cmd="${1:-}"
-[[ -n "$cmd" ]] || { echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|close ..." >&2; exit 2; }
+[[ -n "$cmd" ]] || { echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|close|status ..." >&2; exit 2; }
 shift
 
 case "$cmd" in
@@ -129,9 +130,23 @@ case "$cmd" in
         surface_id="${1:?surface id required}"
         mux_surface_close "$PROJECT_DIR" "$task_id" "$surface_id"
         ;;
+    status)
+        task_id="${1:?task id required}"; shift
+        status_text="${1:?status required}"; shift
+        icon="circle"
+        color="#6b7280"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --icon) icon="${2:-}"; shift 2 ;;
+                --color) color="${2:-}"; shift 2 ;;
+                *) echo "craft-mux status: unknown arg: $1" >&2; exit 2 ;;
+            esac
+        done
+        mux_task_status_set "$PROJECT_NAME" "$task_id" "$status_text" "$icon" "$color"
+        ;;
     *)
         echo "craft-mux: unknown subcommand '$cmd'" >&2
-        echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|close ..." >&2
+        echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|close|status ..." >&2
         exit 2
         ;;
 esac

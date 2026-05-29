@@ -66,7 +66,7 @@ _send_dm() {
 _find_task_file() {
     local task_id="$1"
     local queue_dir
-    queue_dir="$(cd "$PLUGIN_DIR/../.." && pwd)/queue"
+    queue_dir="${PROJECT_DIR:?PROJECT_DIR required}/queue"
     for dir in waiting in-progress done blocked; do
         local f
         for f in "$queue_dir/$dir"/*.md; do
@@ -103,13 +103,13 @@ on_waiting() {
     pr_url=$(grep '^pr:' "$task_file" | sed 's/^pr:[[:space:]]*//')
     task_type=$(grep '^type:' "$task_file" | sed 's/^type:[[:space:]]*//')
     task_title=$(_task_title "$task_file")
-    project_name=$(basename "$(cd "$PLUGIN_DIR/../.." && pwd)")
+    project_name=$(basename "$PROJECT_DIR")
 
     local msg
     if [[ "$task_type" == "research" ]]; then
         msg="*[$project_name]* Research task *$task_id* has findings ready"
         [[ -n "$task_title" ]] && msg="${msg}"$'\n'"${task_title}"
-        msg="${msg}"$'\n'"Check tmux: \`craft-$project_name\` → window \`$task_id\`"
+        msg="${msg}"$'\n'"Check Craft task \`$task_id\` in project \`$project_name\`"
     elif [[ -n "$pr_url" ]]; then
         msg="*[$project_name]* Draft PR ready for review - *$task_id*: ${pr_url}"
         [[ -n "$task_title" ]] && msg="${msg}"$'\n'"${task_title}"

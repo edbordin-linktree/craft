@@ -12,8 +12,33 @@ source "$CRAFT_ROOT/bin/lib/queue.sh"
 source "$CRAFT_ROOT/bin/lib/plugins.sh"
 
 workflow_preset_dir() {
-    local workflow="$1"
-    echo "$CRAFT_ROOT/workflows/$workflow"
+    local project_dir="" workflow provider="" file plugin plugin_file
+    if [[ $# -eq 1 ]]; then
+        workflow="$1"
+    else
+        project_dir="$1"
+        workflow="$2"
+    fi
+
+    file="$CRAFT_ROOT/workflows/$workflow"
+    if [[ -f "$file/workflow.conf" ]]; then
+        provider="$file"
+    fi
+
+    if [[ -n "$project_dir" ]]; then
+        while IFS= read -r plugin; do
+            plugin_file="$CRAFT_ROOT/plugins/$plugin/workflows/$workflow"
+            [[ -f "$plugin_file/workflow.conf" ]] || continue
+            if [[ -n "$provider" ]]; then
+                echo "duplicate_workflow_provider: $workflow" >&2
+                return 2
+            fi
+            provider="$plugin_file"
+        done < <(plugin_enabled_plugins "$project_dir")
+    fi
+
+    [[ -n "$provider" ]] || return 1
+    echo "$provider"
 }
 
 workflow_task_workflow() {
@@ -21,11 +46,16 @@ workflow_task_workflow() {
 }
 
 workflow_base_stages() {
-    local workflow="$1" preset_dir workflows_root conf stages
-    workflows_root="$(cd "$CRAFT_ROOT/workflows" 2>/dev/null && pwd -P)" || { echo "workflows_root_not_found" >&2; return 1; }
-    preset_dir="$(workflow_preset_dir "$workflow")"
+    local project_dir="" workflow preset_dir conf stages
+    if [[ $# -eq 1 ]]; then
+        workflow="$1"
+    else
+        project_dir="$1"
+        workflow="$2"
+    fi
+    [[ "$workflow" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "workflow_path_escape: $workflow" >&2; return 1; }
+    preset_dir="$(workflow_preset_dir "$project_dir" "$workflow")" || { echo "workflow_not_found: $workflow" >&2; return 1; }
     preset_dir="$(cd "$preset_dir" 2>/dev/null && pwd -P)" || { echo "workflow_not_found: $workflow" >&2; return 1; }
-    [[ "$preset_dir/" == "$workflows_root/"* ]] || { echo "workflow_path_escape: $workflow" >&2; return 1; }
     conf="$preset_dir/workflow.conf"
     [[ -f "$conf" ]] || { echo "workflow_not_found: $workflow" >&2; return 1; }
     stages="$(
@@ -127,8 +157,8 @@ workflow_insert_before() {
 }
 
 workflow_plugin_stage_insertions() {
-    local project_dir="$1"
-    local plugin plugin_dir file stage insert position anchor
+    local project_dir="$1" workflow="$2" base_stages="$3"
+    local plugin plugin_dir file stage insert workflow_owner position anchor
     while IFS= read -r plugin; do
         plugin_dir="$CRAFT_ROOT/plugins/$plugin"
         [[ -d "$plugin_dir" ]] || continue
@@ -137,11 +167,28 @@ workflow_plugin_stage_insertions() {
             [[ -f "$file" ]] || continue
             stage="$(basename "$file" .md)"
             insert="$(workflow_stage_file_frontmatter "$file" insert)"
-            [[ -n "$insert" ]] || { echo "plugin_stage_missing_insert: $plugin/$stage" >&2; return 2; }
+            workflow_owner="$(workflow_stage_file_frontmatter "$file" workflow)"
+            if [[ -z "$insert" ]]; then
+                if [[ -n "$workflow_owner" ]]; then
+                    [[ "$workflow_owner" == "$workflow" ]] && continue
+                    continue
+                fi
+                echo "plugin_stage_missing_insert: $plugin/$stage" >&2
+                return 2
+            fi
+            if [[ -n "$workflow_owner" && "$workflow_owner" != "$workflow" ]]; then
+                continue
+            fi
+            if grep -qxF -- "$stage" <<< "$base_stages"; then
+                continue
+            fi
             position="${insert%%:*}"
             anchor="${insert#*:}"
             [[ "$position" != "$insert" && -n "$anchor" ]] || { echo "invalid_stage_insert: $plugin/$stage $insert" >&2; return 2; }
             [[ "$position" == "before" || "$position" == "after" ]] || { echo "invalid_stage_insert: $plugin/$stage $insert" >&2; return 2; }
+            if ! grep -qxF -- "$anchor" <<< "$base_stages"; then
+                continue
+            fi
             printf '%s\t%s\t%s\t%s\n' "$position" "$anchor" "$stage" "$plugin"
         done < <(find "$plugin_dir/stages" -maxdepth 1 -name '*.md' | sort)
     done < <(plugin_enabled_plugins "$project_dir")
@@ -151,10 +198,10 @@ workflow_resolve_stages() {
     local project_dir="$1" task_file="$2"
     local workflow stages position anchor stage plugin stage_file insertions_file
     workflow="$(workflow_task_workflow "$task_file")"
-    stages="$(workflow_base_stages "$workflow")" || return 1
+    stages="$(workflow_base_stages "$project_dir" "$workflow")" || return 1
 
     insertions_file="$(mktemp)"
-    workflow_plugin_stage_insertions "$project_dir" > "$insertions_file" || {
+    workflow_plugin_stage_insertions "$project_dir" "$workflow" "$stages" > "$insertions_file" || {
         rm -f "$insertions_file"
         return 2
     }

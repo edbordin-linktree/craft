@@ -216,6 +216,13 @@ echo "surface registry and fake cmux"
 )
 assert_eq "surface registered" "https://github.com/example/repo/pull/1" "$(jq -r '.pr.url' "$PROJECT_DIR/tasks/task-123/.orchestrator/surfaces.json")"
 assert_eq "browser opened in right pane" "pane:2" "$(jq -r '.windows[0].workspaces[0].panes[] | select(.surfaces[]?.url == "https://github.com/example/repo/pull/1").ref' "$FAKE_CMUX_STATE")"
+(
+    cd "$PROJECT_DIR" || exit 1
+    "$REPO_ROOT/bin/craft-mux" open task-123 build --url https://build.example/task-123 --label "Build" --owner test --stage qa >/dev/null
+)
+assert_eq "second browser reuses right pane" "pane:2" "$(jq -r '.windows[0].workspaces[0].panes[] | select(.surfaces[]?.url == "https://build.example/task-123").ref' "$FAKE_CMUX_STATE")"
+assert_eq "right-side browser tabs do not add splits" "2" "$(jq '[.windows[0].workspaces[0].panes[].ref] | length' "$FAKE_CMUX_STATE")"
+assert_eq "non-agent surface records right placement" "right" "$(jq -r '.windows[0].workspaces[0].metadata["craft:surface:build"].placement' "$FAKE_CMUX_STATE")"
 
 registry="$PROJECT_DIR/tasks/task-123/.orchestrator/surfaces.json"
 tmp_json="$TMPDIR/surfaces.json"
@@ -224,18 +231,57 @@ jq '.pr.cached_surface_ref = "surface:999"' "$registry" > "$tmp_json" && mv "$tm
     cd "$PROJECT_DIR" || exit 1
     "$REPO_ROOT/bin/craft-mux" focus task-123 pr >/dev/null
 )
-assert_eq "focus adopts same-workspace browser" "surface:3" "$(jq -r '.pr.cached_surface_ref' "$registry")"
+assert_eq "focus adopts same-workspace browser" "surface:2" "$(jq -r '.pr.cached_surface_ref' "$registry")"
 
 jq '.terminal = {surface_id:"terminal", kind:"terminal", label:"Terminal", owner:"test", stage:"qa", expected_workspace_id:"craft-project-task-123", cached_surface_ref:"surface:999", status:"open"}' "$registry" > "$tmp_json" && mv "$tmp_json" "$registry"
 assert_false "stale non-browser is not adopted" bash -c "cd '$PROJECT_DIR' && '$REPO_ROOT/bin/craft-mux' focus task-123 terminal"
 
 echo ""
+echo "remote task workspace creation"
+mkdir -p "$PROJECT_DIR/tasks/task-remote/.orchestrator"
+export CMUX_WORKSPACE_ID="workspace:remote"
+export CMUX_REMOTE_DAEMON_SLOT="ssh-test-slot"
+export USER="tester"
+source "$REPO_ROOT/bin/lib/mux-cmux.sh"
+remote_session="$(ensure_task_session project task-remote "$PROJECT_DIR/tasks/task-remote" "Remote task")"
+unset CMUX_WORKSPACE_ID CMUX_REMOTE_DAEMON_SLOT
+assert_eq "remote task returns structured session" "craft-project-task-remote" "$remote_session"
+remote_workspace_ref="$(_mux_ws_ref "$remote_session")"
+assert_eq "remote task resolves workspace ref" "workspace:2" "$remote_workspace_ref"
+runtime_write_task_session "$PROJECT_DIR" task-remote "$remote_workspace_ref" "craft-project-task-remote · Remote task" "$remote_session" task-remote
+assert_eq "remote task session stores workspace ref" "workspace:2" "$(jq -r '.workspace_id' "$PROJECT_DIR/tasks/task-remote/.orchestrator/task-session.json")"
+assert_eq "remote task uses cmux ssh workspace" "craft-project-task-remote · Remote task" "$(jq -r '.windows[0].workspaces[] | select(.metadata["craft:task-id"] == "task-remote").title' "$FAKE_CMUX_STATE")"
+assert_eq "remote task metadata records dir" "$PROJECT_DIR/tasks/task-remote" "$(jq -r '.windows[0].workspaces[] | select(.metadata["craft:task-id"] == "task-remote").metadata["craft:task-dir"]' "$FAKE_CMUX_STATE")"
+(
+    cd "$PROJECT_DIR" || exit 1
+    CRAFT_ROOT="$REPO_ROOT" "$REPO_ROOT/plugins/craft-dashboard/scripts/set-task-state" task-remote in-progress >/dev/null
+)
+assert_eq "task state script uses provider status helper" "in-progress" "$(jq -r '.windows[0].workspaces[] | select(.metadata["craft:task-id"] == "task-remote").status.task_state.value' "$FAKE_CMUX_STATE")"
+assert_false "task state script reports provider status failure" bash -c "cd '$PROJECT_DIR' && CRAFT_ROOT='$REPO_ROOT' FAKE_CMUX_FAIL_SET_STATUS=1 '$REPO_ROOT/plugins/craft-dashboard/scripts/set-task-state' task-remote blocked"
+
+echo ""
+echo "provider commands"
+source "$REPO_ROOT/bin/lib/providers.sh"
+assert_true "hyphenated provider env var is safe" bash -c "source '$REPO_ROOT/bin/lib/providers.sh' && SMOKE_AGENT_APPROVAL_MODE=never provider_task_cmd smoke-agent /tmp/prompt /tmp/work >/dev/null"
+assert_true "task agent model becomes provider flag" bash -c "source '$REPO_ROOT/bin/lib/providers.sh' && provider_task_cmd claude /tmp/prompt /tmp/work opus | grep -q -- '--model opus'"
+
+echo ""
 echo "dashboard command"
-export CRAFT_DASHBOARD_PORT=29999
+for _ in $(seq 1 20); do
+    CRAFT_DASHBOARD_PORT=$((30000 + RANDOM % 20000))
+    if ! curl -sS -o /dev/null -m 1 "http://127.0.0.1:${CRAFT_DASHBOARD_PORT}/healthz" 2>/dev/null; then
+        break
+    fi
+done
+export CRAFT_DASHBOARD_PORT
 export DASHBOARD_CMD='printf "%s %s\n" "$PROJECT_DIR" "$CRAFT_DASHBOARD_PORT" > "$PROJECT_DIR/dashboard-invoked"'
 source "$REPO_ROOT/bin/lib/mux-cmux.sh"
 _cmux_ensure_dashboard_server "$PROJECT_DIR" >/dev/null
-assert_eq "dashboard command invoked" "$PROJECT_DIR 29999" "$(cat "$PROJECT_DIR/dashboard-invoked")"
+for _ in $(seq 1 20); do
+    [[ -f "$PROJECT_DIR/dashboard-invoked" ]] && break
+    sleep 0.1
+done
+assert_eq "dashboard command invoked" "$PROJECT_DIR $CRAFT_DASHBOARD_PORT" "$(cat "$PROJECT_DIR/dashboard-invoked")"
 
 echo ""
 echo "────────────────────────────"

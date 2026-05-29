@@ -363,13 +363,13 @@ const server = Bun.serve({
     if (url.pathname.startsWith("/focus/task/") && req.method === "POST") {
       const id = decodeURIComponent(url.pathname.slice("/focus/task/".length));
       const r = focusTaskSurface(projectName, id);
-      return jsonResponse(r, r.ok ? 200 : 502);
+      return jsonResponse(r, r.ok || r.code === "cmux_ui_unavailable" ? 200 : 502);
     }
 
     if (url.pathname.startsWith("/focus/diffhub/") && req.method === "POST") {
       const id = decodeURIComponent(url.pathname.slice("/focus/diffhub/".length));
       const r = focusDiffhubSurface(projectDir, id);
-      return jsonResponse(r, r.ok ? 200 : 502);
+      return jsonResponse(r, r.ok || r.code === "cmux_ui_unavailable" ? 200 : 502);
     }
 
     if (url.pathname.startsWith("/focus/pr/") && req.method === "POST") {

@@ -47,7 +47,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 export CRAFT_ROOT="$TMPDIR/craft"
 PROJECT_DIR="$TMPDIR/project"
 QUEUE_DIR="$PROJECT_DIR/queue"
-mkdir -p "$CRAFT_ROOT/bin/lib" "$CRAFT_ROOT/plugins/example/fragments/stages" "$CRAFT_ROOT/plugins/example/fragments/events" "$CRAFT_ROOT/plugins/example/stages" "$CRAFT_ROOT/plugins/example/events"
+mkdir -p "$CRAFT_ROOT/bin/lib" "$CRAFT_ROOT/plugins/example/fragments/stages" "$CRAFT_ROOT/plugins/example/fragments/events" "$CRAFT_ROOT/plugins/example/stages" "$CRAFT_ROOT/plugins/example/events" "$CRAFT_ROOT/plugins/example/workflows/discovery"
 mkdir -p "$PROJECT_DIR/tasks/task-123" "$PROJECT_DIR/tasks/task-124" "$QUEUE_DIR"/{drafts,pending,approved,in-progress,waiting,done,blocked,archive}
 ln -s "$REPO_ROOT/bin/lib/queue.sh" "$CRAFT_ROOT/bin/lib/queue.sh"
 ln -s "$REPO_ROOT/bin/lib/plugins.sh" "$CRAFT_ROOT/bin/lib/plugins.sh"
@@ -75,6 +75,18 @@ insert: after:pr_review
 events: deploy.ready
 ---
 Watch the production deploy before completion.
+EOF
+
+cat > "$CRAFT_ROOT/plugins/example/workflows/discovery/workflow.conf" <<'EOF'
+STAGES="discover complete"
+EOF
+
+cat > "$CRAFT_ROOT/plugins/example/stages/discover.md" <<'EOF'
+---
+workflow: discovery
+queue_state: in-progress
+---
+Investigate the topic and queue implementation tasks.
 EOF
 
 cat > "$CRAFT_ROOT/plugins/example/events/deploy.ready.md" <<'EOF'
@@ -138,6 +150,23 @@ branch: feat/bad-workflow
 Workflow path escape fixture.
 EOF
 
+cat > "$QUEUE_DIR/in-progress/task-126.md" <<'EOF'
+---
+id: task-126
+type: discovery
+status: in-progress
+workflow: discovery
+workflow_options:
+  topic_slug: smoke
+depends_on: []
+repos: []
+branch: discovery/smoke
+---
+
+## Summary
+Discovery fixture.
+EOF
+
 source "$CRAFT_ROOT/bin/lib/workflow.sh"
 source "$CRAFT_ROOT/bin/lib/runtime.sh"
 
@@ -149,6 +178,8 @@ echo ""
 echo "workflow stage resolution"
 stages="$(workflow_resolve_stages "$PROJECT_DIR" "$QUEUE_DIR/in-progress/task-123.md" | paste -sd, -)"
 assert_eq "plugin stage inserted" "implement,qa,pr_review,watching_prod_deploy,complete" "$stages"
+discovery_stages="$(workflow_resolve_stages "$PROJECT_DIR" "$QUEUE_DIR/in-progress/task-126.md" | paste -sd, -)"
+assert_eq "plugin workflow resolves own stage" "discover,complete" "$discovery_stages"
 
 PROJECT_NO_PLUGINS="$TMPDIR/project-no-plugins"
 mkdir -p "$PROJECT_NO_PLUGINS/tasks/task-124" "$PROJECT_NO_PLUGINS/queue"/{drafts,pending,approved,in-progress,waiting,done,blocked,archive}
@@ -185,6 +216,9 @@ assert_true "prompt includes worktree setup" grep -q 'Set up repository worktree
 assert_true "prompt includes open PR state guard" grep -q 'gh pr list --state open' "$prompt"
 assert_true "prompt includes PR creation" grep -q 'create a draft PR' "$prompt"
 assert_true "prompt includes review thread resolution" grep -q 'resolveReviewThread' "$prompt"
+discovery_prompt="$TMPDIR/discovery-prompt.md"
+workflow_render_prompt "$PROJECT_DIR" "$QUEUE_DIR/in-progress/task-126.md" task-126.md > "$discovery_prompt"
+assert_true "plugin workflow prompt includes workflow-owned stage" grep -q 'Investigate the topic and queue implementation tasks.' "$discovery_prompt"
 
 cli_prompt="$TMPDIR/cli-prompt.md"
 (cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" workflow render task-123 > "$cli_prompt")

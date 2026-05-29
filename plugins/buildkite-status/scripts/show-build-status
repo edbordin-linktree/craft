@@ -14,10 +14,9 @@
 # Behaviour:
 #   1. Ensure the craft-bk-status server is running at $BK_STATUS_URL
 #      (default http://127.0.0.1:27435). Spawn it through bin/run-bg if not.
-#   2. Resolve <pr> → Buildkite build URL by running `gh pr checks <pr> --json`
-#      and finding a check whose link is on buildkite.com.
-#   3. cmux new-split right <calling pane> --type browser --url <server>/build/<org>/<pipeline>/<number>
-#   4. Rename the tab `bk:<pipeline>#<n>`.
+#   2. Resolve <pr> → a PR-centric status page.
+#   3. Open/reuse the task's `buildkite-status` browser surface through
+#      Craft's mux abstraction.
 #
 # Designed to be called from the work-task agent's babysit-pr loop when the
 # PR merges and a Buildkite check is present (so the operator can watch the
@@ -29,7 +28,12 @@ set -uo pipefail
 if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
     echo "show-build-status requires bash 4+" >&2; exit 1
 fi
-command -v cmux >/dev/null || { echo "show-build-status: cmux not on PATH" >&2; exit 1; }
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'
+    exit 0
+fi
+
 command -v gh   >/dev/null || { echo "show-build-status: gh not on PATH" >&2; exit 1; }
 command -v jq   >/dev/null || { echo "show-build-status: jq not on PATH" >&2; exit 1; }
 
@@ -80,79 +84,29 @@ fi
 # pushes, retriggers, and the post-merge deploy.
 TARGET_URL="${BK_STATUS_URL}/pr/${OWNER}/${REPO}/${NUM}"
 
-# --- 3. idempotency: reuse any existing cmux browser surface for this PR ---
-# We don't reuse OTHER PRs' bk-status tabs — each PR can have its own tab
-# in the workspace. Match by exact URL.
-EXISTING=$(cmux tree --all --json 2>/dev/null \
-    | jq -r --arg u "$TARGET_URL" '
-        .windows[].workspaces[].panes[].surfaces[]
-        | select(.type == "browser" and ((.url // "") == $u or (.url // "" | startswith($u + "/") or (.url // "" | startswith($u + "?")))))
-        | .ref
-      ' 2>/dev/null \
-    | head -1)
-if [[ -n "$EXISTING" ]]; then
-    # Tab already open for this PR — nothing to do. (No navigate needed; the
-    # page auto-refreshes via htmx every 5s.)
-    cmux rename-tab --surface "$EXISTING" "bk:${REPO}#${NUM}" >/dev/null 2>&1 || true
-    printf 'show-build-status.status=reused-existing\n'
-    printf 'show-build-status.surface=%s\n' "$EXISTING"
-    printf 'show-build-status.url=%s\n' "$TARGET_URL"
-    exit 0
-fi
-
-# Hint variables for the rest of the script
-PIPELINE="$REPO"   # used only for the tab label fallback; server picks the real pipeline
-NUMBER="$NUM"
-
-# --- 4. open the bk-status tab ---
-#
-# Preferred placement: any pane in this project's workspace that already
-# holds a browser surface (typically the pane with the diffhub or PR tab).
-# We add the new surface as a sibling tab there, so the operator's right-
-# hand pane accumulates browser tabs and the agent terminals stay in the
-# left pane. Only if no such pane exists do we fall back to splitting from
-# the caller.
-PANE_WITH_BROWSER="$(cmux tree --all --json 2>/dev/null \
-    | jq -r '.windows[] | .workspaces[] | .panes[]
-             | select(.surfaces[]? | .type == "browser")
-             | .ref' 2>/dev/null \
-    | head -1)"
-
-if [[ -n "$PANE_WITH_BROWSER" ]]; then
-    OUT=$(cmux new-surface --type browser --pane "$PANE_WITH_BROWSER" --url "$TARGET_URL" 2>&1)
-else
-    # No existing browser pane — split right from the caller (or just create
-    # in current workspace if we can't find the caller).
-    CALLER_PANE="$(cmux tree --all --json 2>/dev/null | jq -r '.caller.pane_ref // empty')"
-    if [[ -n "$CALLER_PANE" ]]; then
-        SPLIT_OUT=$(cmux new-split right --pane "$CALLER_PANE" 2>&1)
-        SPLIT_SURFACE=$(echo "$SPLIT_OUT" | grep -oE 'surface:[0-9]+' | head -1)
-        # new-split returns surface ref; resolve to the new pane via tree.
-        SPLIT_PANE=""
-        if [[ -n "$SPLIT_SURFACE" ]]; then
-            SPLIT_PANE=$(cmux tree --all --json 2>/dev/null \
-                | jq -r --arg s "$SPLIT_SURFACE" '
-                    .windows[].workspaces[].panes[]
-                    | select(.surfaces[].ref == $s)
-                    | .ref' 2>/dev/null \
-                | head -1)
-        fi
-        if [[ -n "$SPLIT_PANE" ]]; then
-            OUT=$(cmux new-surface --type browser --pane "$SPLIT_PANE" --url "$TARGET_URL" 2>&1)
-            # Close the default terminal surface that new-split created.
-            [[ -n "$SPLIT_SURFACE" ]] && cmux close-surface --surface "$SPLIT_SURFACE" >/dev/null 2>&1 || true
-        else
-            OUT=$(cmux new-surface --type browser --url "$TARGET_URL" 2>&1)
-        fi
-    else
-        OUT=$(cmux new-surface --type browser --url "$TARGET_URL" 2>&1)
+TASK_ID="${CRAFT_TASK_ID:-}"
+if [[ -z "$TASK_ID" ]]; then
+    cwd="$(pwd -P)"
+    if [[ "$cwd" == */tasks/*/* ]]; then
+        rel="${cwd#*/tasks/}"
+        TASK_ID="${rel%%/*}"
     fi
 fi
+[[ -n "$TASK_ID" ]] || { echo "show-build-status: could not infer task id; set CRAFT_TASK_ID" >&2; exit 1; }
 
-SID=$(echo "$OUT" | grep -oE 'surface:[0-9]+' | head -1)
-if [[ -n "$SID" ]]; then
-    cmux rename-tab --surface "$SID" "bk:${REPO}#${NUM}" >/dev/null 2>&1 || true
-    printf 'show-build-status.surface=%s\n' "$SID"
-fi
-printf 'show-build-status.status=created\n'
+CRAFT_MUX="$CRAFT_HOME/bin/craft-mux"
+[[ -x "$CRAFT_MUX" ]] || CRAFT_MUX="craft-mux"
+
+SID="$("$CRAFT_MUX" open "$TASK_ID" buildkite-status \
+    --url "$TARGET_URL" \
+    --url-match prefix \
+    --label "bk:${REPO}#${NUM}" \
+    --owner buildkite-status \
+    --stage pr_review)" || {
+    echo "show-build-status: failed to open Buildkite surface" >&2
+    exit 1
+}
+
+printf 'show-build-status.surface=%s\n' "$SID"
+printf 'show-build-status.status=opened\n'
 printf 'show-build-status.url=%s\n' "$TARGET_URL"

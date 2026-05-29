@@ -1,93 +1,128 @@
 #!/usr/bin/env bash
 #
-# start-discoverer — Spawn a Claude Opus discovery agent in a new cmux
-# terminal surface inside the current project workspace. The architect uses
-# this to delegate deep investigation of a single problem before drafting an
-# implementation plan; see `.claude/commands/init-discoverer.md` for the
-# discoverer's job description.
+# start-discoverer — Queue a normal Craft discovery workflow task.
+#
+# This helper is intentionally not a mux/cmux launcher. Discovery runs through
+# the same orchestrator path as any other task, using `workflow: discovery` and
+# optional `DISCOVERY_AGENT` / `DISCOVERY_AGENT_MODEL` project config.
 #
 # Usage:
 #   start-discoverer <topic-slug> <one-line-topic> [extra prompt lines...]
 #
-# Args:
-#   <topic-slug>      kebab-case identifier, used in the tab name and the
-#                     discovery report's filename
-#   <one-line-topic>  short title shown to the discoverer
-#   [extra lines...]  optional 2–3 sentences of framing. Concatenated with
-#                     spaces and appended to the prompt.
-#
 # Output:
-#   start-discoverer.surface=<surface-ref>
-#   start-discoverer.tab=discover:<topic-slug>
-#
-# The discoverer writes to `docs/discovery/<topic-slug>.md` in the project
-# directory. The architect can `Read` it once the agent finishes.
+#   start-discoverer.task=<task-id>
+#   start-discoverer.file=<queue/approved/task-id.md>
+#   start-discoverer.workflow=discovery
 
 set -uo pipefail
 
 if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
-    echo "start-discoverer requires bash 4+" >&2; exit 1
+    echo "start-discoverer requires bash 4+" >&2
+    exit 1
 fi
-command -v cmux >/dev/null || { echo "start-discoverer: cmux not on PATH" >&2; exit 1; }
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'
+    exit 0
+fi
 
 [[ $# -ge 2 ]] || {
     echo "Usage: start-discoverer <topic-slug> <one-line-topic> [extra prompt text...]" >&2
     exit 2
 }
 
-TOPIC_SLUG="$1"; shift
-TOPIC="$1"; shift
+TOPIC_SLUG="$1"
+shift
+TOPIC="$1"
+shift
 EXTRA="${*:-}"
 
-# Discoverer prompt — concatenate the init-discoverer skill with the
-# architect-provided framing.
-PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
-SKILL="$PROJECT_DIR/.claude/commands/init-discoverer.md"
-if [[ ! -f "$SKILL" ]]; then
-    echo "start-discoverer: missing $SKILL (is this a craft project?)" >&2
-    exit 1
+if [[ ! "$TOPIC_SLUG" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$ && ! "$TOPIC_SLUG" =~ ^[a-z0-9]$ ]]; then
+    echo "start-discoverer: topic slug must be kebab-case alphanumerics" >&2
+    exit 2
 fi
 
-# Find the project workspace via the structured prefix used by craft's
-# orchestrator. We do not move the discoverer to a different workspace —
-# it lives alongside the architect tab.
-PROJECT_NAME="$(basename "$PROJECT_DIR")"
-WSPREFIX="craft-${PROJECT_NAME}"
-WS_REF=$(cmux tree --all --json 2>/dev/null \
-    | jq -r --arg t "$WSPREFIX" '
-        .windows[].workspaces[]
-        | select(.title == $t
-                 or (.title | startswith($t + " "))
-                 or (.title | startswith($t + "·")))
-        | .ref
-      ' 2>/dev/null \
-    | head -1)
-[[ -n "$WS_REF" ]] || { echo "start-discoverer: no cmux workspace for project '$PROJECT_NAME'" >&2; exit 1; }
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+CRAFT_HOME="${CRAFT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}"
 
-# Create the terminal surface and label it.
-RAW=$(cmux new-surface --type terminal --workspace "$WS_REF" 2>&1)
-SID=$(echo "$RAW" | grep -oE 'surface:[0-9]+' | head -1)
-[[ -n "$SID" ]] || { echo "start-discoverer: failed to create surface: $RAW" >&2; exit 1; }
-cmux rename-tab --workspace "$WS_REF" --surface "$SID" "discover:${TOPIC_SLUG}" >/dev/null 2>&1 || true
+# shellcheck source=bin/lib/queue.sh
+source "$CRAFT_HOME/bin/lib/queue.sh"
+# shellcheck source=bin/lib/runtime.sh
+source "$CRAFT_HOME/bin/lib/runtime.sh"
+# shellcheck source=bin/lib/providers.sh
+source "$CRAFT_HOME/bin/lib/providers.sh"
 
-# Build the claude invocation. The prompt is the skill file content + a
-# short trailing block with the topic and extra framing.
-PROMPT_BODY="$(cat "$SKILL")
----
-Topic: ${TOPIC}
-Topic slug (for the output filename): ${TOPIC_SLUG}
-Specific framing from the architect: ${EXTRA}"
+PROJECT_DIR="${PROJECT_DIR:-$(pwd -P)}"
+if [[ ! -f "$PROJECT_DIR/craft.conf" ]]; then
+    if resolved="$(runtime_project_dir "$PROJECT_DIR" 2>/dev/null)"; then
+        PROJECT_DIR="$resolved"
+    else
+        echo "start-discoverer: not inside a Craft project (no craft.conf found)" >&2
+        exit 1
+    fi
+fi
 
-# Use claude with Opus. --dangerously-skip-permissions so the discoverer
-# can read files freely; it doesn't write anything outside docs/discovery/.
-# heredoc-via-printf so newlines survive `cmux send`.
-TMPFILE="$(mktemp /tmp/start-discoverer.prompt.XXXXXX)"
-printf '%s' "$PROMPT_BODY" > "$TMPFILE"
+load_provider_config "$PROJECT_DIR"
 
-cmux send --workspace "$WS_REF" --surface "$SID" \
-    "cd '$PROJECT_DIR' && claude --model opus --dangerously-skip-permissions \"\$(cat '$TMPFILE')\" ; rm -f '$TMPFILE'" \
-    >/dev/null 2>&1 || true
-cmux send-key --workspace "$WS_REF" --surface "$SID" enter >/dev/null 2>&1 || true
+mkdir -p "$PROJECT_DIR/queue/approved"
 
-printf 'start-discoverer.surface=%s\n' "$SID"
-printf 'start-discoverer.tab=discover:%s\n' "$TOPIC_SLUG"
+yaml_quote() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '"%s"' "$s"
+}
+
+next_task_id() {
+    local max=0 f base num
+    shopt -s nullglob
+    for f in "$PROJECT_DIR"/queue/*/task-*.md; do
+        base="$(basename "$f" .md)"
+        num="${base#task-}"
+        if [[ "$num" =~ ^[0-9]+$ ]] && (( 10#$num > max )); then
+            max=$((10#$num))
+        fi
+    done
+    shopt -u nullglob
+    printf 'task-%03d' $((max + 1))
+}
+
+TASK_ID="$(next_task_id)"
+TASK_FILE="$PROJECT_DIR/queue/approved/$TASK_ID.md"
+DISCOVERY_AGENT="${DISCOVERY_AGENT:-${ARCHITECT_AGENT:-}}"
+DISCOVERY_AGENT_MODEL="${DISCOVERY_AGENT_MODEL:-}"
+
+{
+    echo "---"
+    echo "id: $TASK_ID"
+    echo "type: discovery"
+    echo "status: approved"
+    echo "workflow: discovery"
+    [[ -n "$DISCOVERY_AGENT" ]] && echo "agent: $(yaml_quote "$DISCOVERY_AGENT")"
+    [[ -n "$DISCOVERY_AGENT_MODEL" ]] && echo "agent_model: $(yaml_quote "$DISCOVERY_AGENT_MODEL")"
+    echo "depends_on: []"
+    echo "repos: []"
+    echo "branch: $(yaml_quote "discovery/$TOPIC_SLUG")"
+    echo "workflow_options:"
+    echo "  topic_slug: $(yaml_quote "$TOPIC_SLUG")"
+    echo "  topic: $(yaml_quote "$TOPIC")"
+    echo "  framing: $(yaml_quote "$EXTRA")"
+    echo "qa:"
+    echo "  unit_tests: false"
+    echo "  integration_tests: false"
+    echo "---"
+    echo
+    echo "## Summary"
+    echo
+    echo "$TOPIC"
+    if [[ -n "$EXTRA" ]]; then
+        echo
+        echo "$EXTRA"
+    fi
+    echo
+    echo "## Work Log"
+} > "$TASK_FILE"
+
+printf 'start-discoverer.task=%s\n' "$TASK_ID"
+printf 'start-discoverer.file=%s\n' "${TASK_FILE#"$PROJECT_DIR/"}"
+printf 'start-discoverer.workflow=discovery\n'

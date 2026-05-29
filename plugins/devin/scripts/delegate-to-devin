@@ -109,22 +109,43 @@ else
 fi
 
 # --- build create payload ---
-PAYLOAD="$(jq -n \
-    --arg prompt "$PROMPT_BODY" \
-    --arg title "$TITLE" \
-    --arg tag "$TAG" \
-    --arg repos "$REPOS" \
-    --argjson acu_limit "$ACU_LIMIT" \
-    '
-    {
-        prompt: $prompt,
-        max_acu_limit: $acu_limit
-    }
-    + (if $title != "" then { title: $title } else {} end)
-    + (if $tag != ""   then { tags: [$tag] }  else {} end)
-    + (if $repos != "" then { repos: ($repos | split(",")) } else {} end)
-    '
-)"
+if [[ -n "$SCHEMA_FILE" ]]; then
+    PAYLOAD="$(jq -n \
+        --arg prompt "$PROMPT_BODY" \
+        --arg title "$TITLE" \
+        --arg tag "$TAG" \
+        --arg repos "$REPOS" \
+        --argjson acu_limit "$ACU_LIMIT" \
+        --slurpfile structured_output_schema "$SCHEMA_FILE" \
+        '
+        {
+            prompt: $prompt,
+            max_acu_limit: $acu_limit,
+            structured_output_schema: $structured_output_schema[0]
+        }
+        + (if $title != "" then { title: $title } else {} end)
+        + (if $tag != ""   then { tags: [$tag] }  else {} end)
+        + (if $repos != "" then { repos: ($repos | split(",")) } else {} end)
+        '
+    )"
+else
+    PAYLOAD="$(jq -n \
+        --arg prompt "$PROMPT_BODY" \
+        --arg title "$TITLE" \
+        --arg tag "$TAG" \
+        --arg repos "$REPOS" \
+        --argjson acu_limit "$ACU_LIMIT" \
+        '
+        {
+            prompt: $prompt,
+            max_acu_limit: $acu_limit
+        }
+        + (if $title != "" then { title: $title } else {} end)
+        + (if $tag != ""   then { tags: [$tag] }  else {} end)
+        + (if $repos != "" then { repos: ($repos | split(",")) } else {} end)
+        '
+    )"
+fi
 
 # --- create the session ---
 echo "delegate-to-devin: creating session..." >&2
@@ -189,15 +210,23 @@ while true; do
     fi
 
     GET_RESP="$(curl -fsS "$GET_URL" "${AUTH_HEADERS[@]}")" || die "GET $GET_URL failed"
-    STATUS="$(echo "$GET_RESP" | jq -r '.status // .status_enum // empty')"
+    STATUS="$(echo "$GET_RESP" | jq -r '.status_enum // .status // .status_detail // empty')"
 
     case "$STATUS" in
-        completed|finished|done|stopped|succeeded)
+        completed|finished|done|stopped|succeeded|exit)
             FINAL_STATUS="$STATUS"
             FINAL_RESP="$GET_RESP"
             break
             ;;
-        failed|errored|blocked|cancelled|canceled)
+        blocked)
+            if [[ "$(echo "$GET_RESP" | jq -r '.structured_output != null')" == "true" ]]; then
+                FINAL_STATUS="$STATUS"
+                FINAL_RESP="$GET_RESP"
+                break
+            fi
+            die "session $SESSION_ID ended with status=$STATUS — see $SESSION_URL"
+            ;;
+        failed|errored|cancelled|canceled)
             die "session $SESSION_ID ended with status=$STATUS — see $SESSION_URL"
             ;;
         "")
