@@ -8,6 +8,14 @@ _diffhub_worktree() {
     craft_hook_primary_worktree_for_task "$TASK_DIR" 2>/dev/null || true
 }
 
+_diffhub_ready() {
+    local worktree="$1" url
+    url="$(cat "$worktree/.orchestrator/diffhub.url" 2>/dev/null || true)"
+    [[ -n "$url" ]] || return 1
+    command -v curl >/dev/null 2>&1 || return 1
+    curl -fsS "${url%/}/api/health" >/dev/null 2>&1
+}
+
 on_stage_start() {
     craft_hook_parse_stage_args "$@"
     case "$STAGE" in
@@ -17,7 +25,7 @@ on_stage_start() {
             [[ -n "$worktree" ]] || return 0
             (
                 cd "$worktree" || exit 0
-                if [[ ! -s .orchestrator/diffhub.url ]]; then
+                if ! _diffhub_ready "$worktree"; then
                     "$PLUGIN_DIR/scripts/launch-diffhub" --repo "$worktree" >/dev/null 2>&1 || true
                 fi
             )

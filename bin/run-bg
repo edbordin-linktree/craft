@@ -130,9 +130,33 @@ LABELFILE=".orchestrator/${NAME}.label"
 PLISTFILE=".orchestrator/${NAME}.plist"
 RUNNER=".orchestrator/${NAME}.runner.sh"
 
+augment_user_path() {
+    local dir
+    for dir in "$HOME/.local/bin" "$HOME/.bun/bin"; do
+        [[ -d "$dir" ]] || continue
+        case ":$PATH:" in
+            *":$dir:"*) ;;
+            *) PATH="$dir:$PATH" ;;
+        esac
+    done
+
+    if [[ -d "$HOME/.nvm/versions/node" ]]; then
+        while IFS= read -r dir; do
+            [[ -d "$dir" ]] || continue
+            case ":$PATH:" in
+                *":$dir:"*) ;;
+                *) PATH="$dir:$PATH" ;;
+            esac
+        done < <(find "$HOME/.nvm/versions/node" -maxdepth 2 -type d -name bin 2>/dev/null | sort -Vr)
+    fi
+    export PATH
+}
+
 xml_escape() {
     sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
+
+augment_user_path
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
     BASH_BIN="$(command -v bash)"
