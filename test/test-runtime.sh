@@ -226,9 +226,22 @@ source "$REPO_ROOT/bin/lib/mux-cmux.sh"
 _cmux_ensure_surface "workspace:1" "dashboard" "browser" "dashboard" --title "dashboard" --url "http://127.0.0.1:27434" >/dev/null
 assert_eq "dashboard browser opens in left pane" "pane:1" "$(jq -r '.windows[0].workspaces[0].panes[] | select(.surfaces[]?.url == "http://127.0.0.1:27434").ref' "$FAKE_CMUX_STATE")"
 assert_eq "dashboard surface records left placement" "left" "$(jq -r '.windows[0].workspaces[0].metadata["craft:surface:dashboard"].placement' "$FAKE_CMUX_STATE")"
+tmp_json="$TMPDIR/surfaces.json"
+jq '
+  .windows[0].workspaces[0].metadata["craft:surface:architect"] = {
+    surface_id: "surface:stale",
+    type: "terminal",
+    purpose: "architect",
+    title: "architect"
+  }
+  | .windows[0].workspaces[0].panes[1].surfaces += [{ref:"surface:42", type:"terminal", title:"architect"}]
+' "$FAKE_CMUX_STATE" > "$tmp_json" && mv "$tmp_json" "$FAKE_CMUX_STATE"
+surface_count_before="$(jq '[.windows[0].workspaces[0].panes[].surfaces[]] | length' "$FAKE_CMUX_STATE")"
+_cmux_ensure_surface "workspace:1" "architect" "terminal" "architect" --title "architect" --command "echo architect" --agent "codex" >/dev/null
+assert_eq "architect adopts existing titled terminal" "surface:42" "$(jq -r '.windows[0].workspaces[0].metadata["craft:surface:architect"].surface_id' "$FAKE_CMUX_STATE")"
+assert_eq "architect adoption does not create surface" "$surface_count_before" "$(jq '[.windows[0].workspaces[0].panes[].surfaces[]] | length' "$FAKE_CMUX_STATE")"
 
 registry="$PROJECT_DIR/tasks/task-123/.orchestrator/surfaces.json"
-tmp_json="$TMPDIR/surfaces.json"
 jq '.pr.cached_surface_ref = "surface:999"' "$registry" > "$tmp_json" && mv "$tmp_json" "$registry"
 (
     cd "$PROJECT_DIR" || exit 1

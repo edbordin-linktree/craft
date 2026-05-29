@@ -207,6 +207,19 @@ _cmux_surface_from_metadata() {
     echo "$value"
 }
 
+_cmux_surface_by_title_type() {
+    local ws_ref="$1" title="$2" type="$3"
+    _cmux_tree_json "$ws_ref" \
+        | jq -r --arg title "$title" --arg type "$type" '
+            [
+              .windows[].workspaces[].panes[].surfaces[]
+              | select((.title // "") == $title and (.type // "") == $type)
+              | .ref // .id // .surface_id // .surfaceId // empty
+            ]
+            | if length == 1 then .[0] else empty end
+          ' 2>/dev/null
+}
+
 _cmux_record_surface() {
     local ws_ref="$1" semantic="$2" surface_id="$3" type="$4" purpose="$5" title="${6:-}" url="${7:-}" agent="${8:-}" placement="${9:-}"
     local json
@@ -430,6 +443,14 @@ _cmux_ensure_surface() {
         _cmux_record_surface "$ws_ref" "$semantic" "$sid" "$type" "$purpose" "$title" "$url" "$agent" "$placement" || true
         echo "$sid"
         return 0
+    fi
+    if [[ "$semantic" == "architect" ]]; then
+        sid="$(_cmux_surface_by_title_type "$ws_ref" "$title" "$type" 2>/dev/null || true)"
+        if [[ -n "$sid" ]]; then
+            _cmux_record_surface "$ws_ref" "$semantic" "$sid" "$type" "$purpose" "$title" "$url" "$agent" "$placement" || true
+            echo "$sid"
+            return 0
+        fi
     fi
 
     sid="$(_cmux_create_surface "$ws_ref" "$type" "$title" "$url" "$command" "$direction" "$placement")" || return 1
