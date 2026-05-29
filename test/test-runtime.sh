@@ -223,6 +223,31 @@ assert_eq "dashboard browser opens in left pane" "pane:1" "$(jq -r '.windows[0].
 assert_eq "dashboard surface records left placement" "left" "$(jq -r '.windows[0].workspaces[0].metadata["craft:surface:dashboard"].placement' "$FAKE_CMUX_STATE")"
 tmp_json="$TMPDIR/surfaces.json"
 jq '
+  .windows[0].workspaces += [{
+    ref: "workspace:project",
+    title: "craft-project",
+    metadata: {
+      "craft:surface:orchestrator": {
+        surface_id: "surface:50",
+        type: "terminal",
+        purpose: "orchestrator",
+        title: "orchestrator",
+        placement: "left"
+      }
+    },
+    panes: [{
+      ref: "pane:50",
+      surfaces: [{ref:"surface:50", type:"terminal", title:"orchestrator"}]
+    }]
+  }]
+' "$FAKE_CMUX_STATE" > "$tmp_json" && mv "$tmp_json" "$FAKE_CMUX_STATE"
+project_dashboard="$(_cmux_ensure_surface "workspace:project" "dashboard" "browser" "dashboard" --title "dashboard" --url "http://127.0.0.1:27434" --placement left)"
+project_architect="$(_cmux_ensure_surface "workspace:project" "architect" "terminal" "architect" --title "architect" --command "echo architect" --agent "codex" --placement right)"
+assert_eq "project dashboard shares orchestrator pane" "pane:50" "$(jq -r '.windows[0].workspaces[] | select(.ref == "workspace:project").panes[] | select(.surfaces[]?.ref == "'"$project_dashboard"'").ref' "$FAKE_CMUX_STATE")"
+assert_eq "project architect opens right pane" "true" "$(jq -r '.windows[0].workspaces[] | select(.ref == "workspace:project").panes[] | select(.surfaces[]?.ref == "'"$project_architect"'").ref != "pane:50"' "$FAKE_CMUX_STATE")"
+_cmux_ensure_dashboard_surface "workspace:project" "$PROJECT_DIR" "http://127.0.0.1:27434" >/dev/null
+assert_eq "project dashboard is focused by default" "$project_dashboard" "$(jq -r '.focused' "$FAKE_CMUX_STATE")"
+jq '
   .windows[0].workspaces[0].metadata["craft:surface:architect"] = {
     surface_id: "surface:stale",
     type: "terminal",

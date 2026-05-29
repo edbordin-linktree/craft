@@ -143,7 +143,15 @@ metadata_args_json() {
 
 case "${1:-}" in
     tree)
-        cat "$STATE"
+        ws="$(workspace_arg "$@" || true)"
+        if [[ -n "$ws" ]]; then
+            jq --arg ws "$ws" '
+                .windows |= map(.workspaces |= map(select(.ref == $ws)))
+                | .windows |= map(select((.workspaces | length) > 0))
+            ' "$STATE"
+        else
+            cat "$STATE"
+        fi
         ;;
     workspace)
         sub="${2:-}"

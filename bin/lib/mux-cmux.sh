@@ -263,7 +263,7 @@ _cmux_pane_id_from_output() {
 
 _cmux_default_placement() {
     local semantic="$1"
-    if [[ "$semantic" == "agent" || "$semantic" == "dashboard" ]]; then
+    if [[ "$semantic" == "agent" || "$semantic" == "orchestrator" || "$semantic" == "dashboard" ]]; then
         echo "left"
     else
         echo "right"
@@ -277,6 +277,18 @@ _cmux_agent_surface_id() {
     jq -r '.surface_id // empty' <<< "$surface_json"
 }
 
+_cmux_left_anchor_surface_id() {
+    local ws_ref="$1" surface_json
+    surface_json="$(_cmux_surface_from_metadata "$ws_ref" "agent" 2>/dev/null || true)"
+    if [[ -n "$surface_json" ]]; then
+        jq -r '.surface_id // empty' <<< "$surface_json"
+        return 0
+    fi
+    surface_json="$(_cmux_surface_from_metadata "$ws_ref" "orchestrator" 2>/dev/null || true)"
+    [[ -n "$surface_json" ]] || return 1
+    jq -r '.surface_id // empty' <<< "$surface_json"
+}
+
 _cmux_first_pane() {
     local ws_ref="$1"
     _cmux_tree_json "$ws_ref" \
@@ -286,12 +298,12 @@ _cmux_first_pane() {
 
 _cmux_pane_for_placement() {
     local ws_ref="$1" placement="$2"
-    local agent_surface
-    agent_surface="$(_cmux_agent_surface_id "$ws_ref" 2>/dev/null || true)"
+    local left_anchor_surface
+    left_anchor_surface="$(_cmux_left_anchor_surface_id "$ws_ref" 2>/dev/null || true)"
 
     if [[ "$placement" == "left" ]]; then
-        if [[ -n "$agent_surface" ]]; then
-            _cmux_pane_for_surface "$ws_ref" "$agent_surface"
+        if [[ -n "$left_anchor_surface" ]]; then
+            _cmux_pane_for_surface "$ws_ref" "$left_anchor_surface"
             return
         fi
         _cmux_first_pane "$ws_ref"
@@ -300,9 +312,9 @@ _cmux_pane_for_placement() {
 
     local pane
     pane="$(_cmux_tree_json "$ws_ref" \
-        | jq -r --arg agent "$agent_surface" '
+        | jq -r --arg left_anchor "$left_anchor_surface" '
             .windows[].workspaces[].panes[]
-            | select(if $agent == "" then true else all(.surfaces[]?; .ref != $agent) end)
+            | select(if $left_anchor == "" then true else all(.surfaces[]?; .ref != $left_anchor) end)
             | select(.surfaces[]? | .type == "browser")
             | .ref
           ' 2>/dev/null \
@@ -626,7 +638,7 @@ _cmux_ensure_dashboard_surface() {
     local ws_ref="$1" project_dir="$2" url="$3"
     local state_dir="$project_dir/.state/dashboard"
     local surface_file="$state_dir/surface"
-    local sid orchestrator
+    local sid
 
     sid="$(_cmux_ensure_surface "$ws_ref" "dashboard" "browser" "dashboard" \
         --title "dashboard" \
@@ -635,10 +647,10 @@ _cmux_ensure_dashboard_surface() {
         echo "ensure_session: failed to create web dashboard browser surface" >&2
         return 1
     }
+    mkdir -p "$state_dir"
     echo "$sid" > "$surface_file"
 
-    orchestrator=$(_mux_surface_by_tab_title "$ws_ref" "orchestrator")
-    [[ -n "$orchestrator" ]] && cmux focus-surface "$orchestrator" >/dev/null 2>&1 || true
+    cmux focus-surface "$sid" >/dev/null 2>&1 || true
 }
 
 _cmux_existing_dashboard_url() {
