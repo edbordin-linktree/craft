@@ -117,16 +117,20 @@ orchestrator_reexec_command() {
     echo "$cmd"
 }
 
-if [[ "$RESTART_WORKSPACE" == "1" ]]; then
+orchestrator_restart_workspace() {
     if [[ "$MULTIPLEXER" != "cmux" ]]; then
         echo "orchestrator restart workspace is only supported for cmux" >&2
-        exit 2
+        return 2
     fi
     if ! declare -f mux_replace_orchestrator_workspace >/dev/null 2>&1; then
         echo "orchestrator restart workspace is not supported by the current mux provider" >&2
-        exit 2
+        return 2
     fi
     mux_replace_orchestrator_workspace "$PROJECT_NAME" "$PROJECT_DIR" "$(orchestrator_reexec_command)" >/dev/null
+}
+
+if [[ "$RESTART_WORKSPACE" == "1" ]]; then
+    orchestrator_restart_workspace
     exit 0
 fi
 
@@ -157,6 +161,9 @@ render_dashboard() {
     echo -e "${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}║  CRAFT ORCHESTRATOR — ${CYAN}${PROJECT_NAME}${NC}${BOLD}$(printf '%*s' $((28 - ${#PROJECT_NAME})) '')║${NC}"
     echo -e "${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
+    if [[ "$MULTIPLEXER" == "cmux" ]]; then
+        echo -e "  ${CYAN}Ctrl-R${NC} reload orchestrator workspace"
+    fi
     echo ""
 
     # Counts
@@ -272,6 +279,35 @@ render_dashboard() {
     now=$(date '+%H:%M:%S')
     echo -e "  ${BOLD}Last poll:${NC} $now  ${BOLD}Parallel limit:${NC} $MAX_PARALLEL  ${BOLD}Poll interval:${NC} ${POLL_INTERVAL}s  ${BOLD}Agent:${NC} $DEFAULT_AGENT"
     echo -e "  ${BOLD}Ctrl+C${NC} to stop orchestrator"
+}
+
+handle_orchestrator_key() {
+    local key="$1"
+    if [[ "$MULTIPLEXER" == "cmux" && "$key" == $'\022' ]]; then
+        log "Reload requested from orchestrator pane"
+        if orchestrator_restart_workspace; then
+            log "Replacement orchestrator workspace launched"
+            exit 0
+        fi
+        log "Replacement orchestrator workspace failed"
+        return 1
+    fi
+    return 0
+}
+
+sleep_or_handle_keys() {
+    local seconds="$1" elapsed=0 key=""
+    if [[ "$MULTIPLEXER" != "cmux" || ! -r /dev/tty ]]; then
+        sleep "$seconds"
+        return
+    fi
+    while (( elapsed < seconds )); do
+        key=""
+        if read -r -s -n 1 -t 1 key < /dev/tty; then
+            handle_orchestrator_key "$key" || true
+        fi
+        elapsed=$((elapsed + 1))
+    done
 }
 
 # --- Task Execution ---
@@ -623,7 +659,7 @@ while true; do
     # Render the dashboard
     render_dashboard
 
-    # Sleep
-    sleep "$POLL_INTERVAL"
+    # Sleep, but keep the orchestrator pane responsive to operator keys.
+    sleep_or_handle_keys "$POLL_INTERVAL"
     poll_count=$((poll_count + 1))
 done
