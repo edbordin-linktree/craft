@@ -160,7 +160,8 @@ _cmux_close_workspace_async() {
 
 _cmux_tree_json() {
     local ws_ref="$1"
-    cmux tree --workspace "$ws_ref" --json 2>/dev/null
+    cmux --id-format both tree --workspace "$ws_ref" --json 2>/dev/null \
+        || cmux tree --workspace "$ws_ref" --json 2>/dev/null
 }
 
 _cmux_project_workspace_ref() {

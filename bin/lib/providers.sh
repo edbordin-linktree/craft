@@ -20,16 +20,17 @@ provider_flags() {
 
     case "$provider" in
         codex)
+            flags="-c check_for_update_on_startup=false"
             # bypass:    no approvals, no sandbox (--dangerously-bypass-approvals-and-sandbox)
             # never:     no approvals, sandboxed (-a never)
             # full-auto: model decides when to ask, sandboxed (--full-auto)
             # auto-edit, on-request, untrusted: passed through to -a
             if [[ "$approval" == "bypass" ]]; then
-                flags="--dangerously-bypass-approvals-and-sandbox"
+                flags="$flags --dangerously-bypass-approvals-and-sandbox"
             elif [[ "$approval" == "full-auto" ]]; then
-                flags="--full-auto"
+                flags="$flags --full-auto"
             elif [[ -n "$approval" ]]; then
-                flags="-a $approval"
+                flags="$flags -a $approval"
             fi
             [[ -n "$model" ]] && flags="${flags:+$flags }--model $(printf '%q' "$model")"
             echo "$flags"
@@ -107,7 +108,7 @@ provider_task_resume_cmd() {
             echo "cd '${work_dir}' && ${env} && claude --continue${flags:+ $flags} \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
             ;;
         codex)
-            echo "cd '${work_dir}' && ${env} && codex${flags:+ $flags} resume --last \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
+            echo "cd '${work_dir}' && ${env} && printf '%s\n' \"\$(cat '${prompt_file}')\" ; codex${flags:+ $flags} resume --last ; rm -f '${prompt_file}'"
             ;;
         *)
             # Generic providers do not have a known resume primitive; use the

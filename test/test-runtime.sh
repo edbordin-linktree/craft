@@ -168,6 +168,10 @@ claude_resume_cmd="$(provider_task_resume_cmd claude "$TMPDIR/prompt.txt" "$PROJ
 codex_resume_cmd="$(provider_task_resume_cmd codex "$TMPDIR/prompt.txt" "$PROJECT_DIR/tasks/task-123" "gpt-5")"
 assert_true "claude uses continue resume" bash -c "grep -q 'claude --continue' <<< \"\$1\"" _ "$claude_resume_cmd"
 assert_true "codex uses resume --last" bash -c "grep -q 'codex.*resume --last' <<< \"\$1\"" _ "$codex_resume_cmd"
+assert_true "codex disables startup update prompt" \
+    bash -c "grep -q -- '-c check_for_update_on_startup=false' <<< \"\$1\"" _ "$codex_resume_cmd"
+assert_false "codex does not pass resume prompt as session id" \
+    bash -c 'grep -Fq "$2" <<< "$1"' _ "$codex_resume_cmd" 'resume --last "$(cat'
 
 echo ""
 echo "event queue"
