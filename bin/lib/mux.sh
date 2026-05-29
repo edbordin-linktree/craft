@@ -58,6 +58,11 @@
 #   mux_replace_orchestrator_workspace <project-name> <project-dir> <command>
 #     → Optional provider hook. Replace the project orchestrator workspace with
 #       a freshly bootstrapped workspace running <command>.
+#
+#   mux_adopt_current_orchestrator_workspace <project-name> <project-dir>
+#     → Optional provider hook. If the current process is already running
+#       inside a multiplexer surface created for this project launch, mark that
+#       workspace/surface as the orchestrator instead of creating another one.
 
 MUX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

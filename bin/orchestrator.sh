@@ -700,12 +700,18 @@ fi
 # workspace's initial surface, so the dashboard lives next to the architect.
 # Mirrors the tmux re-exec pattern. The invoking shell exits.
 if [[ "$MULTIPLEXER" == "cmux" ]] && [[ -z "${CRAFT_INNER_SESSION:-}" ]]; then
-    _cmd="$(orchestrator_reexec_command)"
-    if _initial="$(mux_bootstrap_orchestrator "$PROJECT_NAME" "$PROJECT_DIR" "$_cmd")" && [[ -n "$_initial" ]]; then
-        exit 0
+    if declare -F mux_adopt_current_orchestrator_workspace >/dev/null \
+        && _initial="$(mux_adopt_current_orchestrator_workspace "$PROJECT_NAME" "$PROJECT_DIR")" \
+        && [[ -n "$_initial" ]]; then
+        export CRAFT_INNER_SESSION=1
+    else
+        _cmd="$(orchestrator_reexec_command)"
+        if _initial="$(mux_bootstrap_orchestrator "$PROJECT_NAME" "$PROJECT_DIR" "$_cmd")" && [[ -n "$_initial" ]]; then
+            exit 0
+        fi
+        # Fallback: couldn't find an initial surface — keep running in current terminal.
+        echo "cmux: could not bootstrap orchestrator surface; running orchestrator in this terminal" >&2
     fi
-    # Fallback: couldn't find an initial surface — keep running in current terminal.
-    echo "cmux: could not bootstrap orchestrator surface; running orchestrator in this terminal" >&2
 fi
 
 # Ensure multiplexer session with orchestrator + planner windows.

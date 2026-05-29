@@ -86,6 +86,10 @@ _cmux_running_in_remote_workspace() {
     [[ -n "${CMUX_WORKSPACE_ID:-}" && -n "${CMUX_REMOTE_DAEMON_SLOT:-}" ]]
 }
 
+_cmux_running_in_surface() {
+    [[ -n "${CMUX_WORKSPACE_ID:-}" && -n "${CMUX_SURFACE_ID:-}" ]]
+}
+
 _cmux_same_host_destination() {
     local user host
     user="${USER:-}"
@@ -525,7 +529,10 @@ _cmux_new_surface_in_pane() {
         return 1
     fi
     if [[ "$type" != "browser" && -n "$command" ]]; then
-        _cmux_send_command_to_surface "$ws_ref" "$sid" "$command" || true
+        _cmux_send_command_to_surface "$ws_ref" "$sid" "$command" || {
+            echo "surface_send_failed: $sid" >&2
+            return 1
+        }
     fi
     echo "$sid"
 }
@@ -539,7 +546,10 @@ _cmux_create_surface() {
         if [[ "$placement" == "left" && "$type" == "terminal" ]]; then
             sid="$(_cmux_first_terminal_surface_in_pane "$ws_ref" "$pane" 2>/dev/null || true)"
             if [[ -n "$sid" ]]; then
-                _cmux_send_command_to_surface "$ws_ref" "$sid" "$command" || true
+                _cmux_send_command_to_surface "$ws_ref" "$sid" "$command" || {
+                    echo "surface_send_failed: $sid" >&2
+                    return 1
+                }
                 [[ -n "$title" ]] && cmux rename-tab --workspace "$ws_ref" --surface "$sid" "$title" >/dev/null 2>&1 || true
                 echo "$sid"
                 return 0
@@ -565,7 +575,10 @@ _cmux_create_surface() {
         [[ -n "$pane" ]] || pane="$(_cmux_pane_for_surface "$ws_ref" "$split_surface")"
         if [[ "$type" == "terminal" ]]; then
             sid="$split_surface"
-            _cmux_send_command_to_surface "$ws_ref" "$sid" "$command" || true
+            _cmux_send_command_to_surface "$ws_ref" "$sid" "$command" || {
+                echo "surface_send_failed: $sid" >&2
+                return 1
+            }
         elif [[ "$placement" == "right" ]]; then
             sid="$split_surface"
         elif [[ -n "$pane" ]]; then
@@ -606,13 +619,19 @@ _cmux_ensure_surface() {
         if [[ "$type" == "browser" && -n "$url" ]]; then
             cmux browser "$sid" navigate "$url" >/dev/null 2>&1 || true
         fi
-        _cmux_record_surface "$ws_ref" "$semantic" "$sid" "$type" "$purpose" "$title" "$url" "$agent" "$placement" || true
+        _cmux_record_surface "$ws_ref" "$semantic" "$sid" "$type" "$purpose" "$title" "$url" "$agent" "$placement" || {
+            echo "surface_metadata_record_failed: $semantic $sid" >&2
+            return 1
+        }
         echo "$sid"
         return 0
     fi
 
     sid="$(_cmux_create_surface "$ws_ref" "$type" "$title" "$url" "$command" "$direction" "$placement")" || return 1
-    _cmux_record_surface "$ws_ref" "$semantic" "$sid" "$type" "$purpose" "$title" "$url" "$agent" "$placement" || true
+    _cmux_record_surface "$ws_ref" "$semantic" "$sid" "$type" "$purpose" "$title" "$url" "$agent" "$placement" || {
+        echo "surface_metadata_record_failed: $semantic $sid" >&2
+        return 1
+    }
     echo "$sid"
 }
 
@@ -1012,6 +1031,37 @@ mux_bootstrap_orchestrator() {
         --command "$command" \
         --direction down)" || return 1
     cmux select-workspace --workspace "$ws_ref" >/dev/null 2>&1 || true
+    echo "$surface_id"
+}
+
+mux_adopt_current_orchestrator_workspace() {
+    local project_name="$1" project_dir="$2"
+    local ws_ref="${CMUX_WORKSPACE_ID:-}" surface_id="${CMUX_SURFACE_ID:-}"
+    local title="${CMUX_PREFIX}-${project_name}" existing_project existing_task
+
+    _cmux_running_in_surface || return 1
+    _cmux_surface_exists "$ws_ref" "$surface_id" || return 1
+
+    existing_project="$(_cmux_metadata_get "$ws_ref" "craft:project-id" 2>/dev/null || true)"
+    existing_task="$(_cmux_metadata_get "$ws_ref" "craft:task-id" 2>/dev/null || true)"
+    if [[ -n "$existing_project" && "$existing_project" != "$project_name" ]]; then
+        return 1
+    fi
+    if [[ -n "$existing_task" ]]; then
+        return 1
+    fi
+
+    _cmux_write_workspace_identity "$ws_ref" "$project_name" "$project_dir" || {
+        echo "mux_adopt_current_orchestrator_workspace: failed to write cmux workspace metadata for project=$project_name" >&2
+        return 1
+    }
+    cmux rename-workspace --workspace "$ws_ref" "$title" >/dev/null 2>&1 || true
+    cmux workspace-action --workspace "$ws_ref" --action pin >/dev/null 2>&1 || true
+    _cmux_record_surface "$ws_ref" "orchestrator" "$surface_id" "terminal" "orchestrator" "orchestrator" "" "" "left" || {
+        echo "mux_adopt_current_orchestrator_workspace: failed to write orchestrator surface metadata for $surface_id" >&2
+        return 1
+    }
+    cmux rename-tab --workspace "$ws_ref" --surface "$surface_id" "orchestrator" >/dev/null 2>&1 || true
     echo "$surface_id"
 }
 

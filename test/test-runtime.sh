@@ -285,6 +285,26 @@ jq '
 _cmux_ensure_dashboard_surface "workspace:project" "$PROJECT_DIR" "http://127.0.0.1:27434" >/dev/null
 assert_eq "dashboard ensure prunes duplicate browsers" "1" "$(jq '[.windows[0].workspaces[] | select(.ref == "workspace:project").panes[].surfaces[] | select(.type == "browser" and (.url // "" | startswith("http://localhost:27434") or startswith("http://127.0.0.1:27434")))] | length' "$FAKE_CMUX_STATE")"
 jq '
+  .windows[0].workspaces += [{
+    ref: "workspace:adopt",
+    title: "craft-launch-project",
+    metadata: {},
+    panes: [{
+      ref: "pane:adopt",
+      surfaces: [{
+        ref:"surface:adopt",
+        type:"terminal",
+        title:"launcher",
+        metadata:{}
+      }]
+    }]
+  }]
+' "$FAKE_CMUX_STATE" > "$tmp_json" && mv "$tmp_json" "$FAKE_CMUX_STATE"
+CMUX_WORKSPACE_ID=workspace:adopt CMUX_SURFACE_ID=surface:adopt \
+    mux_adopt_current_orchestrator_workspace adopted "$PROJECT_DIR" >/dev/null
+assert_eq "current cmux workspace adopted for orchestrator" "adopted" "$(jq -r '.windows[0].workspaces[] | select(.ref == "workspace:adopt").metadata["craft:project-id"]' "$FAKE_CMUX_STATE")"
+assert_eq "current cmux surface recorded as orchestrator" "orchestrator" "$(jq -r '.windows[0].workspaces[] | select(.ref == "workspace:adopt").panes[].surfaces[] | select(.ref == "surface:adopt").metadata["craft:semantic"]' "$FAKE_CMUX_STATE")"
+jq '
   .windows[0].workspaces[0].metadata["craft:surface:architect"] = {
     surface_id: "surface:42",
     type: "terminal",
@@ -348,6 +368,31 @@ assert_eq "workspace state reports detached task" "true" "$(jq -r '.detached' <<
 assert_eq "attach focus uses restored agent surface" "surface:11111111-1111-1111-1111-111111111112" "$(jq -r '.focused' "$FAKE_CMUX_STATE")"
 
 assert_false "unknown surface is not adopted" bash -c "cd '$PROJECT_DIR' && '$REPO_ROOT/bin/craft-mux' focus task-123 terminal"
+
+jq '
+  .windows[0].workspaces += [{
+    ref: "workspace:send-fail",
+    title: "craft-project-task-send-fail",
+    metadata: {
+      "craft:schema-version": "1",
+      "craft:project-id": "project",
+      "craft:task-id": "task-send-fail"
+    },
+    panes: [{
+      ref: "pane:send-fail",
+      surfaces: [{
+        ref:"surface:send-fail",
+        type:"terminal",
+        title:"task-send-fail",
+        metadata:{}
+      }]
+    }]
+  }]
+' "$FAKE_CMUX_STATE" > "$tmp_json" && mv "$tmp_json" "$FAKE_CMUX_STATE"
+assert_false "agent resume reports send failure" \
+    bash -c "export FAKE_CMUX_FAIL_SEND=1; source '$REPO_ROOT/bin/lib/mux-cmux.sh'; _cmux_ensure_surface workspace:send-fail agent terminal agent --title task-send-fail --command 'echo resume'"
+assert_eq "failed resume does not record agent metadata" "0" \
+    "$(jq '[.windows[0].workspaces[] | select(.ref == "workspace:send-fail").panes[].surfaces[] | select(.metadata["craft:semantic"] == "agent")] | length' "$FAKE_CMUX_STATE")"
 
 echo ""
 echo "remote task workspace creation"

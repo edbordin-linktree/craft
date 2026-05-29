@@ -481,6 +481,10 @@ case "${1:-}" in
         fi
         ;;
     send)
+        if [[ "${FAKE_CMUX_FAIL_SEND:-}" == "1" ]]; then
+            echo "fake-cmux: send failed" >&2
+            exit 1
+        fi
         ws="$(workspace_arg "$@")"
         surface="$(surface_arg "$@")"
         text="${@: -1}"
