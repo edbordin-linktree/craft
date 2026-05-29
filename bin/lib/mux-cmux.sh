@@ -240,8 +240,14 @@ _cmux_surface_exists() {
             ($ref | ascii_downcase) as $want
             |
             .windows[].workspaces[].panes[].surfaces[]
-            | ((.ref // .id // .surface_id // .surfaceId // "") | ascii_downcase) as $actual
-            | select($actual == $want)
+            | [
+                .ref,
+                .id,
+                .surface_id,
+                .surfaceId
+            ]
+            | map(select(type == "string" and length > 0) | ascii_downcase)
+            | select(index($want))
         ' >/dev/null 2>&1
 }
 

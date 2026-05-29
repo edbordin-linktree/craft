@@ -309,6 +309,26 @@ CMUX_WORKSPACE_ID=workspace:adopt CMUX_SURFACE_ID=surface:adopt \
 assert_eq "current cmux workspace adopted for orchestrator" "adopted" "$(jq -r '.windows[0].workspaces[] | select(.ref == "workspace:adopt").metadata["craft:project-id"]' "$FAKE_CMUX_STATE")"
 assert_eq "current cmux surface recorded as orchestrator" "orchestrator" "$(jq -r '.windows[0].workspaces[] | select(.ref == "workspace:adopt").panes[].surfaces[] | select(.ref == "surface:adopt").metadata["craft:semantic"]' "$FAKE_CMUX_STATE")"
 jq '
+  .windows[0].workspaces += [{
+    id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    ref: "workspace:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    title: "craft-launch-uuid",
+    metadata: {},
+    panes: [{
+      ref: "pane:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      surfaces: [{
+        id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        ref:"surface:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        type:"terminal",
+        title:"launcher",
+        metadata:{}
+      }]
+    }]
+  }]
+' "$FAKE_CMUX_STATE" > "$tmp_json" && mv "$tmp_json" "$FAKE_CMUX_STATE"
+assert_true "surface existence accepts bare uuid surface id" \
+    bash -c "source '$REPO_ROOT/bin/lib/mux-cmux.sh'; _cmux_surface_exists workspace:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+jq '
   .windows[0].workspaces[0].metadata["craft:surface:architect"] = {
     surface_id: "surface:42",
     type: "terminal",
