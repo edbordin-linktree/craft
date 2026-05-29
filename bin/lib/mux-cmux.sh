@@ -717,7 +717,9 @@ _cmux_ensure_dashboard_surface() {
     mkdir -p "$state_dir"
     echo "$sid" > "$surface_file"
 
-    _cmux_focus_surface_ui "$ws_ref" "$sid" >/dev/null 2>&1 || true
+    if [[ "${CMUX_FOCUS_DASHBOARD:-}" == "1" ]]; then
+        _cmux_focus_surface_ui "$ws_ref" "$sid" >/dev/null 2>&1 || true
+    fi
 }
 
 _cmux_existing_dashboard_url() {

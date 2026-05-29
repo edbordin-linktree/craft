@@ -522,8 +522,8 @@ fi
 # create the architect surface only during this initial startup. Later health
 # checks should not relaunch planning agents.
 if [[ "$MULTIPLEXER" == "cmux" ]]; then
-    CMUX_ENSURE_ARCHITECT=1 SESSION=$(ensure_session "$PROJECT_NAME" "$PROJECT_DIR")
-    unset CMUX_ENSURE_ARCHITECT
+    CMUX_ENSURE_ARCHITECT=1 CMUX_FOCUS_DASHBOARD=1 SESSION=$(ensure_session "$PROJECT_NAME" "$PROJECT_DIR")
+    unset CMUX_ENSURE_ARCHITECT CMUX_FOCUS_DASHBOARD
 else
     SESSION=$(ensure_session "$PROJECT_NAME" "$PROJECT_DIR")
 fi
