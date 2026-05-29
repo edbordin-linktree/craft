@@ -65,7 +65,11 @@ workspace_arg() {
     local prev=""
     for arg in "$@"; do
         if [[ "$prev" == "--workspace" ]]; then
-            echo "$arg"
+            if [[ "$arg" == "current" ]]; then
+                echo "${CMUX_WORKSPACE_ID:-current}"
+            else
+                echo "$arg"
+            fi
             return 0
         fi
         prev="$arg"

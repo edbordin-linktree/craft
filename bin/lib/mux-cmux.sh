@@ -1039,6 +1039,7 @@ mux_adopt_current_orchestrator_workspace() {
         return 1
     fi
 
+    ws_ref="current"
     _cmux_write_workspace_identity "$ws_ref" "$project_name" "$project_dir" || {
         echo "mux_adopt_current_orchestrator_workspace: failed to write cmux workspace metadata for project=$project_name" >&2
         return 1
@@ -1111,7 +1112,7 @@ ensure_session() {
         existing_project="$(_cmux_metadata_get "$CMUX_WORKSPACE_ID" "craft:project-id" 2>/dev/null || true)"
         existing_task="$(_cmux_metadata_get "$CMUX_WORKSPACE_ID" "craft:task-id" 2>/dev/null || true)"
         if [[ -z "$existing_task" && ( -z "$existing_project" || "$existing_project" == "$project_name" ) ]]; then
-            ws_ref="$CMUX_WORKSPACE_ID"
+            ws_ref="current"
         fi
     fi
 
