@@ -279,7 +279,7 @@ chmod +x "$TMPDIR/resume-hook-runner"
     "$REPO_ROOT/bin/orchestrator.sh" "$RESUME_PROJECT" --max-parallel 1 --poll-interval 1 \
         > "$TMPDIR/resume-orchestrator.log" 2>&1 &
     orch_pid=$!
-    sleep 6
+    sleep 8
     kill -TERM "$orch_pid" 2>/dev/null || true
     wait "$orch_pid" 2>/dev/null || true
 )

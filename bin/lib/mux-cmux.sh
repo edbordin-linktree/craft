@@ -245,7 +245,12 @@ _cmux_surface_exists() {
 }
 
 _cmux_require_surface_metadata() {
-    if cmux surface metadata --help >/dev/null 2>&1 && cmux surface lookup --help >/dev/null 2>&1; then
+    local out
+    out="$(cmux surface lookup \
+        --workspace "__craft_surface_metadata_probe__" \
+        --metadata "craft:semantic=__probe__" \
+        --json 2>&1 >/dev/null)" && return 0
+    if [[ "$out" != *"unknown command"* && "$out" != *"unknown subcommand"* ]]; then
         return 0
     fi
     echo "cmux_surface_metadata_unsupported: update cmux to a build with surface metadata and surface lookup support" >&2
