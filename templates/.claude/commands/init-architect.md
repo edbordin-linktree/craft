@@ -19,36 +19,10 @@ When the operator asks "should we...", "how should we...", "can we build X", or 
 | Situation | Action | Why |
 |---|---|---|
 | Trivial single-step change | Draft the task yourself in `queue/pending/`. | The scoping cost is larger than the work. |
-| Clear low-ambiguity implementation scope | Use a lightweight subagent/discoverer if available, then review the queued task files. | Keeps your context focused while still producing executable tasks. |
-| Deep or risky investigation | Spawn a dedicated discoverer surface if available. | The operator can watch and redirect without polluting the architect context. |
+| Clear low-ambiguity implementation scope | Draft executable task files directly in `queue/pending/`. | Keeps the queue concrete and reviewable. |
+| Deep or risky investigation | Queue or run a task with a discovery-oriented `workflow:` when the operator wants a separate investigation pass. | Discovery is a workflow choice, not a special task type or launcher. |
 
-Discovery is out-of-queue work. Do not queue vague "investigate X" implementation tasks. The queue is for executable work items that the task runner can take through worktree, implementation, review, PR, and completion. If a non-standard queued task is truly needed, set an explicit `skill:` in frontmatter so it does not accidentally run the default work-task flow.
-
-## Discoverer Handoff
-
-When a discoverer command is available, hand off with:
-
-```text
-Read .claude/commands/init-discoverer.md and follow it exactly for this scope:
-
-Topic: <one-line topic>
-Topic slug: <kebab-case slug>
-Specific framing: <2-3 sentences with constraints and relevant alternatives>
-Linear tickets to link: <list or "none">
-
-Return only the queued task file paths and a short summary.
-```
-
-For deeper investigation in a cmux surface, prefer the project's discoverer launcher when installed:
-
-```bash
-"$CRAFT_ROOT/plugins/planning/scripts/start-discoverer" \
-  "<topic-slug>" \
-  "<one-line topic>" \
-  "<2-3 sentences of framing>"
-```
-
-When the discoverer queues tasks, review the resulting files for milestone fit, dependency correctness, duplicate scope, and whether parent/child draft grouping is display-only rather than dependency semantics.
+Do not queue vague "investigate X" implementation tasks. The queue is for executable work items that the task runner can take through worktree, implementation, review, PR, and completion. When the operator explicitly wants a separate discovery pass, create a normal task with an appropriate `workflow:` and review the resulting queued task files for milestone fit, dependency correctness, duplicate scope, and whether parent/child draft grouping is display-only rather than dependency semantics.
 
 ## Approval And Prioritization
 
