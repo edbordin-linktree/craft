@@ -1,6 +1,6 @@
 ---
 name: architect-delegation
-description: Guidance for the project architect on when and how to delegate during planning. Covers choosing between in-context subagents and optional external research helpers, and names what the architect must NOT delegate: execution belongs to the per-task agent launched by the orchestrator. Activate this skill when you are the architect considering whether to fan out part of a planning task to a sub-agent.
+description: "Guidance for the project architect on when and how to delegate during planning. Covers choosing between in-context subagents and optional external research helpers, and names what the architect must NOT delegate: execution belongs to the per-task agent launched by the orchestrator. Activate this skill when you are the architect considering whether to fan out part of a planning task to a sub-agent."
 ---
 
 # architect-delegation
