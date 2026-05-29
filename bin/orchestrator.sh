@@ -531,8 +531,14 @@ fi
 
 # Ensure multiplexer session with orchestrator + planner windows.
 # Under cmux re-exec, we're now running inside the workspace's initial surface;
-# ensure_session will find the existing workspace and add the architect surface.
-SESSION=$(ensure_session "$PROJECT_NAME" "$PROJECT_DIR")
+# create the architect surface only during this initial startup. Later health
+# checks should not relaunch planning agents.
+if [[ "$MULTIPLEXER" == "cmux" ]]; then
+    CMUX_ENSURE_ARCHITECT=1 SESSION=$(ensure_session "$PROJECT_NAME" "$PROJECT_DIR")
+    unset CMUX_ENSURE_ARCHITECT
+else
+    SESSION=$(ensure_session "$PROJECT_NAME" "$PROJECT_DIR")
+fi
 
 # If nested, set the inner session to use C-b so it doesn't collide with the outer prefix
 if [[ -n "$CRAFT_NESTED_TMUX" ]]; then

@@ -250,7 +250,7 @@ _cmux_pane_id_from_output() {
 
 _cmux_default_placement() {
     local semantic="$1"
-    if [[ "$semantic" == "agent" ]]; then
+    if [[ "$semantic" == "agent" || "$semantic" == "dashboard" ]]; then
         echo "left"
     else
         echo "right"
@@ -609,7 +609,8 @@ _cmux_ensure_dashboard_surface() {
 
     sid="$(_cmux_ensure_surface "$ws_ref" "dashboard" "browser" "dashboard" \
         --title "dashboard" \
-        --url "$url")" || {
+        --url "$url" \
+        --placement left)" || {
         echo "ensure_session: failed to create web dashboard browser surface" >&2
         return 1
     }
@@ -818,7 +819,7 @@ ensure_session() {
 
     _cmux_ensure_project_dashboard "$ws_ref" "$project_dir"
 
-    if [[ -n "${project_dir:-}" ]] && ! _cmux_surface_from_metadata "$ws_ref" "architect" >/dev/null 2>&1; then
+    if [[ "${CMUX_ENSURE_ARCHITECT:-}" == "1" && -n "${project_dir:-}" ]] && ! _cmux_surface_from_metadata "$ws_ref" "architect" >/dev/null 2>&1; then
         local skill_file="${project_dir}/.claude/commands/init-architect.md"
         local architect_agent="${ARCHITECT_AGENT:-claude}"
         local architect_agent_model="${ARCHITECT_AGENT_MODEL:-}"

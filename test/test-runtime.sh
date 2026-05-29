@@ -222,6 +222,10 @@ assert_eq "browser opened in right pane" "pane:2" "$(jq -r '.windows[0].workspac
 assert_eq "second browser reuses right pane" "pane:2" "$(jq -r '.windows[0].workspaces[0].panes[] | select(.surfaces[]?.url == "https://build.example/task-123").ref' "$FAKE_CMUX_STATE")"
 assert_eq "right-side browser tabs do not add splits" "2" "$(jq '[.windows[0].workspaces[0].panes[].ref] | length' "$FAKE_CMUX_STATE")"
 assert_eq "non-agent surface records right placement" "right" "$(jq -r '.windows[0].workspaces[0].metadata["craft:surface:build"].placement' "$FAKE_CMUX_STATE")"
+source "$REPO_ROOT/bin/lib/mux-cmux.sh"
+_cmux_ensure_surface "workspace:1" "dashboard" "browser" "dashboard" --title "dashboard" --url "http://127.0.0.1:27434" >/dev/null
+assert_eq "dashboard browser opens in left pane" "pane:1" "$(jq -r '.windows[0].workspaces[0].panes[] | select(.surfaces[]?.url == "http://127.0.0.1:27434").ref' "$FAKE_CMUX_STATE")"
+assert_eq "dashboard surface records left placement" "left" "$(jq -r '.windows[0].workspaces[0].metadata["craft:surface:dashboard"].placement' "$FAKE_CMUX_STATE")"
 
 registry="$PROJECT_DIR/tasks/task-123/.orchestrator/surfaces.json"
 tmp_json="$TMPDIR/surfaces.json"
