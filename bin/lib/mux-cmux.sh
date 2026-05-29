@@ -727,21 +727,70 @@ _cmux_ensure_dashboard_surface() {
     local ws_ref="$1" project_dir="$2" url="$3"
     local state_dir="$project_dir/.state/dashboard"
     local surface_file="$state_dir/surface"
-    local sid
+    local sid existing
 
-    sid="$(_cmux_ensure_surface "$ws_ref" "dashboard" "browser" "dashboard" \
-        --title "dashboard" \
-        --url "$url" \
-        --placement left)" || {
-        echo "ensure_session: failed to create web dashboard browser surface" >&2
-        return 1
-    }
+    existing="$(_cmux_surface_from_metadata "$ws_ref" "dashboard" 2>/dev/null || true)"
+    if [[ -n "$existing" ]]; then
+        sid="$(jq -r '.surface_id // empty' <<< "$existing")"
+    fi
+    if [[ -z "$sid" ]]; then
+        sid="$(_cmux_dashboard_surface_by_url "$ws_ref" "$url" 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$sid" ]]; then
+        cmux rename-tab --workspace "$ws_ref" --surface "$sid" "dashboard" >/dev/null 2>&1 || true
+        cmux browser "$sid" navigate "$url" >/dev/null 2>&1 || true
+        _cmux_record_surface "$ws_ref" "dashboard" "$sid" "browser" "dashboard" "dashboard" "$url" "" "left" || true
+    else
+        sid="$(_cmux_ensure_surface "$ws_ref" "dashboard" "browser" "dashboard" \
+            --title "dashboard" \
+            --url "$url" \
+            --placement left)" || {
+            echo "ensure_session: failed to create web dashboard browser surface" >&2
+            return 1
+        }
+    fi
+    _cmux_prune_dashboard_surfaces "$ws_ref" "$url" "$sid"
     mkdir -p "$state_dir"
     echo "$sid" > "$surface_file"
 
     if [[ "${CMUX_FOCUS_DASHBOARD:-}" == "1" ]]; then
         _cmux_focus_surface_ui "$ws_ref" "$sid" >/dev/null 2>&1 || true
     fi
+}
+
+_cmux_dashboard_surface_refs_by_url() {
+    local ws_ref="$1" url="$2"
+    local origin port
+    origin="$(echo "$url" | sed -E 's#^(https?://[^/?#]+).*#\1#')"
+    port="$(echo "$origin" | sed -nE 's#^https?://(localhost|127\.0\.0\.1):([0-9]+)$#\2#p')"
+    cmux tree --workspace "$ws_ref" --json 2>/dev/null \
+        | jq -r --arg origin "$origin" --arg port "$port" '
+            def origin:
+              try capture("^(?<origin>https?://[^/?#]+)").origin catch .;
+            def local_port:
+              try capture("^https?://(localhost|127[.]0[.]0[.]1):(?<port>[0-9]+)").port catch "";
+            .windows[].workspaces[].panes[].surfaces[]
+            | select(.type == "browser")
+            | select(
+                if $port != "" then ((.url // "") | local_port) == $port
+                else ((.url // "") | origin) == $origin
+                end
+              )
+            | .ref // .id // .surface_id // .surfaceId // empty
+          ' 2>/dev/null
+}
+
+_cmux_dashboard_surface_by_url() {
+    _cmux_dashboard_surface_refs_by_url "$1" "$2" | head -1
+}
+
+_cmux_prune_dashboard_surfaces() {
+    local ws_ref="$1" url="$2" keep="$3" ref
+    while IFS= read -r ref; do
+        [[ -n "$ref" && "$ref" != "$keep" ]] || continue
+        cmux close-surface --workspace "$ws_ref" --surface "$ref" >/dev/null 2>&1 || true
+    done < <(_cmux_dashboard_surface_refs_by_url "$ws_ref" "$url")
 }
 
 _cmux_existing_dashboard_url() {

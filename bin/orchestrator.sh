@@ -99,10 +99,12 @@ QUEUE_STATES_CONFIG_MTIME="$(date -r "$PROJECT_DIR/craft.conf" '+%s' 2>/dev/null
 mkdir -p "$PROJECT_DIR/worktrees"   # legacy layout (pre-nested-task-dir tasks)
 mkdir -p "$PROJECT_DIR/tasks"        # new layout: per-task dir holds worktrees + state
 mkdir -p "$PROJECT_DIR/.state/waiting"
+mkdir -p "$PROJECT_DIR/.state/orchestrator"
 mkdir -p "$PROJECT_DIR/logs"
 
 # Initialize log file
 LOG_FILE="$PROJECT_DIR/logs/orchestrator-$(date '+%Y-%m-%d').log"
+ORCHESTRATOR_PID_FILE="$PROJECT_DIR/.state/orchestrator/pid"
 
 # Load agent provider config (sets DEFAULT_AGENT, ARCHITECT_AGENT, MULTIPLEXER)
 load_provider_config "$PROJECT_DIR"
@@ -287,6 +289,7 @@ handle_orchestrator_key() {
         log "Reload requested from orchestrator pane"
         if orchestrator_restart_workspace; then
             log "Replacement orchestrator workspace launched"
+            orchestrator_cleanup_instance
             exit 0
         fi
         log "Replacement orchestrator workspace failed"
@@ -308,6 +311,28 @@ sleep_or_handle_keys() {
         fi
         elapsed=$((elapsed + 1))
     done
+}
+
+orchestrator_register_instance() {
+    local previous_pid=""
+    mkdir -p "$(dirname "$ORCHESTRATOR_PID_FILE")"
+    previous_pid="$(cat "$ORCHESTRATOR_PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$previous_pid" && "$previous_pid" != "$$" ]] && kill -0 "$previous_pid" 2>/dev/null; then
+        kill -TERM "$previous_pid" 2>/dev/null || true
+    fi
+    echo "$$" > "$ORCHESTRATOR_PID_FILE"
+}
+
+orchestrator_still_current_instance() {
+    local current_pid=""
+    current_pid="$(cat "$ORCHESTRATOR_PID_FILE" 2>/dev/null || true)"
+    [[ -z "$current_pid" || "$current_pid" == "$$" ]]
+}
+
+orchestrator_cleanup_instance() {
+    if [[ "$(cat "$ORCHESTRATOR_PID_FILE" 2>/dev/null || true)" == "$$" ]]; then
+        rm -f "$ORCHESTRATOR_PID_FILE"
+    fi
 }
 
 # --- Task Execution ---
@@ -602,15 +627,22 @@ if [[ "$MULTIPLEXER" == "tmux" ]]; then
     fi
 fi
 
+orchestrator_register_instance
+
 log "Craft orchestrator starting for: $PROJECT_DIR"
 log "Max parallel tasks: $MAX_PARALLEL, Poll interval: ${POLL_INTERVAL}s"
 echo ""
 
-trap 'log "Orchestrator stopped."; exit 0' INT TERM
+trap 'log "Orchestrator stopped."; orchestrator_cleanup_instance; exit 0' INT TERM
 
 poll_count=0
 
 while true; do
+    if ! orchestrator_still_current_instance; then
+        log "Orchestrator replaced by another instance; exiting."
+        exit 0
+    fi
+
     # Run plugin poll hooks (e.g. linear-sync inbound)
     queue_states_config_mtime="$(date -r "$PROJECT_DIR/craft.conf" '+%s' 2>/dev/null || echo 0)"
     if [[ "$queue_states_config_mtime" != "$QUEUE_STATES_CONFIG_MTIME" ]]; then

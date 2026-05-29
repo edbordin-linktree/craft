@@ -254,6 +254,16 @@ assert_eq "dashboard ensure does not steal focus by default" "surface:previous" 
 CMUX_FOCUS_DASHBOARD=1 _cmux_ensure_dashboard_surface "workspace:project" "$PROJECT_DIR" "http://127.0.0.1:27434" >/dev/null
 assert_eq "project dashboard is focused by default" "$project_dashboard" "$(jq -r '.focused' "$FAKE_CMUX_STATE")"
 jq '
+  .windows[0].workspaces[] |=
+    if .ref == "workspace:project" then
+      .panes[0].surfaces += [
+        {ref:"surface:dashboard-duplicate", type:"browser", title:"dashboard", url:"http://localhost:27434/"}
+      ]
+    else . end
+' "$FAKE_CMUX_STATE" > "$tmp_json" && mv "$tmp_json" "$FAKE_CMUX_STATE"
+_cmux_ensure_dashboard_surface "workspace:project" "$PROJECT_DIR" "http://127.0.0.1:27434" >/dev/null
+assert_eq "dashboard ensure prunes duplicate browsers" "1" "$(jq '[.windows[0].workspaces[] | select(.ref == "workspace:project").panes[].surfaces[] | select(.type == "browser" and (.url // "" | startswith("http://localhost:27434") or startswith("http://127.0.0.1:27434")))] | length' "$FAKE_CMUX_STATE")"
+jq '
   .windows[0].workspaces[0].metadata["craft:surface:architect"] = {
     surface_id: "surface:stale",
     type: "terminal",
