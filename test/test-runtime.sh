@@ -268,6 +268,44 @@ jq '.pr.cached_surface_ref = "surface:999"' "$registry" > "$tmp_json" && mv "$tm
     "$REPO_ROOT/bin/craft-mux" focus task-123 pr >/dev/null
 )
 assert_eq "focus adopts same-workspace browser" "surface:2" "$(jq -r '.pr.cached_surface_ref' "$registry")"
+workspace_state="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft-mux" workspace-state task-123 agent)"
+assert_eq "workspace state reports attached task" "false" "$(jq -r '.detached' <<< "$workspace_state")"
+assert_eq "workspace state reports agent surface" "true" "$(jq -r '.surface_exists' <<< "$workspace_state")"
+(
+    cd "$PROJECT_DIR" || exit 1
+    "$REPO_ROOT/bin/craft-mux" focus task-123 agent >/dev/null
+)
+assert_eq "task agent focus uses cmux metadata" "surface:1" "$(jq -r '.focused' "$FAKE_CMUX_STATE")"
+jq '
+  .windows[0].workspaces += [{
+    ref: "workspace:11111111-1111-1111-1111-111111111111",
+    title: "craft-project-task-detached",
+    attached: false,
+    detached: true,
+    metadata: {
+      "craft:schema-version": "1",
+      "craft:project-id": "project",
+      "craft:task-id": "task-detached",
+      "craft:surface:agent": {
+        surface_id: "surface:11111111-1111-1111-1111-111111111112",
+        type: "terminal",
+        purpose: "agent",
+        title: "task-detached"
+      }
+    },
+    panes: [{
+      ref: "pane:11111111-1111-1111-1111-111111111113",
+      surfaces: [{ref:"surface:11111111-1111-1111-1111-111111111112", type:"terminal", title:"task-detached"}]
+    }]
+  }]
+' "$FAKE_CMUX_STATE" > "$tmp_json" && mv "$tmp_json" "$FAKE_CMUX_STATE"
+detached_state="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft-mux" workspace-state task-detached agent)"
+assert_eq "workspace state reports detached task" "true" "$(jq -r '.detached' <<< "$detached_state")"
+(
+    cd "$PROJECT_DIR" || exit 1
+    "$REPO_ROOT/bin/craft-mux" focus task-detached agent --attach >/dev/null
+)
+assert_eq "attach focus uses restored agent surface" "surface:11111111-1111-1111-1111-111111111112" "$(jq -r '.focused' "$FAKE_CMUX_STATE")"
 
 jq '.terminal = {surface_id:"terminal", kind:"terminal", label:"Terminal", owner:"test", stage:"qa", cached_surface_ref:"surface:999", status:"open"}' "$registry" > "$tmp_json" && mv "$tmp_json" "$registry"
 assert_false "stale non-browser is not adopted" bash -c "cd '$PROJECT_DIR' && '$REPO_ROOT/bin/craft-mux' focus task-123 terminal"

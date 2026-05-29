@@ -50,7 +50,7 @@ _cmux_workspace_ref_from_json() {
 }
 
 _cmux_workspace_id_from_output() {
-    jq -r '.workspace_id // .workspaceId // .id // .workspace_ref // .workspaceRef // .ref // empty' 2>/dev/null | head -1
+    jq -r '.local_workspace_id // .localWorkspaceId // .workspace_id // .workspaceId // .id // .workspace_ref // .workspaceRef // .ref // empty' 2>/dev/null | head -1
 }
 
 _cmux_workspace_lookup_by_metadata() {
@@ -61,6 +61,30 @@ _cmux_workspace_lookup_by_metadata() {
         args+=("--metadata" "$pair")
     done
     cmux workspace lookup "${args[@]}" 2>/dev/null | _cmux_workspace_ref_from_json
+}
+
+_cmux_workspace_lookup_json_by_metadata() {
+    local args=("--include-detached" "--json")
+    local pair
+    for pair in "$@"; do
+        [[ -n "$pair" ]] || continue
+        args+=("--metadata" "$pair")
+    done
+    cmux workspace lookup "${args[@]}" 2>/dev/null
+}
+
+_cmux_workspace_lookup_item_from_json() {
+    jq -c '
+        [
+          .matches[]?,
+          .workspaces[]?,
+          .workspace?,
+          .
+        ]
+        | map(select(type == "object"))
+        | map(select((.workspace_id // .workspaceId // .id // .workspace_ref // .workspaceRef // .ref // "") != ""))
+        | .[0] // empty
+    ' 2>/dev/null
 }
 
 _cmux_running_in_remote_workspace() {
@@ -255,6 +279,49 @@ _cmux_send_command_to_surface() {
     [[ -n "$command" ]] || return 0
     cmux send --workspace "$ws_ref" --surface "$surface_id" "$command" >/dev/null 2>&1 || return 1
     cmux send-key --workspace "$ws_ref" --surface "$surface_id" enter >/dev/null 2>&1 || return 1
+}
+
+_cmux_focus_surface_ui() {
+    local ws_ref="$1" surface_id="$2"
+    local out
+    [[ -n "$ws_ref" && -n "$surface_id" ]] || return 1
+
+    out="$(cmux focus-surface --workspace "$ws_ref" --surface "$surface_id" 2>&1)" || {
+        local focus_error="$out"
+        out="$(cmux select-workspace --workspace "$ws_ref" 2>&1)" || {
+            echo "cmux_ui_unavailable: focus-surface failed for $surface_id in $ws_ref: $focus_error; select-workspace fallback failed: $out" >&2
+            return 1
+        }
+        out="$(cmux focus-surface --workspace "$ws_ref" --surface "$surface_id" 2>&1)" || {
+            echo "cmux_ui_unavailable: focus-surface failed for $surface_id in $ws_ref: $out" >&2
+            return 1
+        }
+    }
+}
+
+_cmux_workspace_uuid() {
+    local ws_ref="$1"
+    if [[ "$ws_ref" =~ ^workspace:([0-9A-Fa-f-]{36})$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+    elif [[ "$ws_ref" =~ ^[0-9A-Fa-f-]{36}$ ]]; then
+        echo "$ws_ref"
+    fi
+}
+
+_cmux_attach_workspace_ui() {
+    local ws_ref="$1"
+    local workspace_uuid raw attached_ref
+    workspace_uuid="$(_cmux_workspace_uuid "$ws_ref")"
+    [[ -n "$workspace_uuid" ]] || {
+        echo "cmux_ui_unavailable: cannot attach non-UUID workspace ref $ws_ref" >&2
+        return 1
+    }
+    raw="$(cmux ssh-workspace-attach --workspace-id "$workspace_uuid" --json 2>&1)" || {
+        echo "cmux_ui_unavailable: ssh-workspace-attach failed for $workspace_uuid: $raw" >&2
+        return 1
+    }
+    attached_ref="$(printf '%s' "$raw" | _cmux_workspace_id_from_output)"
+    echo "${attached_ref:-$ws_ref}"
 }
 
 _cmux_pane_id_from_output() {
@@ -650,7 +717,7 @@ _cmux_ensure_dashboard_surface() {
     mkdir -p "$state_dir"
     echo "$sid" > "$surface_file"
 
-    cmux focus-surface "$sid" >/dev/null 2>&1 || true
+    _cmux_focus_surface_ui "$ws_ref" "$sid" >/dev/null 2>&1 || true
 }
 
 _cmux_existing_dashboard_url() {
@@ -1123,6 +1190,50 @@ _cmux_task_workspace_ref_for_project_dir() {
     _cmux_task_workspace_ref "$project_id" "$task_id"
 }
 
+_cmux_task_workspace_lookup_item_for_project_dir() {
+    local project_dir="$1" task_id="$2"
+    local project_id
+    project_id="$(basename "$project_dir")"
+    _cmux_workspace_lookup_json_by_metadata \
+        "craft:project-id=${project_id}" \
+        "craft:task-id=${task_id}" \
+        | _cmux_workspace_lookup_item_from_json
+}
+
+mux_task_workspace_state() {
+    local project_dir="$1" task_id="$2" surface_id="${3:-agent}"
+    local item ws_ref attached detached recorded surface_ref surface_exists=false
+    item="$(_cmux_task_workspace_lookup_item_for_project_dir "$project_dir" "$task_id" 2>/dev/null || true)"
+    if [[ -z "$item" ]]; then
+        jq -n --arg task_id "$task_id" '{task_id:$task_id, exists:false, attached:false, detached:false}'
+        return 0
+    fi
+    ws_ref="$(jq -r '.workspace_id // .workspaceId // .id // .workspace_ref // .workspaceRef // .ref // empty' <<< "$item")"
+    attached="$(jq -r 'if .attached == true then "true" else "false" end' <<< "$item")"
+    detached="$(jq -r 'if .detached == true then "true" elif .attached == false then "true" else "false" end' <<< "$item")"
+    recorded="$(_cmux_surface_from_metadata "$ws_ref" "$surface_id" 2>/dev/null || true)"
+    surface_ref="$(jq -r '.surface_id // .surface_ref // .ref // empty' <<< "${recorded:-null}" 2>/dev/null || true)"
+    if [[ -n "$surface_ref" ]] && _cmux_surface_exists "$ws_ref" "$surface_ref"; then
+        surface_exists=true
+    fi
+    jq -n \
+        --arg task_id "$task_id" \
+        --arg workspace_ref "$ws_ref" \
+        --arg surface_ref "$surface_ref" \
+        --argjson attached "$attached" \
+        --argjson detached "$detached" \
+        --argjson surface_exists "$surface_exists" \
+        '{
+          task_id: $task_id,
+          exists: true,
+          attached: $attached,
+          detached: $detached,
+          workspace_ref: $workspace_ref,
+          surface_ref: $surface_ref,
+          surface_exists: $surface_exists
+        }'
+}
+
 mux_surface_open() {
     local project_dir="$1" task_id="$2" surface_id="$3"
     shift 3
@@ -1171,19 +1282,33 @@ mux_surface_open() {
 
 mux_surface_focus() {
     local project_dir="$1" task_id="$2" surface_id="$3"
+    local attach_first="${4:-false}"
     local ws_ref surface kind url url_match cached found recorded
-    surface="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id" 2>/dev/null)" || {
-        echo "surface_not_found: $surface_id" >&2
-        return 4
-    }
     ws_ref="$(_cmux_task_workspace_ref_for_project_dir "$project_dir" "$task_id" 2>/dev/null || true)"
     [[ -n "$ws_ref" ]] || { echo "workspace_not_found: $(_cmux_task_workspace_label "$project_dir" "$task_id")" >&2; return 1; }
+    if [[ "$attach_first" == "true" ]]; then
+        ws_ref="$(_cmux_attach_workspace_ui "$ws_ref")" || return 1
+    fi
+    surface="$(runtime_surface_get "$project_dir" "$task_id" "$surface_id" 2>/dev/null || true)"
+
+    if [[ -z "$surface" ]]; then
+        recorded="$(_cmux_surface_from_metadata "$ws_ref" "$surface_id" 2>/dev/null || true)"
+        if [[ -n "$recorded" ]]; then
+            cached="$(jq -r '.surface_id // empty' <<< "$recorded")"
+            [[ -n "$cached" ]] || { echo "surface_not_found: $surface_id" >&2; return 4; }
+            _cmux_focus_surface_ui "$ws_ref" "$cached" || return 1
+            echo "$cached"
+            return 0
+        fi
+        echo "surface_not_found: $surface_id" >&2
+        return 4
+    fi
     kind="$(jq -r '.kind // "browser"' <<< "$surface")"
 
     recorded="$(_cmux_surface_from_metadata "$ws_ref" "$surface_id" 2>/dev/null || true)"
     if [[ -n "$recorded" ]]; then
         cached="$(jq -r '.surface_id // empty' <<< "$recorded")"
-        cmux focus-surface "$cached" >/dev/null 2>&1 || true
+        _cmux_focus_surface_ui "$ws_ref" "$cached" || return 1
         runtime_surface_patch_ref "$project_dir" "$task_id" "$surface_id" "$cached" open 2>/dev/null || true
         echo "$cached"
         return 0
@@ -1195,7 +1320,7 @@ mux_surface_focus() {
             "$(jq -r '.label // .surface_id // empty' <<< "$surface")" \
             "$(jq -r '.url // empty' <<< "$surface")" \
             >/dev/null 2>&1 || true
-        cmux focus-surface "$cached" >/dev/null 2>&1 || true
+        _cmux_focus_surface_ui "$ws_ref" "$cached" || return 1
         echo "$cached"
         return 0
     fi
@@ -1209,7 +1334,7 @@ mux_surface_focus() {
                 "$(jq -r '.label // .surface_id // empty' <<< "$surface")" \
                 "$url" \
                 >/dev/null 2>&1 || true
-            cmux focus-surface "$found" >/dev/null 2>&1 || true
+            _cmux_focus_surface_ui "$ws_ref" "$found" || return 1
             echo "$found"
             return 0
         fi

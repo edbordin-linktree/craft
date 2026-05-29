@@ -24,7 +24,7 @@ import { Marked, Renderer } from "marked";
 import { render } from "preact-render-to-string";
 import { Dashboard } from "./views";
 import { scanProject, type Task } from "./queue";
-import { focusTaskSurface, focusDiffhubSurface, focusPrSurface, focusRegisteredSurface, openExternal } from "./cmux";
+import { focusTaskSurface, focusDiffhubSurface, focusPrSurface, focusRegisteredSurface, openExternal, taskWorkspaceState, type WorkspaceState } from "./cmux";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),
@@ -95,7 +95,12 @@ watcher.on("all", refresh);
 
 // --- HTTP ---
 function renderHtml(): string {
-  const body = render(<Dashboard projectName={projectName} tasks={tasks} />);
+  const workspaceStates: Record<string, WorkspaceState> = {};
+  for (const task of tasks) {
+    if (task.queueDir === "done" || task.queueDir === "drafts" || task.queueDir === "pending") continue;
+    workspaceStates[task.id] = taskWorkspaceState(projectDir, task.id);
+  }
+  const body = render(<Dashboard projectName={projectName} tasks={tasks} workspaceStates={workspaceStates} />);
   return `<!doctype html>\n${body}`;
 }
 
@@ -362,7 +367,7 @@ const server = Bun.serve({
 
     if (url.pathname.startsWith("/focus/task/") && req.method === "POST") {
       const id = decodeURIComponent(url.pathname.slice("/focus/task/".length));
-      const r = focusTaskSurface(projectName, id);
+      const r = focusTaskSurface(projectDir, id, url.searchParams.get("attach") === "1");
       return jsonResponse(r, r.ok || r.code === "cmux_ui_unavailable" ? 200 : 502);
     }
 

@@ -144,6 +144,14 @@ mux_surface_focus() {
     return 3
 }
 
+mux_task_workspace_state() {
+    local _project_dir="$1" task_id="$2" surface_id="${3:-agent}"
+    jq -n \
+        --arg task_id "$task_id" \
+        --arg surface_ref "$surface_id" \
+        '{task_id:$task_id, exists:true, attached:true, detached:false, surface_ref:$surface_ref, surface_exists:true}'
+}
+
 mux_surface_close() {
     echo "surface_unsupported: tmux provider does not manage browser surfaces" >&2
     return 3

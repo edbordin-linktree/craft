@@ -168,7 +168,7 @@ case "${1:-}" in
                     .windows[].workspaces[]
                     | . as $ws
                     | select(all($filters[]; matches_filter($ws; .)))
-                    | {ref, id: .ref, title}
+                    | {ref, id: .ref, workspace_ref: .ref, workspace_id: .ref, title, attached: (.attached // true), detached: (.detached // false)}
                   ]
                 }
             ' "$STATE"
@@ -238,6 +238,20 @@ case "${1:-}" in
                 '{workspace_id:$workspace_id, workspace_ref:$workspace_ref, surface_id:$surface_id, surface_ref:$surface_ref}'
         else
             echo "OK workspace=$ws"
+        fi
+        ;;
+    ssh-workspace-attach)
+        workspace_id="$(flag_value --workspace-id "$@" || true)"
+        ws="workspace:$workspace_id"
+        save --arg ws "$ws" '
+            (.windows[].workspaces[] | select(.ref == $ws).attached) = true
+            | (.windows[].workspaces[] | select(.ref == $ws).detached) = false
+        '
+        if [[ " $* " == *" --json "* ]]; then
+            jq -n --arg workspace_id "$workspace_id" --arg local_workspace_id "$ws" \
+                '{workspace_id:$workspace_id, local_workspace_id:$local_workspace_id, already_attached:false}'
+        else
+            echo "OK $ws"
         fi
         ;;
     new-workspace)
@@ -326,7 +340,9 @@ case "${1:-}" in
         '
         ;;
     focus-surface)
-        save --arg surface "${2:-}" '.focused = $surface'
+        surface="$(surface_arg "$@" || true)"
+        [[ -n "$surface" ]] || surface="${2:-}"
+        save --arg surface "$surface" '.focused = $surface'
         ;;
     browser)
         surface="${2:-}"

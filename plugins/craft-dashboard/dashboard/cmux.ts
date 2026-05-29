@@ -2,14 +2,23 @@ import { spawnSync } from "child_process";
 import { readFileSync, existsSync, readdirSync } from "fs";
 import { join } from "path";
 
-const CMUX_PREFIX = "craft";
-
 export interface FocusResult {
   ok: boolean;
   workspaceRef?: string;
   surfaceRef?: string;
   fallback?: boolean;
   code?: string;
+  error?: string;
+}
+
+export interface WorkspaceState {
+  task_id?: string;
+  exists?: boolean;
+  attached?: boolean;
+  detached?: boolean;
+  workspace_ref?: string;
+  surface_ref?: string;
+  surface_exists?: boolean;
   error?: string;
 }
 
@@ -95,42 +104,6 @@ interface CmuxTree {
   }>;
 }
 
-/**
- * `cmux focus-window` only accepts window UUIDs — passing `window:N` refs or
- * 0-based indexes returns "Invalid window id". The JSON tree gives us
- * `index` but not the UUID; `cmux list-windows` gives both. Build an
- * `index → UUID` map by parsing list-windows once per call.
- */
-interface WindowInfo {
-  uuid: string;
-  index: number;
-  selected: boolean;
-}
-
-function listWindows(): WindowInfo[] {
-  const r = cmux("list-windows");
-  const out: WindowInfo[] = [];
-  if (!r.ok) return out;
-  // Lines look like: "* 0: 56AF4C3A-... selected_workspace=... workspaces=22"
-  //                  "  1: E27CAA2F-... selected_workspace=... workspaces=2"
-  // The leading "*" marks the currently-selected window.
-  for (const line of r.stdout.split("\n")) {
-    const m = line.match(/^(\s*\*?\s*)(\d+):\s+([0-9A-Fa-f-]{36})\b/);
-    if (!m) continue;
-    out.push({
-      uuid: m[3],
-      index: Number(m[2]),
-      selected: m[1].includes("*"),
-    });
-  }
-  return out;
-}
-
-type LookupResult<T> =
-  | { kind: "found"; value: T }
-  | { kind: "missing"; titlesSeen: string[] }
-  | { kind: "error"; error: string };
-
 function loadTree(): { ok: true; tree: CmuxTree } | { ok: false; error: string } {
   const r = cmux("tree", "--all", "--json");
   if (!r.ok) return { ok: false, error: r.stderr.trim() || `cmux tree exited ${r.stderr || "non-zero"}` };
@@ -141,131 +114,12 @@ function loadTree(): { ok: true; tree: CmuxTree } | { ok: false; error: string }
   }
 }
 
-function loadWorkspaceTree(workspaceRef: string): { ok: true; tree: CmuxTree } | { ok: false; error: string } {
-  const r = cmux("tree", "--workspace", workspaceRef, "--json");
-  if (!r.ok) return { ok: false, error: r.stderr.trim() || `cmux tree exited ${r.stderr || "non-zero"}` };
-  try {
-    return { ok: true, tree: JSON.parse(r.stdout) as CmuxTree };
-  } catch (err) {
-    return { ok: false, error: `failed to parse cmux workspace tree JSON: ${String(err)}` };
-  }
-}
-
 function cmuxUiUnavailable(error: string): FocusResult {
   return { ok: false, code: "cmux_ui_unavailable", error };
 }
 
 function isUiUnavailable(error: string): boolean {
   return /Failed to write to socket|broken pipe|Connection reset|failed to connect|connection refused|dial tcp|relay|socket|Swift|detached|unavailable|not attached/i.test(error);
-}
-
-function workspaceLookupByMetadata(projectName: string, taskId?: string): { ok: true; workspaceRef: string } | { ok: false; error: string } {
-  const args = [
-    "workspace",
-    "lookup",
-    "--metadata",
-    `craft:project-id=${projectName}`,
-    "--include-detached",
-    "--json",
-  ];
-  if (taskId) args.splice(4, 0, "--metadata", `craft:task-id=${taskId}`);
-  const r = cmux(...args);
-  if (!r.ok) return { ok: false, error: r.stderr.trim() || "cmux workspace lookup failed" };
-  try {
-    const parsed = JSON.parse(r.stdout);
-    const candidates = [
-      ...(Array.isArray(parsed.matches) ? parsed.matches : []),
-      ...(Array.isArray(parsed.workspaces) ? parsed.workspaces : []),
-      parsed,
-    ].filter(v => v && typeof v === "object");
-    for (const candidate of candidates) {
-      const ref = candidate.workspace_id ?? candidate.workspaceId ?? candidate.id ?? candidate.workspace_ref ?? candidate.workspaceRef ?? candidate.ref;
-      if (typeof ref === "string" && ref.length > 0) return { ok: true, workspaceRef: ref };
-    }
-    return { ok: false, error: `no cmux workspace metadata match for project=${projectName}${taskId ? ` task=${taskId}` : ""}` };
-  } catch (err) {
-    return { ok: false, error: `failed to parse cmux workspace lookup JSON: ${String(err)}` };
-  }
-}
-
-function metadataJson(workspaceRef: string, key: string): unknown | null {
-  const r = cmux("metadata", "get", "--workspace", workspaceRef, key, "--json");
-  if (!r.ok) return null;
-  try {
-    const parsed = JSON.parse(r.stdout);
-    const value = parsed?.value ?? parsed?.entry?.value ?? parsed;
-    if (typeof value === "string") {
-      try {
-        return JSON.parse(value);
-      } catch {
-        return value;
-      }
-    }
-    return value;
-  } catch {
-    return null;
-  }
-}
-
-function findWorkspaceByTitle(title: string): LookupResult<{
-  workspaceRef: string;
-  windowRef: string;
-  windowIndex: number;
-}> {
-  const loaded = loadTree();
-  if (!loaded.ok) return { kind: "error", error: loaded.error };
-  const titlesSeen: string[] = [];
-  for (const w of loaded.tree.windows) {
-    for (const ws of w.workspaces) {
-      titlesSeen.push(ws.title);
-      if (ws.title === title) {
-        return {
-          kind: "found",
-          value: { workspaceRef: ws.ref, windowRef: w.ref, windowIndex: w.index },
-        };
-      }
-    }
-  }
-  return { kind: "missing", titlesSeen };
-}
-
-function findSurfaceWindow(surfaceRef: string): { ref: string; index: number } | null {
-  const loaded = loadTree();
-  if (!loaded.ok) return null;
-  for (const w of loaded.tree.windows) {
-    for (const ws of w.workspaces) {
-      for (const p of ws.panes) {
-        for (const s of p.surfaces) {
-          if (s.ref === surfaceRef) return { ref: w.ref, index: w.index };
-        }
-      }
-    }
-  }
-  return null;
-}
-
-function focusWindowByIndex(index: number): void {
-  const windows = listWindows();
-  const target = windows.find(w => w.index === index);
-  if (!target) return;
-  // Always call focus-window. We used to skip when the target was marked
-  // currently-selected to avoid a cmux IPC blip, but that marker reflects
-  // GUI focus from the caller's process-tree perspective — not the human
-  // operator's view. Skipping it meant clicking "focus terminal" from a
-  // dashboard tab in a different window did nothing visible. The retry
-  // logic in cmux() handles the IPC blip; correctness wins.
-  cmux("focus-window", "--window", target.uuid);
-}
-
-function lookupStatus(workspaceRef: string, key: string): string | null {
-  const r = cmux("list-status", "--workspace", workspaceRef);
-  if (!r.ok) return null;
-  for (const line of r.stdout.split("\n")) {
-    const eq = line.indexOf("=");
-    if (eq === -1) continue;
-    if (line.slice(0, eq) === key) return line.slice(eq + 1).trim();
-  }
-  return null;
 }
 
 /**
@@ -284,137 +138,25 @@ function focusSurface(surfaceRef: string): { ok: boolean; error?: string } {
   return { ok: true };
 }
 
-/**
- * Focus the agent surface for a specific task.
- *
- * The orchestrator's `spawn_task_pane` records `craft:pane:<task-id>=<surface-ref>`
- * as a workspace status entry on the per-task cmux workspace; we read it back
- * and bring that surface to the front. If the status entry is missing or the
- * recorded surface no longer exists (orchestrator was restarted, workspace
- * was reset, etc.), we fall back to selecting the workspace so the operator
- * at least lands in the right place.
- */
-/**
- * Targeted tree lookup that answers everything we need to know about the
- * task workspace:
- *   • does the workspace exist?
- *   • is the recorded surface still alive?
- *   • is the surface already the active one (so we can short-circuit)?
- *   • what window/workspace/pane is it in?
- *
- * The workspace is resolved by metadata first, then inspected with
- * `tree --workspace`. Avoid `tree --all` here because remote/headless cmux
- * wrappers only guarantee detached-safe targeted tree inspection.
- */
-function resolveTaskState(
-  projectName: string,
-  taskId: string,
-): {
-  kind: "found";
-  workspaceRef: string;
-  windowIndex: number;
-  surfaceRef: string | null;
-  surfaceAlreadyActive: boolean;
-  workspaceAlreadySelected: boolean;
-} | { kind: "missing"; titlesSeen: string[] }
-  | { kind: "error"; error: string } {
-  const wsLookup = workspaceLookupByMetadata(projectName, taskId);
-  if (!wsLookup.ok) return { kind: "error", error: wsLookup.error };
-  const recorded = metadataJson(wsLookup.workspaceRef, "craft:surface:agent");
-  const recordedSurfaceRef = typeof recorded === "object" && recorded !== null
-    ? String((recorded as { surface_id?: unknown }).surface_id ?? "")
-    : "";
-  const loaded = loadWorkspaceTree(wsLookup.workspaceRef);
-  if (!loaded.ok) return { kind: "error", error: loaded.error };
-  const titlesSeen: string[] = [];
-  for (const w of loaded.tree.windows) {
-    for (const ws of w.workspaces) {
-      titlesSeen.push(ws.title);
-      let surfaceRef: string | null = null;
-      let surfaceAlreadyActive = false;
-      for (const p of ws.panes) {
-        for (const s of p.surfaces) {
-          if (recordedSurfaceRef && s.ref === recordedSurfaceRef) {
-            surfaceRef = s.ref;
-            surfaceAlreadyActive =
-              !!s.selected && !!p.focused && !!ws.selected && !!w.active;
-            break;
-          }
-        }
-        if (surfaceRef) break;
-      }
-      return {
-        kind: "found",
-        workspaceRef: ws.ref,
-        windowIndex: w.index ?? 0,
-        surfaceRef,
-        surfaceAlreadyActive,
-        workspaceAlreadySelected: !!ws.selected && !!w.active,
-      };
-    }
+export function taskWorkspaceState(projectDir: string, taskId: string): WorkspaceState {
+  const r = craftMux(projectDir, "workspace-state", taskId, "agent");
+  if (!r.ok) return { task_id: taskId, error: r.stderr.trim() || r.stdout.trim() || "workspace state unavailable" };
+  try {
+    return JSON.parse(r.stdout) as WorkspaceState;
+  } catch (err) {
+    return { task_id: taskId, error: `failed to parse workspace state: ${String(err)}` };
   }
-  return { kind: "missing", titlesSeen };
 }
 
-export function focusTaskSurface(projectName: string, taskId: string): FocusResult {
-  const state = resolveTaskState(projectName, taskId);
-  if (state.kind === "error") {
-    return isUiUnavailable(state.error)
-      ? cmuxUiUnavailable(state.error)
-      : { ok: false, error: `cmux: ${state.error} (try again — usually clears after a moment)` };
-  }
-  if (state.kind === "missing") {
-    const craftTitles = state.titlesSeen.filter(t => t.startsWith(CMUX_PREFIX)).join(", ") || "(none)";
-    return {
-      ok: false,
-      error: `no cmux workspace titled '${CMUX_PREFIX}-${projectName}-${taskId}' — saw: ${craftTitles}`,
-    };
-  }
-  const { workspaceRef: ws, windowIndex, surfaceRef, surfaceAlreadyActive, workspaceAlreadySelected } = state;
-
-  // Fast path: surface already selected, workspace selected, window current.
-  // Skip the 5 action subprocesses entirely.
-  if (surfaceRef && surfaceAlreadyActive) {
-    return { ok: true, workspaceRef: ws, surfaceRef };
-  }
-
-  // No recorded surface (or it died). Fall back to just selecting the
-  // workspace + focusing the window.
-  if (!surfaceRef) {
-    if (!workspaceAlreadySelected) {
-      const selected = cmux("select-workspace", "--workspace", ws);
-      if (!selected.ok && isUiUnavailable(selected.stderr)) return cmuxUiUnavailable(selected.stderr.trim());
-    }
-    focusWindowByIndex(windowIndex);
-    return {
-      ok: true,
-      workspaceRef: ws,
-      fallback: true,
-      error: "no surface registered for this task; focused the workspace as fallback",
-    };
-  }
-
-  // Surface exists but isn't focused — do the full activation chain.
-  const r = focusSurface(surfaceRef);
-  if (!r.ok) {
-    if (isUiUnavailable(r.error ?? "")) return cmuxUiUnavailable(r.error ?? "cmux UI relay unavailable");
-    const selected = cmux("select-workspace", "--workspace", ws);
-    if (!selected.ok && isUiUnavailable(selected.stderr)) return cmuxUiUnavailable(selected.stderr.trim());
-    focusWindowByIndex(windowIndex);
-    return {
-      ok: true,
-      workspaceRef: ws,
-      surfaceRef,
-      fallback: true,
-      error: `focus-surface failed (${r.error}); selected workspace as fallback`,
-    };
-  }
-  if (!workspaceAlreadySelected) {
-    const selected = cmux("select-workspace", "--workspace", ws);
-    if (!selected.ok && isUiUnavailable(selected.stderr)) return cmuxUiUnavailable(selected.stderr.trim());
-  }
-  focusWindowByIndex(windowIndex);
-  return { ok: true, workspaceRef: ws, surfaceRef };
+export function focusTaskSurface(projectDir: string, taskId: string, attach = false): FocusResult {
+  const args = ["focus", taskId, "agent"];
+  if (attach) args.push("--attach");
+  const r = craftMux(projectDir, ...args);
+  if (r.ok) return { ok: true, surfaceRef: r.stdout.trim() || undefined };
+  const error = r.stderr.trim() || r.stdout.trim() || `failed to focus task ${taskId}`;
+  return isUiUnavailable(error)
+    ? cmuxUiUnavailable(error)
+    : { ok: false, error };
 }
 
 /**

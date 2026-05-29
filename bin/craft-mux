@@ -15,6 +15,8 @@
 #   craft-mux send-task <task-id> <text...>     Send text to a task's agent pane
 #   craft-mux open <task-id> <surface-id> ...   Open/reuse a task web surface
 #   craft-mux focus <task-id> <surface-id>      Focus a registered task surface
+#   craft-mux workspace-state <task-id> [surface-id]
+#                                                 Print task workspace/surface JSON
 #   craft-mux close <task-id> <surface-id>      Close a registered task surface
 #   craft-mux status <task-id> <state> ...      Set a visible task status banner
 #
@@ -70,7 +72,7 @@ fi
 
 # --- Dispatch ---
 cmd="${1:-}"
-[[ -n "$cmd" ]] || { echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|close|status ..." >&2; exit 2; }
+[[ -n "$cmd" ]] || { echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|workspace-state|close|status ..." >&2; exit 2; }
 shift
 
 case "$cmd" in
@@ -119,7 +121,20 @@ case "$cmd" in
     focus)
         task_id="${1:?task id required}"; shift
         surface_id="${1:?surface id required}"
-        mux_surface_focus "$PROJECT_DIR" "$task_id" "$surface_id"
+        attach_first=false
+        shift || true
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --attach) attach_first=true; shift ;;
+                *) echo "craft-mux focus: unknown arg: $1" >&2; exit 2 ;;
+            esac
+        done
+        mux_surface_focus "$PROJECT_DIR" "$task_id" "$surface_id" "$attach_first"
+        ;;
+    workspace-state)
+        task_id="${1:?task id required}"; shift
+        surface_id="${1:-agent}"
+        mux_task_workspace_state "$PROJECT_DIR" "$task_id" "$surface_id"
         ;;
     close)
         task_id="${1:?task id required}"; shift
@@ -142,7 +157,7 @@ case "$cmd" in
         ;;
     *)
         echo "craft-mux: unknown subcommand '$cmd'" >&2
-        echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|close|status ..." >&2
+        echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|workspace-state|close|status ..." >&2
         exit 2
         ;;
 esac

@@ -1,5 +1,6 @@
 import type { Task } from "./queue";
 import { QUEUE_ORDER } from "./queue";
+import type { WorkspaceState } from "./cmux";
 
 const LINEAR_ORG = process.env.LINEAR_ORG ?? "linktree";
 const DONE_LIMIT = Number(process.env.DONE_LIMIT ?? "8");
@@ -169,7 +170,7 @@ const REFRESH_HX_ATTRS = {
   "hx-swap": "outerHTML",
 };
 
-export function Dashboard({ projectName, tasks }: { projectName: string; tasks: Task[] }) {
+export function Dashboard({ projectName, tasks, workspaceStates }: { projectName: string; tasks: Task[]; workspaceStates?: Record<string, WorkspaceState> }) {
   const byQueue = new Map<string, Task[]>();
   for (const t of tasks) {
     if (!byQueue.has(t.queueDir)) byQueue.set(t.queueDir, []);
@@ -241,7 +242,7 @@ export function Dashboard({ projectName, tasks }: { projectName: string; tasks: 
                   <span style={{ color: statusColor[s] ?? "#7e858d" }}>●</span>{" "}
                   {s} ({all.length})
                 </h2>
-                {renderQueueItems(shown, tasksById)}
+                {renderQueueItems(shown, tasksById, workspaceStates ?? {})}
                 {hidden > 0 && (
                   <div style={{ fontSize: "0.78rem", color: "#7e858d", padding: "0.4rem 0.2rem", fontStyle: "italic" }}>
                     …and {hidden} older — see <code>queue/done/</code>
@@ -256,7 +257,7 @@ export function Dashboard({ projectName, tasks }: { projectName: string; tasks: 
   );
 }
 
-function renderQueueItems(tasks: Task[], tasksById: Map<string, Task>) {
+function renderQueueItems(tasks: Task[], tasksById: Map<string, Task>, workspaceStates: Record<string, WorkspaceState>) {
   const parentIds = new Set(
     [...tasksById.values()].map(t => t.parent).filter((id): id is string => Boolean(id))
   );
@@ -279,39 +280,40 @@ function renderQueueItems(tasks: Task[], tasksById: Map<string, Task>) {
       if (rendered.has(task.id)) continue;
       rendered.add(task.id);
       const children = childrenByParent.get(task.id) ?? [];
-      out.push(<ParentGroup parent={task} children={children} />);
+      out.push(<ParentGroup parent={task} children={children} workspaceStates={workspaceStates} />);
       continue;
     }
     if (task.parent && parentTasks.has(task.parent)) {
       if (rendered.has(task.parent)) continue;
       rendered.add(task.parent);
-      out.push(<ParentGroup parent={parentTasks.get(task.parent)!} children={childrenByParent.get(task.parent) ?? []} />);
+      out.push(<ParentGroup parent={parentTasks.get(task.parent)!} children={childrenByParent.get(task.parent) ?? []} workspaceStates={workspaceStates} />);
       continue;
     }
-    out.push(<TaskCard task={task} />);
+    out.push(<TaskCard task={task} workspaceState={workspaceStates[task.id]} />);
   }
   return out;
 }
 
-function ParentGroup({ parent, children }: { parent: Task; children: Task[] }) {
+function ParentGroup({ parent, children, workspaceStates }: { parent: Task; children: Task[]; workspaceStates: Record<string, WorkspaceState> }) {
   return (
     <div class="parent-group">
-      <TaskCard task={parent} />
+      <TaskCard task={parent} workspaceState={workspaceStates[parent.id]} />
       {children.length > 0 && (
         <div class="parent-children">
-          {children.map(child => <TaskCard task={child} nested />)}
+          {children.map(child => <TaskCard task={child} nested workspaceState={workspaceStates[child.id]} />)}
         </div>
       )}
     </div>
   );
 }
 
-function TaskCard({ task, nested = false }: { task: Task; nested?: boolean }) {
+function TaskCard({ task, nested = false, workspaceState }: { task: Task; nested?: boolean; workspaceState?: WorkspaceState }) {
   const color = statusColor[task.queueDir] ?? "#6b7280";
   const isDone = task.queueDir === "done";
   const isActive = !isDone;
   const waitingOnTeam = isWaitingOnTeam(task);
   const summaryClamp = isDone ? "lines-1" : "lines-2";
+  const taskDetached = workspaceState?.detached === true;
 
   // Done tasks: trim down to identity + PR + summary. Active tasks: keep
   // the full details expander.
@@ -416,12 +418,12 @@ function TaskCard({ task, nested = false }: { task: Task; nested?: boolean }) {
               <button
                 type="button"
                 class="primary"
-                hx-post={`/focus/task/${task.id}`}
+                hx-post={taskDetached ? `/focus/task/${task.id}?attach=1` : `/focus/task/${task.id}`}
                 hx-swap="none"
-                data-toast="focused"
-                data-toast-success={`focused ${task.id}`}
+                data-toast={taskDetached ? "attaching" : "focused"}
+                data-toast-success={taskDetached ? `attached ${task.id}` : `focused ${task.id}`}
               >
-                focus terminal
+                {taskDetached ? "attach terminal" : "focus terminal"}
               </button>
               {waitingOnTeam ? (
                 <button
