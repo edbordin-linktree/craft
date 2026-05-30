@@ -491,7 +491,6 @@ task_agent_surface_missing() {
 resume_missing_task_sessions() {
     local active_count state task_file tid active_surface_missing attempted_at now
     active_count=${#ACTIVE_TASKS[@]}
-    (( active_count < MAX_PARALLEL )) || return 0
     now="$(date +%s)"
 
     for state in "${QUEUE_STATES[@]}"; do
@@ -508,6 +507,8 @@ resume_missing_task_sessions() {
             if [[ -n "${ACTIVE_TASKS[$tid]:-}" ]]; then
                 unset "ACTIVE_TASKS[$tid]" "TASK_SESSIONS[$tid]" "TASK_AGENTS[$tid]" "TASK_START[$tid]"
                 active_count=$((active_count > 0 ? active_count - 1 : 0))
+            elif (( active_count >= MAX_PARALLEL )); then
+                return 0
             fi
 
             attempted_at="${TASK_RESUME_ATTEMPTED[$tid]:-0}"
