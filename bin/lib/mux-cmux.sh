@@ -15,6 +15,35 @@ fi
 CMUX_PREFIX="craft"
 CMUX_CRAFT_SCHEMA_VERSION="1"
 
+cmux() {
+    local timeout_bin cmux_bin timeout_seconds
+
+    if [[ "${CMUX_DISABLE_COMMAND_TIMEOUT:-}" == "1" ]]; then
+        command cmux "$@"
+        return
+    fi
+
+    timeout_seconds="${CMUX_COMMAND_TIMEOUT:-60}"
+    [[ -n "$timeout_seconds" && "$timeout_seconds" != "0" ]] || {
+        command cmux "$@"
+        return
+    }
+
+    timeout_bin="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+    [[ -n "$timeout_bin" ]] || {
+        command cmux "$@"
+        return
+    }
+
+    cmux_bin="${CMUX_BIN:-$(type -P cmux 2>/dev/null || true)}"
+    [[ -n "$cmux_bin" ]] || {
+        command cmux "$@"
+        return
+    }
+
+    "$timeout_bin" "$timeout_seconds" "$cmux_bin" "$@"
+}
+
 _cmux_craft_root() {
     if [[ -n "${CRAFT_ROOT:-}" ]]; then
         echo "$CRAFT_ROOT"
@@ -59,7 +88,7 @@ _cmux_workspace_lookup_by_metadata() {
         [[ -n "$pair" ]] || continue
         args+=("--metadata" "$pair")
     done
-    cmux workspace lookup "${args[@]}" 2>/dev/null | _cmux_workspace_ref_from_json
+    CMUX_COMMAND_TIMEOUT="${CMUX_LOOKUP_TIMEOUT:-12}" cmux workspace lookup "${args[@]}" 2>/dev/null | _cmux_workspace_ref_from_json
 }
 
 _cmux_workspace_lookup_json_by_metadata() {
@@ -69,7 +98,7 @@ _cmux_workspace_lookup_json_by_metadata() {
         [[ -n "$pair" ]] || continue
         args+=("--metadata" "$pair")
     done
-    cmux workspace lookup "${args[@]}" 2>/dev/null
+    CMUX_COMMAND_TIMEOUT="${CMUX_LOOKUP_TIMEOUT:-12}" cmux workspace lookup "${args[@]}" 2>/dev/null
 }
 
 _cmux_workspace_lookup_item_from_json() {
@@ -165,8 +194,8 @@ _cmux_close_workspace_async() {
 
 _cmux_tree_json() {
     local ws_ref="$1"
-    cmux --id-format both tree --workspace "$ws_ref" --json 2>/dev/null \
-        || cmux tree --workspace "$ws_ref" --json 2>/dev/null
+    CMUX_COMMAND_TIMEOUT="${CMUX_TREE_TIMEOUT:-12}" cmux --id-format both tree --workspace "$ws_ref" --json 2>/dev/null \
+        || CMUX_COMMAND_TIMEOUT="${CMUX_TREE_TIMEOUT:-12}" cmux tree --workspace "$ws_ref" --json 2>/dev/null
 }
 
 _cmux_project_workspace_ref() {
