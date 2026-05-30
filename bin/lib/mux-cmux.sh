@@ -40,7 +40,11 @@ _cmux_workspace_ref_from_json() {
         ]
         | map(select(type == "object"))
         | .[]
-        | .workspace_ref // .workspaceRef // .ref // .workspace_id // .workspaceId // .id // empty
+        | if (.detached == true or .attached == false) and ((.workspace_id // .workspaceId // .id // "") != "") then
+            .workspace_id // .workspaceId // .id
+          else
+            .workspace_ref // .workspaceRef // .ref // .workspace_id // .workspaceId // .id // empty
+          end
     ' 2>/dev/null | head -1
 }
 
@@ -1415,15 +1419,20 @@ _cmux_task_workspace_lookup_item_for_project_dir() {
 
 mux_task_workspace_state() {
     local project_dir="$1" task_id="$2" surface_id="${3:-agent}"
-    local item ws_ref attached detached recorded surface_ref surface_exists=false
+    local item ws_ref ws_id attached detached recorded surface_ref surface_exists=false
     item="$(_cmux_task_workspace_lookup_item_for_project_dir "$project_dir" "$task_id" 2>/dev/null || true)"
     if [[ -z "$item" ]]; then
         jq -n --arg task_id "$task_id" '{task_id:$task_id, exists:false, attached:false, detached:false}'
         return 0
     fi
-    ws_ref="$(jq -r '.workspace_ref // .workspaceRef // .ref // .workspace_id // .workspaceId // .id // empty' <<< "$item")"
     attached="$(jq -r 'if .attached == true then "true" else "false" end' <<< "$item")"
     detached="$(jq -r 'if .detached == true then "true" elif .attached == false then "true" else "false" end' <<< "$item")"
+    ws_id="$(jq -r '.workspace_id // .workspaceId // .id // empty' <<< "$item")"
+    if [[ "$detached" == "true" && -n "$ws_id" ]]; then
+        ws_ref="$ws_id"
+    else
+        ws_ref="$(jq -r '.workspace_ref // .workspaceRef // .ref // .workspace_id // .workspaceId // .id // empty' <<< "$item")"
+    fi
     recorded="$(_cmux_surface_from_metadata "$ws_ref" "$surface_id" 2>/dev/null || true)"
     surface_ref="$(jq -r '.surface_id // .surface_ref // .ref // empty' <<< "${recorded:-null}" 2>/dev/null || true)"
     if [[ -n "$surface_ref" ]] && _cmux_surface_exists "$ws_ref" "$surface_ref"; then
@@ -1432,6 +1441,7 @@ mux_task_workspace_state() {
     jq -n \
         --arg task_id "$task_id" \
         --arg workspace_ref "$ws_ref" \
+        --arg workspace_id "$ws_id" \
         --arg surface_ref "$surface_ref" \
         --argjson attached "$attached" \
         --argjson detached "$detached" \
@@ -1442,6 +1452,7 @@ mux_task_workspace_state() {
           attached: $attached,
           detached: $detached,
           workspace_ref: $workspace_ref,
+          workspace_id: $workspace_id,
           surface_ref: $surface_ref,
           surface_exists: $surface_exists
         }'
