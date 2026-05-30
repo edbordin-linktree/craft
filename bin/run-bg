@@ -251,7 +251,7 @@ EOF
     [[ -n "$PID" ]] || { echo "run-bg: could not determine PID for $LABEL after bootstrap" >&2; launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true; rm -f "$LABELFILE"; exit 1; }
     echo "$PID" > "$PIDFILE"
 else
-    "$BASH_BIN" "$RUNNER" &
+    "$BASH_BIN" "$RUNNER" >/dev/null 2>&1 &
     echo $! > "$PIDFILE"
 fi
 
