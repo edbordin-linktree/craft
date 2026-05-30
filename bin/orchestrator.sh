@@ -489,20 +489,33 @@ task_agent_surface_missing() {
 }
 
 resume_missing_task_sessions() {
-    local active_count state task_file tid
+    local active_count state task_file tid active_surface_missing attempted_at now
     active_count=${#ACTIVE_TASKS[@]}
     (( active_count < MAX_PARALLEL )) || return 0
+    now="$(date +%s)"
 
     for state in "${QUEUE_STATES[@]}"; do
         task_state_should_resume "$state" || continue
         for task_file in $(list_tasks "$QUEUE_DIR/$state"); do
             tid="$(task_id "$task_file")"
             [[ -n "$tid" ]] || continue
-            [[ -z "${ACTIVE_TASKS[$tid]:-}" ]] || continue
-            [[ -z "${TASK_RESUME_ATTEMPTED[$tid]:-}" ]] || continue
-            task_agent_surface_missing "$tid" || continue
+            active_surface_missing=0
+            if task_agent_surface_missing "$tid"; then
+                active_surface_missing=1
+            fi
+            [[ "$active_surface_missing" -eq 1 ]] || continue
 
-            TASK_RESUME_ATTEMPTED["$tid"]=1
+            if [[ -n "${ACTIVE_TASKS[$tid]:-}" ]]; then
+                unset "ACTIVE_TASKS[$tid]" "TASK_SESSIONS[$tid]" "TASK_AGENTS[$tid]" "TASK_START[$tid]"
+                active_count=$((active_count > 0 ? active_count - 1 : 0))
+            fi
+
+            attempted_at="${TASK_RESUME_ATTEMPTED[$tid]:-0}"
+            if [[ "$attempted_at" =~ ^[0-9]+$ ]] && (( attempted_at > 0 && now - attempted_at < 300 )); then
+                continue
+            fi
+
+            TASK_RESUME_ATTEMPTED["$tid"]="$now"
             if resume_task "$task_file"; then
                 active_count=$((active_count + 1))
                 (( active_count < MAX_PARALLEL )) || return 0
