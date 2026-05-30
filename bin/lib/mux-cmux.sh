@@ -511,18 +511,13 @@ _cmux_new_surface_in_pane() {
     local raw sid args
     args=(new-surface --workspace "$ws_ref" --pane "$pane" --type "$type" --focus false)
     [[ "$type" == "browser" && -n "$url" ]] && args+=(--url "$url")
+    [[ "$type" != "browser" && -n "$command" ]] && args+=(--command "$command")
     raw="$(cmux "${args[@]}" 2>&1)"
     sid="$(printf '%s' "$raw" | _cmux_surface_id_from_output)"
     [[ -n "$sid" ]] || sid="$(printf '%s' "$raw" | grep -oE 'surface:[0-9]+' | head -1)"
     if [[ -z "$sid" ]]; then
         echo "surface_create_failed: $raw" >&2
         return 1
-    fi
-    if [[ "$type" != "browser" && -n "$command" ]]; then
-        _cmux_send_command_to_surface "$ws_ref" "$sid" "$command" || {
-            echo "surface_send_failed: $sid" >&2
-            return 1
-        }
     fi
     echo "$sid"
 }
@@ -554,9 +549,12 @@ _cmux_create_surface() {
     if [[ "$placement" == "right" ]]; then
         local args=(new-pane --direction right --workspace "$ws_ref" --type "$type" --focus false)
         [[ "$type" == "browser" && -n "$url" ]] && args+=(--url "$url")
+        [[ "$type" != "browser" && -n "$command" ]] && args+=(--command "$command")
         raw="$(cmux "${args[@]}" 2>&1)"
     else
-        raw="$(cmux new-split "$direction" --workspace "$ws_ref" 2>&1)"
+        local args=(new-split "$direction" --workspace "$ws_ref")
+        [[ "$type" != "browser" && -n "$command" ]] && args+=(--command "$command")
+        raw="$(cmux "${args[@]}" 2>&1)"
     fi
     split_surface="$(printf '%s' "$raw" | _cmux_surface_id_from_output)"
     [[ -n "$split_surface" ]] || split_surface="$(printf '%s' "$raw" | grep -oE 'surface:[^[:space:]",}]+' | head -1)"
@@ -565,10 +563,6 @@ _cmux_create_surface() {
         [[ -n "$pane" ]] || pane="$(_cmux_pane_for_surface "$ws_ref" "$split_surface")"
         if [[ "$type" == "terminal" ]]; then
             sid="$split_surface"
-            _cmux_send_command_to_surface "$ws_ref" "$sid" "$command" || {
-                echo "surface_send_failed: $sid" >&2
-                return 1
-            }
         elif [[ "$placement" == "right" ]]; then
             sid="$split_surface"
         elif [[ -n "$pane" ]]; then

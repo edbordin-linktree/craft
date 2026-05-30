@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# start-local-review — Nonblocking local-review bootstrap used by stage hooks.
+#
+# The orchestrator calls stage hooks inline. `launch-diffhub` can legitimately
+# wait for a dev server and browser surface, so keep that wait in a background
+# helper and return control to the orchestrator TUI immediately.
+
+set -uo pipefail
+
+REPO="$(pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+CRAFT_HOME="${CRAFT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo) REPO="$2"; shift 2 ;;
+        -h|--help)
+            sed -n '2,/^set -uo/p' "$0" | sed 's/^# \?//'
+            exit 0
+            ;;
+        *) echo "start-local-review: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+cd "$REPO" || { echo "start-local-review: repo not accessible: $REPO" >&2; exit 1; }
+REPO="$(pwd -P)"
+
+if "$SCRIPT_DIR/launch-diffhub" --repo "$REPO"; then
+    "$CRAFT_HOME/bin/run-bg" --name babysit-diffhub "$SCRIPT_DIR/babysit-diffhub" --worktree "$REPO" >/dev/null 2>&1 || true
+fi

@@ -20,12 +20,10 @@ _diffhub_start_local_review() {
     local worktree
     worktree="$(_diffhub_worktree)"
     [[ -n "$worktree" ]] || return 0
-    (
-        cd "$worktree" || exit 0
-        if ! _diffhub_ready "$worktree"; then
-            "$PLUGIN_DIR/scripts/launch-diffhub" --repo "$worktree" >/dev/null 2>&1 || true
-        fi
-    )
+    if ! _diffhub_ready "$worktree"; then
+        craft_hook_start_helper_once "$worktree" "$PLUGIN_DIR/scripts/start-local-review" diffhub-local-review --repo "$worktree"
+        return 0
+    fi
     craft_hook_start_helper_once "$worktree" "$PLUGIN_DIR/scripts/babysit-diffhub" babysit-diffhub --worktree "$worktree"
 }
 

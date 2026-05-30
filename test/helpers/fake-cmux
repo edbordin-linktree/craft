@@ -109,6 +109,10 @@ url_arg() {
     return 1
 }
 
+command_arg() {
+    flag_value --command "$@"
+}
+
 type_arg() {
     local prev=""
     for arg in "$@"; do
@@ -392,27 +396,29 @@ case "${1:-}" in
         ;;
     new-split)
         ws="$(workspace_arg "$@")"
+        command="$(command_arg "$@" || true)"
         pane="pane:$(jq -r '.next_pane' "$STATE")"
         surface="surface:$(jq -r '.next_surface' "$STATE")"
-        save --arg ws "$ws" --arg pane "$pane" --arg surface "$surface" '
+        save --arg ws "$ws" --arg pane "$pane" --arg surface "$surface" --arg command "$command" '
             .next_pane += 1
             | .next_surface += 1
             | (.windows[].workspaces[] | select(.ref == $ws).panes) +=
-              [{ref: $pane, surfaces: [{ref: $surface, type: "terminal", title: "", metadata: {}}]}]
+              [{ref: $pane, surfaces: [{ref: $surface, type: "terminal", title: "", command: $command, metadata: {}}]}]
         '
         echo "OK $surface $ws"
         ;;
     new-pane)
         ws="$(workspace_arg "$@")"
         url="$(url_arg "$@" || true)"
+        command="$(command_arg "$@" || true)"
         kind="$(type_arg "$@")"
         pane="pane:$(jq -r '.next_pane' "$STATE")"
         surface="surface:$(jq -r '.next_surface' "$STATE")"
-        save --arg ws "$ws" --arg pane "$pane" --arg surface "$surface" --arg url "$url" --arg kind "$kind" '
+        save --arg ws "$ws" --arg pane "$pane" --arg surface "$surface" --arg url "$url" --arg kind "$kind" --arg command "$command" '
             .next_pane += 1
             | .next_surface += 1
             | (.windows[].workspaces[] | select(.ref == $ws).panes) +=
-              [{ref: $pane, surfaces: [{ref: $surface, type: $kind, title: "", url: $url, metadata: {}}]}]
+              [{ref: $pane, surfaces: [{ref: $surface, type: $kind, title: "", url: $url, command: $command, metadata: {}}]}]
         '
         echo "OK $surface $pane $ws"
         ;;
@@ -420,15 +426,16 @@ case "${1:-}" in
         pane="$(pane_arg "$@" || true)"
         ws="$(workspace_arg "$@" || true)"
         url="$(url_arg "$@" || true)"
+        command="$(command_arg "$@" || true)"
         kind="$(type_arg "$@")"
         surface="surface:$(jq -r '.next_surface' "$STATE")"
         if [[ -z "$pane" && -n "$ws" ]]; then
             pane="$(jq -r --arg ws "$ws" '.windows[].workspaces[] | select(.ref == $ws).panes[0].ref' "$STATE")"
         fi
-        save --arg pane "$pane" --arg surface "$surface" --arg url "$url" --arg kind "$kind" '
+        save --arg pane "$pane" --arg surface "$surface" --arg url "$url" --arg kind "$kind" --arg command "$command" '
             .next_surface += 1
             | (.windows[].workspaces[].panes[] | select(.ref == $pane).surfaces) +=
-              [{ref: $surface, type: $kind, title: "", url: $url, metadata: {}}]
+              [{ref: $surface, type: $kind, title: "", url: $url, command: $command, metadata: {}}]
         '
         if [[ " $* " == *" --json "* ]]; then
             jq -n --arg surface_id "$surface" '{surface_id: $surface_id}'
