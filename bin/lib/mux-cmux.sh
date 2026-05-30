@@ -40,12 +40,12 @@ _cmux_workspace_ref_from_json() {
         ]
         | map(select(type == "object"))
         | .[]
-        | .workspace_id // .workspaceId // .id // .workspace_ref // .workspaceRef // .ref // empty
+        | .workspace_ref // .workspaceRef // .ref // .workspace_id // .workspaceId // .id // empty
     ' 2>/dev/null | head -1
 }
 
 _cmux_workspace_id_from_output() {
-    jq -r '.local_workspace_id // .localWorkspaceId // .workspace_id // .workspaceId // .id // .workspace_ref // .workspaceRef // .ref // empty' 2>/dev/null | head -1
+    jq -r '.workspace_ref // .workspaceRef // .ref // .local_workspace_ref // .localWorkspaceRef // .local_workspace_id // .localWorkspaceId // .workspace_id // .workspaceId // .id // empty' 2>/dev/null | head -1
 }
 
 _cmux_workspace_lookup_by_metadata() {
@@ -1421,7 +1421,7 @@ mux_task_workspace_state() {
         jq -n --arg task_id "$task_id" '{task_id:$task_id, exists:false, attached:false, detached:false}'
         return 0
     fi
-    ws_ref="$(jq -r '.workspace_id // .workspaceId // .id // .workspace_ref // .workspaceRef // .ref // empty' <<< "$item")"
+    ws_ref="$(jq -r '.workspace_ref // .workspaceRef // .ref // .workspace_id // .workspaceId // .id // empty' <<< "$item")"
     attached="$(jq -r 'if .attached == true then "true" else "false" end' <<< "$item")"
     detached="$(jq -r 'if .detached == true then "true" elif .attached == false then "true" else "false" end' <<< "$item")"
     recorded="$(_cmux_surface_from_metadata "$ws_ref" "$surface_id" 2>/dev/null || true)"
