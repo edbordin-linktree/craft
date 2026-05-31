@@ -309,6 +309,7 @@ function advanceTaskStage(projectDir: string, taskId: string) {
 const server = Bun.serve({
   port,
   hostname: host,
+  idleTimeout: 120,
   fetch(req) {
     const url = new URL(req.url);
 
