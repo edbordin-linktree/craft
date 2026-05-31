@@ -108,7 +108,7 @@ provider_task_resume_cmd() {
             echo "cd '${work_dir}' && ${env} && claude --continue${flags:+ $flags} \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
             ;;
         codex)
-            echo "cd '${work_dir}' && ${env} && codex${flags:+ $flags} resume --last \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
+            echo "cd '${work_dir}' && ${env} && codex${flags:+ $flags} exec resume --last \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
             ;;
         *)
             # Generic providers do not have a known resume primitive; use the
