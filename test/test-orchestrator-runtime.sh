@@ -31,6 +31,16 @@ assert_true() {
     fi
 }
 
+assert_false() {
+    local label="$1"; shift
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if "$@" >/dev/null 2>&1; then
+        fail "$label" "expected failure, got success"
+    else
+        pass "$label"
+    fi
+}
+
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -126,6 +136,9 @@ assert_eq "surface opened in fake cmux" "https://github.com/example/repo/pull/7"
 
 echo ""
 echo "buildkite-status stage cleanup"
+cat > "$WORKTREE/.orchestrator/bk-status.pid" <<'EOF'
+999999
+EOF
 tmp_state="$TMPDIR/cmux-bk.json"
 jq '.windows[0].workspaces[0].panes[0].surfaces +=
     [{
@@ -155,6 +168,27 @@ jq '.windows[0].workspaces[0].panes[0].surfaces +=
 )
 assert_eq "bk-status surface closed on pr_review end" "0" \
     "$(jq '[.windows[].workspaces[].panes[].surfaces[] | select(.title == "bk:repo#7")] | length' "$FAKE_CMUX_STATE")"
+assert_false "bk-status helper stopped on pr_review end" test -e "$WORKTREE/.orchestrator/bk-status.pid"
+
+echo ""
+echo "stage resume helper cleanup"
+cat > "$WORKTREE/.orchestrator/watch-pr.pid" <<'EOF'
+999999
+EOF
+(
+    export CRAFT_ROOT="$REPO_ROOT" PROJECT_DIR="$PROJECT_DIR"
+    source "$REPO_ROOT/plugins/babysit-pr/hooks.sh"
+    on_stage_resume \
+        --stage pr_review \
+        --task-id task-123 \
+        --task-file "$QUEUE_DIR/in-progress/task-123.md" \
+        --task-dir "$PROJECT_DIR/tasks/task-123" \
+        --reason "agent workspace recreated"
+)
+assert_true "babysit-pr resume replaces stale watch-pr helper" \
+    bash -c '[[ ! -e "$1" || "$(cat "$1" 2>/dev/null)" != "999999" ]]' _ "$WORKTREE/.orchestrator/watch-pr.pid"
+(cd "$WORKTREE" && "$REPO_ROOT/bin/run-bg" stop watch-pr >/dev/null 2>&1 || true)
+rm -f "$PROJECT_DIR/tasks/task-123/.orchestrator/events/pending/"*.json
 
 echo ""
 echo "babysit-diffhub event queue"

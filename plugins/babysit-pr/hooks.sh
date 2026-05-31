@@ -15,8 +15,14 @@ _pr_review_cleanup() {
 }
 
 _pr_review_start() {
-    local worktree="$1" pr_url="$2"
+    local worktree="$1" pr_url="$2" restart="${3:-0}"
     [[ -n "$worktree" && -n "$pr_url" ]] || return 0
+    if [[ "$restart" == "1" ]]; then
+        # Resume is entered from the task agent terminal. Stop stale helper
+        # PIDs from older workspace/process trees before recreating them under
+        # this task PTY.
+        craft_hook_stop_helper "$worktree" watch-pr
+    fi
     "$PLUGIN_DIR/scripts/open-pr-surface" "$pr_url" --repo "$worktree" >/dev/null 2>&1 || true
     craft_hook_start_helper_once "$worktree" "$PLUGIN_DIR/scripts/watch-pr" watch-pr --pr "$pr_url" --worktree "$worktree"
 }
@@ -47,7 +53,7 @@ on_stage_resume() {
     worktree="$(_pr_review_worktree)"
     [[ -n "$worktree" && -n "$TASK_FILE" ]] || return 0
     pr_url="$(craft_hook_task_frontmatter_field "$TASK_FILE" pr 2>/dev/null || true)"
-    _pr_review_start "$worktree" "$pr_url"
+    _pr_review_start "$worktree" "$pr_url" 1
 }
 
 on_stage_end() {
