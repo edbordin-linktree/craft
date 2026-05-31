@@ -167,11 +167,11 @@ echo "provider resume commands"
 claude_resume_cmd="$(provider_task_resume_cmd claude "$TMPDIR/prompt.txt" "$PROJECT_DIR/tasks/task-123" "sonnet")"
 codex_resume_cmd="$(provider_task_resume_cmd codex "$TMPDIR/prompt.txt" "$PROJECT_DIR/tasks/task-123" "gpt-5")"
 assert_true "claude uses continue resume" bash -c "grep -q 'claude --continue' <<< \"\$1\"" _ "$claude_resume_cmd"
-assert_true "codex uses exec resume --last" bash -c "grep -q 'codex.*exec resume --last' <<< \"\$1\"" _ "$codex_resume_cmd"
+assert_true "codex uses interactive resume --last" bash -c "grep -q 'codex.*resume --last' <<< \"\$1\"" _ "$codex_resume_cmd"
 assert_true "codex disables startup update prompt" \
     bash -c "grep -q -- '-c check_for_update_on_startup=false' <<< \"\$1\"" _ "$codex_resume_cmd"
-assert_true "codex passes resume prompt as exec prompt" \
-    bash -c 'grep -Fq "$2" <<< "$1"' _ "$codex_resume_cmd" 'exec resume --last "$(cat'
+assert_true "codex does not pass resume prompt as session id" \
+    bash -c 'if grep -Fq "$2" <<< "$1"; then exit 1; fi' _ "$codex_resume_cmd" 'resume --last "$(cat'
 assert_true "task run entrypoint uses craft command" \
     bash -c "source '$REPO_ROOT/bin/lib/providers.sh' && CRAFT_ROOT='$REPO_ROOT' provider_task_entry_cmd run task-123 /tmp/prompt /tmp/work claude opus | grep -q 'craft task run task-123'"
 assert_true "task resume entrypoint uses craft command" \

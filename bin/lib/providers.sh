@@ -108,7 +108,11 @@ provider_task_resume_cmd() {
             echo "cd '${work_dir}' && ${env} && claude --continue${flags:+ $flags} \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
             ;;
         codex)
-            echo "cd '${work_dir}' && ${env} && codex${flags:+ $flags} exec resume --last \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
+            # TODO: inject the Craft resume prompt into the resumed interactive
+            # Codex TUI with cmux/tmux keystrokes. `codex resume --last <arg>`
+            # parses <arg> as SESSION_ID, and `codex exec resume` is
+            # non-interactive, so neither can safely deliver the prompt here.
+            echo "cd '${work_dir}' && ${env} && codex${flags:+ $flags} resume --last ; rm -f '${prompt_file}'"
             ;;
         *)
             # Generic providers do not have a known resume primitive; use the
