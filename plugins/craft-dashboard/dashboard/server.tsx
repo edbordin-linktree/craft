@@ -24,7 +24,7 @@ import { Marked, Renderer } from "marked";
 import { render } from "preact-render-to-string";
 import { Dashboard } from "./views";
 import { scanProject, type Task } from "./queue";
-import { focusTaskSurface, focusDiffhubSurface, focusPrSurface, focusRegisteredSurface, openExternal, taskWorkspaceState, type WorkspaceState } from "./cmux";
+import { focusTaskSurface, focusDiffhubSurface, focusPrSurface, focusRegisteredSurface, openExternal, resumeTaskSurface, taskWorkspaceState, type WorkspaceState } from "./cmux";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),
@@ -368,6 +368,12 @@ const server = Bun.serve({
     if (url.pathname.startsWith("/focus/task/") && req.method === "POST") {
       const id = decodeURIComponent(url.pathname.slice("/focus/task/".length));
       const r = focusTaskSurface(projectDir, id, url.searchParams.get("attach") === "1");
+      return jsonResponse(r, r.ok || r.code === "cmux_ui_unavailable" ? 200 : 502);
+    }
+
+    if (url.pathname.startsWith("/resume/task/") && req.method === "POST") {
+      const id = decodeURIComponent(url.pathname.slice("/resume/task/".length));
+      const r = resumeTaskSurface(projectDir, id);
       return jsonResponse(r, r.ok || r.code === "cmux_ui_unavailable" ? 200 : 502);
     }
 

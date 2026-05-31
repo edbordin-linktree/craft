@@ -314,6 +314,8 @@ function TaskCard({ task, nested = false, workspaceState }: { task: Task; nested
   const waitingOnTeam = isWaitingOnTeam(task);
   const summaryClamp = isDone ? "lines-1" : "lines-2";
   const taskDetached = workspaceState?.detached === true;
+  const taskNeedsResume = workspaceState && workspaceState.error === undefined
+    && (workspaceState.exists === false || workspaceState.surface_exists === false);
 
   // Done tasks: trim down to identity + PR + summary. Active tasks: keep
   // the full details expander.
@@ -415,16 +417,30 @@ function TaskCard({ task, nested = false, workspaceState }: { task: Task; nested
             </button>
           ) : (
             <>
-              <button
-                type="button"
-                class="primary"
-                hx-post={taskDetached ? `/focus/task/${task.id}?attach=1` : `/focus/task/${task.id}`}
-                hx-swap="none"
-                data-toast={taskDetached ? "attaching" : "focused"}
-                data-toast-success={taskDetached ? `attached ${task.id}` : `focused ${task.id}`}
-              >
-                {taskDetached ? "attach terminal" : "focus terminal"}
-              </button>
+              {taskNeedsResume ? (
+                <button
+                  type="button"
+                  class="primary"
+                  hx-post={`/resume/task/${task.id}`}
+                  hx-swap="none"
+                  data-toast="resuming task"
+                  data-toast-success={`resumed ${task.id}`}
+                  title="Recreate this task's missing agent workspace or terminal"
+                >
+                  resume terminal
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  class="primary"
+                  hx-post={taskDetached ? `/focus/task/${task.id}?attach=1` : `/focus/task/${task.id}`}
+                  hx-swap="none"
+                  data-toast={taskDetached ? "attaching" : "focused"}
+                  data-toast-success={taskDetached ? `attached ${task.id}` : `focused ${task.id}`}
+                >
+                  {taskDetached ? "attach terminal" : "focus terminal"}
+                </button>
+              )}
               {waitingOnTeam ? (
                 <button
                   type="button"

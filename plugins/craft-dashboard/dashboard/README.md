@@ -44,10 +44,13 @@ surface; the dashboard code itself does not create cmux panes.
    and on every chokidar event under `queue/` or `tasks/`. The dashboard
    re-renders from the snapshot on every `/` request; htmx polls every 3s
    for fresh markup.
-3. **Cmux focus** (`cmux.ts`):
-   - Task surface: finds the task terminal by tab title in the task workspace.
-     Falls back to `cmux select-workspace` if the surface is missing.
-   - Diffhub and PR surfaces: focus Craft-registered stable surface IDs
+3. **Cmux actions** (`cmux.ts`):
+   - Task surface: resolves the task workspace and `agent` surface through
+     Craft mux metadata helpers. If the task workspace is detached, the UI
+     shows an attach action; if the workspace or agent surface is missing, it
+     shows a resume action instead of relying on the orchestrator to recreate
+     it automatically.
+   - Diffhub and PR surfaces: focus Craft-registered semantic surfaces
      (`diffhub-review`, `github-pr`) through `craft-mux focus`.
 
 ## Routes
@@ -58,6 +61,7 @@ surface; the dashboard code itself does not create cmux panes.
 | GET    | `/healthz`           | Plain `ok` for liveness checks                |
 | GET    | `/snapshot.json`     | `{snapshotTs, taskCount}` (lightweight poll)  |
 | POST   | `/focus/task/:id`    | Focus the agent surface in cmux               |
+| POST   | `/resume/task/:id`   | Recreate a missing task agent surface         |
 | POST   | `/focus/diffhub/:id` | Focus the diffhub browser surface in cmux     |
 | POST   | `/advance/:id`       | Advance the task to its next workflow stage |
 

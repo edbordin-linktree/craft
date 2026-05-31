@@ -142,7 +142,6 @@ declare -A TASK_SESSIONS=()  # task_id -> session/workspace title (per-task unde
 declare -A TASK_AGENTS=()    # task_id -> agent provider (claude, codex, etc.)
 declare -A TASK_PR_URLS=()   # task_id -> PR URL (for merge monitoring)
 declare -A TASK_START=()     # task_id -> epoch timestamp when task started
-declare -A TASK_RESUME_ATTEMPTED=()  # task_id -> 1 after this orchestrator has tried resume
 
 # --- Display ---
 RED='\033[0;31m'
@@ -409,124 +408,6 @@ run_task() {
     TASK_START["$tid"]="$(date +%s)"
 }
 
-render_task_resume_prompt() {
-    local task_file="$1" task_dir="$2"
-    local tid status stage workflow
-    tid="$(task_id "$task_file")"
-    status="$(task_field "$task_file" "status")"
-    stage="$(task_field "$task_file" "stage")"
-    workflow="$(workflow_task_workflow "$task_file")"
-
-    cat <<EOF
-You are resuming Craft task ${tid}.
-
-The orchestrator detected that this task no longer had an agent workspace/surface and recreated it using the agent resume command. Do not restart the workflow, move the task back to an earlier state, or repeat stage-start actions.
-
-Task file: ${task_file}
-Task dir: ${task_dir}
-Current queue status: ${status}
-Current workflow stage: ${stage:-unknown}
-Workflow: ${workflow}
-
-Resume from the existing conversation and current worktree state. Read the task file and repo state, then continue the current stage.
-EOF
-}
-
-resume_task() {
-    local task_file="$1"
-    local tid filename prompt_file task_dir agent agent_model task_human_title task_session window reason
-    tid="$(task_id "$task_file")"
-    filename="$(basename "$task_file")"
-    reason="agent workspace missing; resumed task session"
-
-    log "Resuming task session: $tid"
-
-    task_dir="$PROJECT_DIR/tasks/$tid"
-    mkdir -p "$task_dir"
-    prompt_file="/tmp/craft-resume-${tid}.txt"
-    render_task_resume_prompt "$task_file" "$task_dir" > "$prompt_file"
-
-    agent="$(task_agent "$task_file" "$PROJECT_DIR")"
-    agent_model="$(task_agent_model "$task_file" "$PROJECT_DIR")"
-
-    ensure_session "$PROJECT_NAME" "$PROJECT_DIR" >/dev/null
-    task_human_title="$(task_human_title "$task_file")"
-    task_session="$(ensure_task_session "$PROJECT_NAME" "$tid" "$task_dir" "$task_human_title")"
-
-    window="$(resume_task_pane "$task_session" "$tid" "$prompt_file" "$task_dir" "$agent" "$agent_model")"
-
-    ACTIVE_TASKS["$tid"]="$window"
-    TASK_SESSIONS["$tid"]="$task_session"
-    TASK_AGENTS["$tid"]="$agent"
-    TASK_START["$tid"]="$(date +%s)"
-
-    append_work_log "$task_file" "Agent Session Resumed" "The orchestrator recreated the missing agent surface for ${filename} using ${agent} resume."
-    runtime_stage_resume "$PROJECT_DIR" "$tid" "$reason" >/dev/null || log "Stage resume hook failed for $tid"
-}
-
-task_state_should_resume() {
-    local state="$1"
-    case "$state" in
-        drafts|pending|approved|done|blocked|archive)
-            return 1
-            ;;
-        *)
-            return 0
-            ;;
-    esac
-}
-
-task_agent_surface_missing() {
-    local tid="$1" state_json exists surface_exists
-    state_json="$(mux_task_workspace_state "$PROJECT_DIR" "$tid" agent 2>/dev/null || true)"
-    if [[ -z "$state_json" ]] || ! jq -e . >/dev/null 2>&1 <<< "$state_json"; then
-        log "Could not inspect task workspace state for $tid; skipping resume"
-        return 1
-    fi
-    exists="$(jq -r 'if .exists == true then "true" else "false" end' <<< "$state_json")"
-    surface_exists="$(jq -r 'if .surface_exists == true then "true" else "false" end' <<< "$state_json")"
-    [[ "$exists" != "true" || "$surface_exists" != "true" ]]
-}
-
-resume_missing_task_sessions() {
-    local active_count state task_file tid active_surface_missing attempted_at now
-    active_count=${#ACTIVE_TASKS[@]}
-    now="$(date +%s)"
-
-    for state in "${QUEUE_STATES[@]}"; do
-        task_state_should_resume "$state" || continue
-        for task_file in $(list_tasks "$QUEUE_DIR/$state"); do
-            tid="$(task_id "$task_file")"
-            [[ -n "$tid" ]] || continue
-            active_surface_missing=0
-            if task_agent_surface_missing "$tid"; then
-                active_surface_missing=1
-            fi
-            [[ "$active_surface_missing" -eq 1 ]] || continue
-
-            if [[ -n "${ACTIVE_TASKS[$tid]:-}" ]]; then
-                unset "ACTIVE_TASKS[$tid]" "TASK_SESSIONS[$tid]" "TASK_AGENTS[$tid]" "TASK_START[$tid]"
-                active_count=$((active_count > 0 ? active_count - 1 : 0))
-            elif (( active_count >= MAX_PARALLEL )); then
-                return 0
-            fi
-
-            attempted_at="${TASK_RESUME_ATTEMPTED[$tid]:-0}"
-            if [[ "$attempted_at" =~ ^[0-9]+$ ]] && (( attempted_at > 0 && now - attempted_at < 300 )); then
-                continue
-            fi
-
-            TASK_RESUME_ATTEMPTED["$tid"]="$now"
-            if resume_task "$task_file"; then
-                active_count=$((active_count + 1))
-                (( active_count < MAX_PARALLEL )) || return 0
-            else
-                log "Task resume failed for $tid"
-            fi
-        done
-    done
-}
-
 # Find a task file by task ID across queue directories
 find_task_in() {
     local dir="$1" tid="$2"
@@ -791,9 +672,6 @@ while true; do
 
     # Check for new waiting tasks
     check_waiting_tasks
-
-    # Recreate missing task agent surfaces for tasks already past approval.
-    resume_missing_task_sessions
 
     # Check milestone completion every 4th poll
     if (( poll_count % 4 == 0 )); then

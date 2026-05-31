@@ -161,6 +161,15 @@ export function focusTaskSurface(projectDir: string, taskId: string, attach = fa
     : { ok: false, error };
 }
 
+export function resumeTaskSurface(projectDir: string, taskId: string): FocusResult {
+  const r = craftMux(projectDir, "resume", taskId);
+  if (r.ok) return { ok: true, surfaceRef: r.stdout.trim() || undefined };
+  const error = r.stderr.trim() || r.stdout.trim() || `failed to resume task ${taskId}`;
+  return isUiUnavailable(error)
+    ? cmuxUiUnavailable(error)
+    : { ok: false, error };
+}
+
 /**
  * Hand a URL off to the system default browser via macOS `open`. The cmux
  * in-app browser sometimes can't complete corporate SSO redirects, so links

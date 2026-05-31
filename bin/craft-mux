@@ -15,6 +15,7 @@
 #   craft-mux send-task <task-id> <text...>     Send text to a task's agent pane
 #   craft-mux open <task-id> <surface-id> ...   Open/reuse a task web surface
 #   craft-mux focus <task-id> <surface-id>      Focus a registered task surface
+#   craft-mux resume <task-id>                  Recreate a missing task agent
 #   craft-mux workspace-state <task-id> [surface-id]
 #                                                 Print task workspace/surface JSON
 #   craft-mux close <task-id> <surface-id>      Close a registered task surface
@@ -72,8 +73,60 @@ fi
 
 # --- Dispatch ---
 cmd="${1:-}"
-[[ -n "$cmd" ]] || { echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|workspace-state|close|status ..." >&2; exit 2; }
+[[ -n "$cmd" ]] || { echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|resume|workspace-state|close|status ..." >&2; exit 2; }
 shift
+
+render_task_resume_prompt() {
+    local task_file="$1" task_dir="$2"
+    local tid status stage workflow
+    tid="$(task_id "$task_file")"
+    status="$(task_field "$task_file" "status")"
+    stage="$(task_field "$task_file" "stage")"
+    workflow="$(workflow_task_workflow "$task_file")"
+
+    cat <<EOF
+You are resuming Craft task ${tid}.
+
+The operator explicitly resumed this task because Craft no longer found its agent workspace/surface. Do not restart the workflow, move the task back to an earlier state, or repeat stage-start actions.
+
+Task file: ${task_file}
+Task dir: ${task_dir}
+Current queue status: ${status}
+Current workflow stage: ${stage:-unknown}
+Workflow: ${workflow}
+
+Resume from the existing conversation and current worktree state. Read the task file and repo state, then continue the current stage.
+EOF
+}
+
+mux_resume_task_agent() {
+    local task_id="$1"
+    local task_file task_dir prompt_file agent agent_model task_human_title task_session surface reason
+    reason="agent workspace missing; operator resumed task session"
+
+    task_file="$(runtime_task_file "$PROJECT_DIR" "$task_id")" || {
+        echo "task_not_found: $task_id" >&2
+        return 1
+    }
+
+    task_dir="$PROJECT_DIR/tasks/$task_id"
+    mkdir -p "$task_dir"
+    prompt_file="/tmp/craft-resume-${task_id}.txt"
+    render_task_resume_prompt "$task_file" "$task_dir" > "$prompt_file"
+
+    agent="$(task_agent "$task_file" "$PROJECT_DIR")"
+    agent_model="$(task_agent_model "$task_file" "$PROJECT_DIR")"
+
+    ensure_session "$PROJECT_NAME" "$PROJECT_DIR" >/dev/null
+    task_human_title="$(task_human_title "$task_file")"
+    task_session="$(ensure_task_session "$PROJECT_NAME" "$task_id" "$task_dir" "$task_human_title")"
+    surface="$(resume_task_pane "$task_session" "$task_id" "$prompt_file" "$task_dir" "$agent" "$agent_model")"
+
+    append_work_log "$task_file" "Agent Session Resumed"
+    runtime_stage_resume "$PROJECT_DIR" "$task_id" "$reason" >/dev/null
+
+    echo "$surface"
+}
 
 case "$cmd" in
     spawn)
@@ -131,6 +184,10 @@ case "$cmd" in
         done
         mux_surface_focus "$PROJECT_DIR" "$task_id" "$surface_id" "$attach_first"
         ;;
+    resume)
+        task_id="${1:?task id required}"
+        mux_resume_task_agent "$task_id"
+        ;;
     workspace-state)
         task_id="${1:?task id required}"; shift
         surface_id="${1:-agent}"
@@ -157,7 +214,7 @@ case "$cmd" in
         ;;
     *)
         echo "craft-mux: unknown subcommand '$cmd'" >&2
-        echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|workspace-state|close|status ..." >&2
+        echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|resume|workspace-state|close|status ..." >&2
         exit 2
         ;;
 esac
