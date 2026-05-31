@@ -33,6 +33,8 @@ export CRAFT_ROOT CRAFT_PROJECTS
 source "$CRAFT_ROOT/bin/lib/plugins.sh"
 # shellcheck source=bin/lib/runtime.sh
 source "$CRAFT_ROOT/bin/lib/runtime.sh"
+# shellcheck source=bin/lib/providers.sh
+source "$CRAFT_ROOT/bin/lib/providers.sh"
 
 # Version
 if [[ -f "$CRAFT_ROOT/VERSION" ]]; then
@@ -125,6 +127,37 @@ cmd_task() {
     local group="${1:-}"
     shift || true
     case "$group" in
+        run|resume)
+            local mode="$group" task_id="${1:?task id required}" prompt_file="" agent_override="" model_override="" reason="agent workspace missing; operator resumed task session"
+            shift || true
+            local project_dir task_file task_dir agent agent_model cmd
+            project_dir="$(_cmd_project_dir)"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --prompt) prompt_file="${2:-}"; shift 2 ;;
+                    --agent) agent_override="${2:-}"; shift 2 ;;
+                    --model) model_override="${2:-}"; shift 2 ;;
+                    --reason) reason="${2:-}"; shift 2 ;;
+                    *) echo "craft task $mode: unknown arg: $1" >&2; exit 2 ;;
+                esac
+            done
+            [[ -n "$prompt_file" ]] || { echo "craft task $mode: --prompt is required" >&2; exit 2; }
+            [[ -f "$prompt_file" ]] || { echo "craft task $mode: prompt file not found: $prompt_file" >&2; exit 1; }
+            task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; exit 1; }
+            task_dir="$(runtime_task_dir "$project_dir" "$task_id")"
+            mkdir -p "$task_dir"
+            load_provider_config "$project_dir"
+            agent="${agent_override:-$(task_agent "$task_file" "$project_dir")}"
+            agent_model="${model_override:-$(task_agent_model "$task_file" "$project_dir")}"
+            if [[ "$mode" == "resume" ]]; then
+                runtime_append_work_log "$task_file" "Agent Session Resumed"
+                runtime_stage_resume "$project_dir" "$task_id" "$reason" >/dev/null
+                cmd="$(provider_task_resume_cmd "$agent" "$prompt_file" "$task_dir" "$agent_model")"
+            else
+                cmd="$(provider_task_cmd "$agent" "$prompt_file" "$task_dir" "$agent_model")"
+            fi
+            eval "$cmd"
+            ;;
         promote-draft)
             local task_id="${1:?task id required}"
             local project_dir
@@ -281,7 +314,7 @@ cmd_task() {
             esac
             ;;
         *)
-            echo "Usage: craft task promote-draft <task-id> | wait-team <task-id> | unwait-team <task-id> | state <subcommand> | stage <subcommand>" >&2
+            echo "Usage: craft task run|resume <task-id> --prompt <file> | promote-draft <task-id> | wait-team <task-id> | unwait-team <task-id> | state <subcommand> | stage <subcommand>" >&2
             exit 2
             ;;
     esac

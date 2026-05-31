@@ -170,8 +170,26 @@ assert_true "claude uses continue resume" bash -c "grep -q 'claude --continue' <
 assert_true "codex uses resume --last" bash -c "grep -q 'codex.*resume --last' <<< \"\$1\"" _ "$codex_resume_cmd"
 assert_true "codex disables startup update prompt" \
     bash -c "grep -q -- '-c check_for_update_on_startup=false' <<< \"\$1\"" _ "$codex_resume_cmd"
-assert_false "codex does not pass resume prompt as session id" \
+assert_true "codex passes resume prompt as prompt" \
     bash -c 'grep -Fq "$2" <<< "$1"' _ "$codex_resume_cmd" 'resume --last "$(cat'
+assert_true "task run entrypoint uses craft command" \
+    bash -c "source '$REPO_ROOT/bin/lib/providers.sh' && CRAFT_ROOT='$REPO_ROOT' provider_task_entry_cmd run task-123 /tmp/prompt /tmp/work claude opus | grep -q 'craft task run task-123'"
+assert_true "task resume entrypoint uses craft command" \
+    bash -c "source '$REPO_ROOT/bin/lib/providers.sh' && CRAFT_ROOT='$REPO_ROOT' provider_task_entry_cmd resume task-123 /tmp/prompt /tmp/work codex gpt-5 because | grep -q 'craft task resume task-123'"
+
+cat > "$TMPDIR/bin/smoke-agent" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > "$TMPDIR/smoke-agent-args"
+EOF
+chmod +x "$TMPDIR/bin/smoke-agent"
+printf 'resume entry prompt\n' > "$TMPDIR/resume-entry-prompt.txt"
+(
+    export CRAFT_HOOK_RUNNER="$hook_runner"
+    cd "$PROJECT_DIR" || exit 1
+    "$REPO_ROOT/bin/craft" task resume task-123 --prompt "$TMPDIR/resume-entry-prompt.txt" --agent smoke-agent --reason "entrypoint resume"
+)
+assert_true "task resume entrypoint injects prompt" grep -q 'resume entry prompt' "$TMPDIR/smoke-agent-args"
+assert_true "task resume entrypoint fires resume hook" grep -q '^on_stage_resume ' "$hook_log"
 
 echo ""
 echo "event queue"

@@ -108,7 +108,7 @@ provider_task_resume_cmd() {
             echo "cd '${work_dir}' && ${env} && claude --continue${flags:+ $flags} \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
             ;;
         codex)
-            echo "cd '${work_dir}' && ${env} && printf '%s\n' \"\$(cat '${prompt_file}')\" ; codex${flags:+ $flags} resume --last ; rm -f '${prompt_file}'"
+            echo "cd '${work_dir}' && ${env} && codex${flags:+ $flags} resume --last \"\$(cat '${prompt_file}')\" ; rm -f '${prompt_file}'"
             ;;
         *)
             # Generic providers do not have a known resume primitive; use the
@@ -116,6 +116,21 @@ provider_task_resume_cmd() {
             provider_task_cmd "$provider" "$prompt_file" "$work_dir" "$model"
             ;;
     esac
+}
+
+provider_task_entry_cmd() {
+    local mode="$1" task_id="$2" prompt_file="$3" work_dir="$4" agent="${5:-}" model="${6:-}" reason="${7:-}"
+    local env craft_bin cmd
+    env=$(_provider_env_setup)
+    craft_bin="${CRAFT_ROOT:+$CRAFT_ROOT/bin/craft}"
+    [[ -n "$craft_bin" ]] || craft_bin="craft"
+
+    printf -v cmd 'cd %q && %s && exec %q task %q %q --prompt %q' \
+        "$work_dir" "$env" "$craft_bin" "$mode" "$task_id" "$prompt_file"
+    [[ -z "$agent" ]] || printf -v cmd '%s --agent %q' "$cmd" "$agent"
+    [[ -z "$model" ]] || printf -v cmd '%s --model %q' "$cmd" "$model"
+    [[ -z "$reason" ]] || printf -v cmd '%s --reason %q' "$cmd" "$reason"
+    echo "$cmd"
 }
 
 # Build the tmux command to launch an architect session

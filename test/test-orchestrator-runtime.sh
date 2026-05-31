@@ -297,11 +297,11 @@ assert_eq "explicit resume created task workspace" "1" \
     "$(jq '[.windows[].workspaces[] | select(.metadata["craft:project-id"] == "resume-project" and .metadata["craft:task-id"] == "task-resume")] | length' "$RESUME_STATE")"
 assert_eq "explicit resume records agent surface metadata" "agent" \
     "$(jq -r '.windows[].workspaces[] | select(.metadata["craft:project-id"] == "resume-project" and .metadata["craft:task-id"] == "task-resume").panes[].surfaces[] | select(.metadata["craft:semantic"] == "agent").metadata["craft:semantic"]' "$RESUME_STATE" | head -1)"
-assert_true "explicit resume uses provider resume command" \
-    bash -c "jq -e '.sent[] | select(.text | contains(\"claude --continue\"))' '$RESUME_STATE'"
-assert_eq "explicit resume hook fired" "1" "$(grep -c '^on_stage_resume ' "$RESUME_HOOK_LOG")"
+assert_true "explicit resume uses task resume entrypoint" \
+    bash -c "jq -e '.sent[] | select(.text | contains(\"craft task resume task-resume\"))' '$RESUME_STATE'"
+assert_eq "explicit resume hook waits for task entrypoint" "0" "$(grep -c '^on_stage_resume ' "$RESUME_HOOK_LOG" || true)"
 assert_eq "explicit resume did not fire stage start hook" "0" "$(grep -c '^on_stage_start ' "$RESUME_HOOK_LOG" || true)"
-assert_true "explicit resume appends work log" grep -q '^### Agent Session Resumed' "$RESUME_QUEUE/in-progress/task-resume.md"
+assert_eq "explicit resume waits to append work log" "0" "$(grep -c '^### Agent Session Resumed' "$RESUME_QUEUE/in-progress/task-resume.md" || true)"
 
 echo ""
 echo "normal workflow docs"

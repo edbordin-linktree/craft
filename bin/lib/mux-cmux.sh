@@ -1241,7 +1241,7 @@ spawn_task_pane() {
     [[ -n "$ws_ref" ]] || { echo "spawn_task_pane: no workspace titled '$session'" >&2; return 1; }
 
     local cmd
-    cmd=$(provider_task_cmd "$agent" "$prompt_file" "$work_dir" "$agent_model")
+    cmd=$(provider_task_entry_cmd run "$task_id" "$prompt_file" "$work_dir" "$agent" "$agent_model")
 
     local surface_id
     surface_id="$(_cmux_ensure_surface "$ws_ref" "agent" "terminal" "agent" \
@@ -1263,7 +1263,7 @@ resume_task_pane() {
     [[ -n "$ws_ref" ]] || { echo "resume_task_pane: no workspace titled '$session'" >&2; return 1; }
 
     local cmd
-    cmd=$(provider_task_resume_cmd "$agent" "$prompt_file" "$work_dir" "$agent_model")
+    cmd=$(provider_task_entry_cmd resume "$task_id" "$prompt_file" "$work_dir" "$agent" "$agent_model" "agent workspace missing; operator resumed task session")
 
     local surface_id
     surface_id="$(_cmux_ensure_surface "$ws_ref" "agent" "terminal" "agent" \

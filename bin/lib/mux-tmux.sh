@@ -56,7 +56,7 @@ spawn_task_pane() {
     local agent_model="${6:-}"
 
     local cmd
-    cmd=$(provider_task_cmd "$agent" "$prompt_file" "$work_dir" "$agent_model")
+    cmd=$(provider_task_entry_cmd run "$task_id" "$prompt_file" "$work_dir" "$agent" "$agent_model")
 
     # Create window with a shell first, then send the command via send-keys.
     # This ensures the agent runs inside an interactive shell pty, so TUI
@@ -74,7 +74,7 @@ resume_task_pane() {
     local agent_model="${6:-}"
 
     local cmd
-    cmd=$(provider_task_resume_cmd "$agent" "$prompt_file" "$work_dir" "$agent_model")
+    cmd=$(provider_task_entry_cmd resume "$task_id" "$prompt_file" "$work_dir" "$agent" "$agent_model" "agent workspace missing; operator resumed task session")
 
     local window_id
     window_id=$(tmux new-window -t "${session}:" -n "$task_id" -P -F '#{window_id}')

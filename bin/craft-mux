@@ -101,8 +101,7 @@ EOF
 
 mux_resume_task_agent() {
     local task_id="$1"
-    local task_file task_dir prompt_file agent agent_model task_human_title task_session surface reason
-    reason="agent workspace missing; operator resumed task session"
+    local task_file task_dir prompt_file agent agent_model task_human_title task_session surface
 
     task_file="$(runtime_task_file "$PROJECT_DIR" "$task_id")" || {
         echo "task_not_found: $task_id" >&2
@@ -120,9 +119,6 @@ mux_resume_task_agent() {
     task_human_title="$(task_human_title "$task_file")"
     task_session="$(ensure_task_session "$PROJECT_NAME" "$task_id" "$task_dir" "$task_human_title")"
     surface="$(resume_task_pane "$task_session" "$task_id" "$prompt_file" "$task_dir" "$agent" "$agent_model")"
-
-    append_work_log "$task_file" "Agent Session Resumed"
-    runtime_stage_resume "$PROJECT_DIR" "$task_id" "$reason" >/dev/null
 
     echo "$surface"
 }

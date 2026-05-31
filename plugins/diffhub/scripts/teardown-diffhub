@@ -33,6 +33,7 @@ TASK_ID="$(orchestrator_task_id_from_worktree "$REPO")"
 URL_FILE=".orchestrator/diffhub.url"
 
 "$CRAFT_HOME/bin/run-bg" stop diffhub >/dev/null 2>&1 || true
+"$CRAFT_HOME/bin/run-bg" stop babysit-diffhub >/dev/null 2>&1 || true
 
 orchestrator_surface_close "$REPO" "$TASK_ID" diffhub-review >/dev/null 2>&1 || true
 
