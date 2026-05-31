@@ -117,7 +117,6 @@ mux_resume_task_agent() {
     agent="$(task_agent "$task_file" "$PROJECT_DIR")"
     agent_model="$(task_agent_model "$task_file" "$PROJECT_DIR")"
 
-    ensure_session "$PROJECT_NAME" "$PROJECT_DIR" >/dev/null
     task_human_title="$(task_human_title "$task_file")"
     task_session="$(ensure_task_session "$PROJECT_NAME" "$task_id" "$task_dir" "$task_human_title")"
     surface="$(resume_task_pane "$task_session" "$task_id" "$prompt_file" "$task_dir" "$agent" "$agent_model")"

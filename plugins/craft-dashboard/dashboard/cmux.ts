@@ -61,10 +61,11 @@ function cmux(...args: string[]): { stdout: string; stderr: string; ok: boolean 
 function craftMux(projectDir: string, ...args: string[]): { stdout: string; stderr: string; ok: boolean } {
   const craftRoot = process.env.CRAFT_ROOT ?? join(import.meta.dir, "../../..");
   const bin = join(craftRoot, "bin", "craft-mux");
-  const r = spawnSync(bin, args, { cwd: projectDir, encoding: "utf-8" });
+  const r = spawnSync(bin, args, { cwd: projectDir, encoding: "utf-8", timeout: 60_000 });
+  const error = r.error ? String(r.error) : "";
   return {
     stdout: (r.stdout ?? "").toString(),
-    stderr: (r.stderr ?? "").toString(),
+    stderr: (r.stderr ?? "").toString() || error,
     ok: r.status === 0,
   };
 }
