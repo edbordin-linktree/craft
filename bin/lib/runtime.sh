@@ -381,6 +381,11 @@ runtime_event_notification_filter_file() {
     echo "$(runtime_event_state_dir "$project_dir" "$task_id")/notification-filter.json"
 }
 
+runtime_event_notification_marker_file() {
+    local project_dir="$1" task_id="$2"
+    echo "$(runtime_event_state_dir "$project_dir" "$task_id")/last-notified-at"
+}
+
 runtime_event_notification_filter_get() {
     local project_dir="$1" task_id="$2" file
     file="$(runtime_event_notification_filter_file "$project_dir" "$task_id")"
@@ -461,9 +466,37 @@ runtime_event_counts_text_for_files() {
         | awk '{printf "%s%s:%s", sep, $2, $1; sep=","}'
 }
 
+runtime_event_notify_pending() {
+    local project_dir="$1" task_id="$2" min_interval="${3:-0}"
+    local notify_filter files=() pending_after counts msg marker_file last_notified now
+    notify_filter="$(runtime_event_notification_filter_get "$project_dir" "$task_id")"
+    mapfile -t files < <(runtime_event_select_files "$project_dir" "$task_id" "$notify_filter")
+    pending_after="${#files[@]}"
+    [[ "$pending_after" -gt 0 ]] || return 1
+
+    now="$(date +%s)"
+    marker_file="$(runtime_event_notification_marker_file "$project_dir" "$task_id")"
+    last_notified="$(cat "$marker_file" 2>/dev/null || echo 0)"
+    if [[ "$min_interval" -gt 0 && "$last_notified" =~ ^[0-9]+$ ]] && (( now - last_notified < min_interval )); then
+        return 1
+    fi
+
+    counts="$(runtime_event_counts_text_for_files "${files[@]}")"
+    msg="CRAFT_EVENTS task=$task_id pending=$pending_after counts=$counts"
+    if command -v craft-mux >/dev/null 2>&1; then
+        (cd "$project_dir" && craft-mux send-task "$task_id" "$msg") >/dev/null 2>&1 || return 1
+    elif [[ -x "$CRAFT_ROOT/bin/craft-mux" ]]; then
+        (cd "$project_dir" && "$CRAFT_ROOT/bin/craft-mux" send-task "$task_id" "$msg") >/dev/null 2>&1 || return 1
+    else
+        echo "$msg"
+    fi
+    mkdir -p "$(dirname "$marker_file")"
+    echo "$now" > "$marker_file"
+}
+
 runtime_event_enqueue() {
     local project_dir="$1" task_id="$2" type="$3" summary="$4" payload_file="$5" publisher="${6:-core}"
-    local pending_dir before file event_id now counts pending_after msg consume_file notify_filter files=()
+    local pending_dir before file event_id now pending_after consume_file notify_filter files=()
     [[ -f "$payload_file" ]] || { echo "payload_not_found: $payload_file" >&2; return 1; }
     consume_file="$(mktemp)"
     export EVENT_CONSUME_FILE="$consume_file"
@@ -497,14 +530,8 @@ runtime_event_enqueue() {
 
     mapfile -t files < <(runtime_event_select_files "$project_dir" "$task_id" "$notify_filter")
     pending_after="${#files[@]}"
-    counts="$(runtime_event_counts_text_for_files "${files[@]}")"
     if [[ "$before" == "0" && "$pending_after" != "0" && -z "${RUNTIME_EVENT_SUPPRESS_WAKE:-}" ]]; then
-        msg="CRAFT_EVENTS task=$task_id pending=$pending_after counts=$counts"
-        if command -v craft-mux >/dev/null 2>&1; then
-            craft-mux send-task "$task_id" "$msg" >/dev/null 2>&1 || true
-        elif [[ -x "$CRAFT_ROOT/bin/craft-mux" ]]; then
-            "$CRAFT_ROOT/bin/craft-mux" send-task "$task_id" "$msg" >/dev/null 2>&1 || true
-        fi
+        runtime_event_notify_pending "$project_dir" "$task_id" 0 >/dev/null || true
     fi
     echo "$file"
 }

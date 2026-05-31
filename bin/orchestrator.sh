@@ -49,6 +49,7 @@ PROJECT_DIR=""
 MAX_PARALLEL=10
 POLL_INTERVAL=15  # seconds between queue checks
 PR_POLL_INTERVAL=120  # seconds between PR merge checks
+EVENT_NOTIFY_REMINDER_INTERVAL="${CRAFT_EVENT_NOTIFY_REMINDER_INTERVAL:-900}"
 RESTART_WORKSPACE=0
 
 # --- Parse arguments ---
@@ -578,6 +579,21 @@ check_waiting_tasks() {
     done
 }
 
+check_pending_event_notifications() {
+    local task_dir tid task_file status
+    for task_dir in "$PROJECT_DIR"/tasks/task-*; do
+        [[ -d "$task_dir" ]] || continue
+        tid="$(basename "$task_dir")"
+        task_file="$(runtime_task_file "$PROJECT_DIR" "$tid" 2>/dev/null || true)"
+        [[ -n "$task_file" ]] || continue
+        status="$(runtime_task_status "$task_file")"
+        case "$status" in
+            drafts|pending|approved|done|blocked|archive) continue ;;
+        esac
+        runtime_event_notify_pending "$PROJECT_DIR" "$tid" "$EVENT_NOTIFY_REMINDER_INTERVAL" >/dev/null 2>&1 || true
+    done
+}
+
 # --- Main Loop ---
 
 # Handle nested tmux — if already inside tmux, unset TMUX to allow nesting
@@ -671,6 +687,10 @@ while true; do
 
     # Check for new waiting tasks
     check_waiting_tasks
+
+    # Re-notify task agents about unconsumed events periodically. This uses the
+    # same per-task notification filter as enqueue-time wake-ups.
+    check_pending_event_notifications
 
     # Check milestone completion every 4th poll
     if (( poll_count % 4 == 0 )); then

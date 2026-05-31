@@ -218,6 +218,8 @@ Rules:
 - Per-task notification filters narrow which pending events trigger
   `CRAFT_EVENTS` wake-ups. They do not drop events; they only affect wake-up
   totals and whether a wake-up is sent.
+- The orchestrator periodically re-sends the wake-up when matching pending
+  events remain unconsumed; the default reminder interval is 15 minutes.
 - No event audit trail is required initially.
 
 ## Dashboard

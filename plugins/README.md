@@ -136,7 +136,9 @@ the queue transitions from zero matching notification-filtered events to one or
 more, Craft injects a short task-targeted message such as
 `CRAFT_EVENTS task=task-123 pending=3 counts=pr_review:2,ci_status:1`.
 Event bodies stay on disk until returned by `craft event take` or deleted by
-`craft event ack`.
+`craft event ack`. The orchestrator also re-sends this wake-up if matching
+pending events remain unconsumed for 15 minutes, so agents can either consume
+the events or narrow their task notification filter.
 
 Tasks can narrow which pending events trigger wake-up messages without dropping
 or muting event storage:

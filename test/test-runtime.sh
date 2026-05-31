@@ -264,6 +264,12 @@ jq '.sent = []' "$FAKE_CMUX_STATE" > "$TMPDIR/cmux-reset.json" && mv "$TMPDIR/cm
 assert_eq "notification filter stored" "ci_status" "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event notify-filter get task-123 | jq -r '.types[0]')"
 assert_eq "notification filter suppresses unmatched wake" "1" "$(jq '.sent | length' "$FAKE_CMUX_STATE")"
 assert_eq "notification wake uses filtered counts" "CRAFT_EVENTS task=task-123 pending=1 counts=ci_status:1" "$(jq -r '.sent[0].text' "$FAKE_CMUX_STATE")"
+echo 1 > "$PROJECT_DIR/tasks/task-123/.orchestrator/events/last-notified-at"
+jq '.sent = []' "$FAKE_CMUX_STATE" > "$TMPDIR/cmux-reset.json" && mv "$TMPDIR/cmux-reset.json" "$FAKE_CMUX_STATE"
+runtime_event_notify_pending "$PROJECT_DIR" task-123 900 >/dev/null
+assert_eq "notification reminder sends stale wake" "CRAFT_EVENTS task=task-123 pending=1 counts=ci_status:1" "$(jq -r '.sent[0].text' "$FAKE_CMUX_STATE")"
+runtime_event_notify_pending "$PROJECT_DIR" task-123 900 >/dev/null || true
+assert_eq "notification reminder waits for interval" "1" "$(jq '.sent | length' "$FAKE_CMUX_STATE")"
 assert_eq "ack by filter removes matching events only" "acked=1" "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event ack task-123 --type ci_status)"
 assert_eq "notification filter clear" "{}" "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event notify-filter clear task-123 && "$REPO_ROOT/bin/craft" event notify-filter get task-123 | jq -c 'del(.ids,.types,.publishers,.summary_contains,.since,.before)')"
 rm -f "$PROJECT_DIR/tasks/task-123/.orchestrator/events/pending/"*.json
