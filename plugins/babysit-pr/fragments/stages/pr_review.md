@@ -3,7 +3,7 @@ events: merge_status,ci_status,review_comment,pr_approval,pr_review
 ---
 The `babysit-pr` plugin watches the GitHub PR during this stage and enqueues typed events when attention may be needed.
 
-Drain pending events with `craft event take` when Craft wakes you. Treat each event as a notification about a GitHub update, not as approval to merge:
+Drain pending events with `craft event take` when Craft wakes you. Inside the task workspace you can omit the task id, and `craft event list` is available when you need to inspect before consuming. Treat each event as a notification about a GitHub update, not as approval to merge:
 
 - `merge_status`: mergeability or base-branch changes. Rebase or resolve conflicts when actionable.
 - `ci_status`: check-run/status transitions. Diagnose failures, fix, commit, and push.

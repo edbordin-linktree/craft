@@ -89,6 +89,78 @@ _require_reason() {
     }
 }
 
+_event_filter_empty() {
+    runtime_event_default_filter_json
+}
+
+_event_filter_add_array() {
+    local filter="$1" key="$2" value="$3"
+    jq -c --arg value "$value" ".${key} += [\$value]" <<< "$filter"
+}
+
+_event_filter_set_value() {
+    local filter="$1" key="$2" value="$3"
+    jq -c --arg value "$value" ".${key} = \$value" <<< "$filter"
+}
+
+_event_filter_parse_arg() {
+    local __filter_var="$1" __limit_var="$2" allow_limit="$3"
+    shift 3
+    local filter_value="${!__filter_var}" arg="${1:-}" value="${2:-}"
+    case "$arg" in
+        --id) filter_value="$(_event_filter_add_array "$filter_value" ids "$value")"; printf -v "$__filter_var" '%s' "$filter_value"; return 0 ;;
+        --type) filter_value="$(_event_filter_add_array "$filter_value" types "$value")"; printf -v "$__filter_var" '%s' "$filter_value"; return 0 ;;
+        --publisher) filter_value="$(_event_filter_add_array "$filter_value" publishers "$value")"; printf -v "$__filter_var" '%s' "$filter_value"; return 0 ;;
+        --summary-contains) filter_value="$(_event_filter_add_array "$filter_value" summary_contains "$value")"; printf -v "$__filter_var" '%s' "$filter_value"; return 0 ;;
+        --since) filter_value="$(_event_filter_set_value "$filter_value" since "$value")"; printf -v "$__filter_var" '%s' "$filter_value"; return 0 ;;
+        --before) filter_value="$(_event_filter_set_value "$filter_value" before "$value")"; printf -v "$__filter_var" '%s' "$filter_value"; return 0 ;;
+        --limit)
+            [[ "$allow_limit" == "1" ]] || return 1
+            printf -v "$__limit_var" '%s' "$value"
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+_current_task_id() {
+    local project_dir="$1" cwd rel
+    project_dir="$(cd "$project_dir" && pwd -P)"
+    if [[ -n "${CRAFT_TASK_ID:-}" ]]; then
+        echo "$CRAFT_TASK_ID"
+        return 0
+    fi
+    cwd="$(pwd -P)"
+    case "$cwd/" in
+        "$project_dir"/tasks/*)
+            rel="${cwd#"$project_dir/tasks/"}"
+            rel="${rel%%/*}"
+            [[ "$rel" == task-* ]] && { echo "$rel"; return 0; }
+            ;;
+    esac
+    return 1
+}
+
+_event_parse_task_arg() {
+    local __task_var="$1" __consumed_var="$2" project_dir="$3"
+    shift 3
+    local parsed_task_id="" consumed_value=0
+    if [[ "${1:-}" == "--task" ]]; then
+        parsed_task_id="${2:-}"
+        consumed_value=2
+    elif [[ -n "${1:-}" && "${1:-}" != --* ]]; then
+        parsed_task_id="$1"
+        consumed_value=1
+    else
+        parsed_task_id="$(_current_task_id "$project_dir" 2>/dev/null || true)"
+        consumed_value=0
+    fi
+    [[ -n "$parsed_task_id" ]] || return 1
+    printf -v "$__task_var" '%s' "$parsed_task_id"
+    printf -v "$__consumed_var" '%s' "$consumed_value"
+    return 0
+}
+
 _task_file_from_arg() {
     local project_dir="$1" arg="${2:-}"
     local queue_dir="$project_dir/queue" task_id candidate dir
@@ -146,6 +218,7 @@ cmd_task() {
             task_file="$(runtime_task_file "$project_dir" "$task_id")" || { echo "task_not_found: $task_id" >&2; exit 1; }
             task_dir="$(runtime_task_dir "$project_dir" "$task_id")"
             mkdir -p "$task_dir"
+            export CRAFT_TASK_ID="$task_id" CRAFT_TASK_DIR="$task_dir" CRAFT_TASK_FILE="$task_file"
             load_provider_config "$project_dir"
             agent="${agent_override:-$(task_agent "$task_file" "$project_dir")}"
             agent_model="${model_override:-$(task_agent_model "$task_file" "$project_dir")}"
@@ -330,8 +403,13 @@ cmd_event() {
     project_dir="$(_cmd_project_dir)"
     case "$subcmd" in
         enqueue)
-            local task_id="${1:?task id required}" type="" summary="" payload="" publisher="cli"
-            shift || true
+            local task_id="" type="" summary="" payload="" publisher="cli" consumed
+            if _event_parse_task_arg task_id consumed "$project_dir" "$@"; then
+                shift "$consumed" || true
+            else
+                echo "craft event enqueue: task id required outside a task context; pass <task-id> or --task <task-id>" >&2
+                exit 2
+            fi
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --type) type="${2:-}"; shift 2 ;;
@@ -348,22 +426,91 @@ cmd_event() {
             runtime_event_enqueue "$project_dir" "$task_id" "$type" "$summary" "$payload" "$publisher"
             ;;
         counts)
-            runtime_event_counts "$project_dir" "${1:?task id required}"
-            ;;
-        take)
-            local task_id="${1:?task id required}" type="" limit=""
-            shift || true
+            local task_id="" filter consumed
+            if _event_parse_task_arg task_id consumed "$project_dir" "$@"; then
+                shift "$consumed" || true
+            else
+                echo "craft event counts: task id required outside a task context; pass <task-id> or --task <task-id>" >&2
+                exit 2
+            fi
+            filter="$(_event_filter_empty)"
             while [[ $# -gt 0 ]]; do
-                case "$1" in
-                    --type) type="${2:-}"; shift 2 ;;
-                    --limit) limit="${2:-}"; shift 2 ;;
-                    *) echo "craft event take: unknown arg: $1" >&2; exit 2 ;;
-                esac
+                if _event_filter_parse_arg filter _unused 0 "$1" "${2:-}"; then
+                    shift 2
+                else
+                    echo "craft event counts: unknown arg: $1" >&2
+                    exit 2
+                fi
             done
-            runtime_event_take "$project_dir" "$task_id" "$type" "$limit"
+            runtime_event_counts "$project_dir" "$task_id" "$filter"
+            ;;
+        list|take|ack)
+            local action="$subcmd" task_id="" filter limit="" consumed
+            if _event_parse_task_arg task_id consumed "$project_dir" "$@"; then
+                shift "$consumed" || true
+            else
+                echo "craft event $action: task id required outside a task context; pass <task-id> or --task <task-id>" >&2
+                exit 2
+            fi
+            filter="$(_event_filter_empty)"
+            while [[ $# -gt 0 ]]; do
+                if _event_filter_parse_arg filter limit 1 "$1" "${2:-}"; then
+                    shift 2
+                else
+                    echo "craft event $action: unknown arg: $1" >&2
+                    exit 2
+                fi
+            done
+            case "$action" in
+                list) runtime_event_list "$project_dir" "$task_id" "$filter" "$limit" ;;
+                take) runtime_event_take "$project_dir" "$task_id" "$filter" "$limit" ;;
+                ack) runtime_event_ack "$project_dir" "$task_id" "$filter" "$limit" ;;
+            esac
+            ;;
+        notify-filter)
+            local action="${1:-}" task_id="" filter consumed
+            shift || true
+            if _event_parse_task_arg task_id consumed "$project_dir" "$@"; then
+                shift "$consumed" || true
+            else
+                echo "craft event notify-filter $action: task id required outside a task context; pass <task-id> or --task <task-id>" >&2
+                exit 2
+            fi
+            case "$action" in
+                get)
+                    [[ $# -eq 0 ]] || { echo "craft event notify-filter get: unexpected args" >&2; exit 2; }
+                    runtime_event_notification_filter_get "$project_dir" "$task_id"
+                    ;;
+                set)
+                    filter="$(_event_filter_empty)"
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --id|--since|--before)
+                                echo "craft event notify-filter set: $1 is not supported for notification filters" >&2
+                                exit 2
+                                ;;
+                        esac
+                        if _event_filter_parse_arg filter _unused 0 "$1" "${2:-}"; then
+                            shift 2
+                        else
+                            echo "craft event notify-filter set: unknown arg: $1" >&2
+                            exit 2
+                        fi
+                    done
+                    runtime_event_notification_filter_set "$project_dir" "$task_id" "$filter"
+                    ;;
+                clear)
+                    [[ $# -eq 0 ]] || { echo "craft event notify-filter clear: unexpected args" >&2; exit 2; }
+                    runtime_event_notification_filter_clear "$project_dir" "$task_id"
+                    ;;
+                *)
+                    echo "Usage: craft event notify-filter get|set|clear <task-id> [filters]" >&2
+                    exit 2
+                    ;;
+            esac
             ;;
         *)
-            echo "Usage: craft event enqueue|counts|take ..." >&2
+            echo "Usage: craft event enqueue|counts|list|take|ack|notify-filter ... [<task-id>|--task <task-id>] [filters]" >&2
             exit 2
             ;;
     esac

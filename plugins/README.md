@@ -109,10 +109,47 @@ The supported agent wake-up path is a pending-only typed event queue:
 ```bash
 craft event enqueue task-123 --type pr_review --summary "new review thread" --json payload.json
 craft event counts task-123
+craft event list task-123 --type pr_review --limit 5
 craft event take task-123 --type pr_review --limit 5
+craft event ack task-123 --publisher noisy-helper --before 2026-06-01T00:00:00Z
 ```
 
-Each enqueue writes one JSON item under `.orchestrator/events/pending/`. When the queue transitions from empty to non-empty, Craft injects a short task-targeted message such as `CRAFT_EVENTS task=task-123 pending=3 counts=pr_review:2,ci_status:1 queue=.orchestrator/events/pending`. Event bodies stay on disk and are returned by `craft event take`, which deletes consumed pending files.
+Inside a task workspace, the task id can be omitted because `craft task run` and
+`craft task resume` export `CRAFT_TASK_ID` and the event CLI can also infer the
+task from `tasks/<task-id>/`:
+
+```bash
+craft event counts --type review_comment
+craft event list --publisher babysit-pr --limit 10
+craft event take --type ci_status --limit 5
+craft event ack --type pr_approval
+```
+
+All filtered event commands accept the same filter flags: `--id`, repeatable
+`--type`, repeatable `--publisher`, repeatable `--summary-contains`,
+`--since`, and `--before`. `list`, `take`, and `ack` also accept `--limit`.
+`list` is read-only, `take` returns matching events and deletes them, and
+`ack` deletes matching events without printing payloads.
+
+Each enqueue writes one JSON item under `.orchestrator/events/pending/`. When
+the queue transitions from zero matching notification-filtered events to one or
+more, Craft injects a short task-targeted message such as
+`CRAFT_EVENTS task=task-123 pending=3 counts=pr_review:2,ci_status:1`.
+Event bodies stay on disk until returned by `craft event take` or deleted by
+`craft event ack`.
+
+Tasks can narrow which pending events trigger wake-up messages without dropping
+or muting event storage:
+
+```bash
+craft event notify-filter set --type review_comment --type ci_status
+craft event notify-filter get
+craft event notify-filter clear
+```
+
+Notification filters support the non-time event filters: repeatable `--type`,
+repeatable `--publisher`, and repeatable `--summary-contains`. Notification
+counts reflect only matching pending events.
 
 Generic web surfaces are keyed by stable semantic ids such as `github-pr`, `diffhub-review`, or `buildkite-status`. Under cmux, Craft stores that semantic id and related attributes on the cmux surface metadata, then resolves the current surface ref with the mux provider when focusing or closing. `craft surface open` creates or reuses a browser surface in the task workspace; `craft surface focus` returns `surface_not_found` when no surface metadata matches; `craft surface close` closes the matched surface when present.
 

@@ -81,7 +81,7 @@ Copy this to track progress:
 
 Use Craft's stage lifecycle plus typed event queue. There is one supported path for normal babysitting: entering the `pr_review` stage starts/focuses the PR runtime through plugin hooks, `watch-pr` polls GitHub and enqueues typed payloads through `craft event enqueue`, and Craft injects a compact `CRAFT_EVENTS ... counts=...` wake-up only when the queue transitions from empty to non-empty.
 
-Do not run an inline polling loop and do not inspect event queue files directly. Use `craft event take --type <type> --limit <n>` for every event read so events are drained in bounded, type-filtered batches. If `gh` or `jq` is unavailable, block the task and surface the missing dependency.
+Do not run an inline polling loop and do not inspect event queue files directly. Use `craft event list` to inspect pending events without consuming them, `craft event take --type <type> --limit <n>` to read and consume events, and `craft event ack <filters>` to consume events that need no action. Inside the task workspace, omit the task id; Craft infers it from `CRAFT_TASK_ID` or the current `tasks/<task-id>/` path. If `gh` or `jq` is unavailable, block the task and surface the missing dependency.
 
 ### Topology
 
@@ -101,11 +101,12 @@ The agent's job is only to respond to delivered events:
 1. Stay idle until Craft injects a `CRAFT_EVENTS` wake-up.
 2. Drain pending events by type:
    ```bash
-   craft event take <task-id> --type merge_status --limit 10
-   craft event take <task-id> --type ci_status --limit 10
-   craft event take <task-id> --type review_comment --limit 10
-   craft event take <task-id> --type pr_approval --limit 10
-   craft event take <task-id> --type pr_review --limit 10
+   craft event counts
+   craft event take --type merge_status --limit 10
+   craft event take --type ci_status --limit 10
+   craft event take --type review_comment --limit 10
+   craft event take --type pr_approval --limit 10
+   craft event take --type pr_review --limit 10
    ```
 3. Run the matching phase(s) for each event payload.
 4. When a `pr_review` event says the PR merged, advance the task stage normally. When a `pr_review` event says the PR closed without merging, mark the task blocked with context.

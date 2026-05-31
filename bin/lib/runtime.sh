@@ -367,18 +367,95 @@ runtime_event_pending_dir() {
     echo "$(runtime_task_dir "$project_dir" "$task_id")/.orchestrator/events/pending"
 }
 
-runtime_event_count_total() {
-    local pending_dir="$1"
-    find "$pending_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' '
+runtime_event_state_dir() {
+    local project_dir="$1" task_id="$2"
+    echo "$(runtime_task_dir "$project_dir" "$task_id")/.orchestrator/events"
 }
 
-runtime_event_counts_text() {
-    local pending_dir="$1"
-    if [[ ! -d "$pending_dir" ]] || [[ "$(runtime_event_count_total "$pending_dir")" == "0" ]]; then
+runtime_event_default_filter_json() {
+    jq -cn '{ids:[], types:[], publishers:[], summary_contains:[], since:"", before:""}'
+}
+
+runtime_event_notification_filter_file() {
+    local project_dir="$1" task_id="$2"
+    echo "$(runtime_event_state_dir "$project_dir" "$task_id")/notification-filter.json"
+}
+
+runtime_event_notification_filter_get() {
+    local project_dir="$1" task_id="$2" file
+    file="$(runtime_event_notification_filter_file "$project_dir" "$task_id")"
+    if [[ -f "$file" ]]; then
+        cat "$file"
+    else
+        runtime_event_default_filter_json
+    fi
+}
+
+runtime_event_notification_filter_set() {
+    local project_dir="$1" task_id="$2" filter_json="$3" dir file
+    dir="$(runtime_event_state_dir "$project_dir" "$task_id")"
+    file="$(runtime_event_notification_filter_file "$project_dir" "$task_id")"
+    mkdir -p "$dir"
+    jq -c '.' <<< "$filter_json" > "$file"
+}
+
+runtime_event_notification_filter_clear() {
+    local project_dir="$1" task_id="$2"
+    rm -f "$(runtime_event_notification_filter_file "$project_dir" "$task_id")"
+}
+
+runtime_event_filter_matches_file() {
+    local file="$1" filter_json="${2:-}" event_id
+    [[ -n "$filter_json" ]] || filter_json="$(runtime_event_default_filter_json)"
+    event_id="$(basename "$file" .json)"
+    jq -e --arg id "$event_id" --argjson filter "$filter_json" '
+        ($filter.ids // []) as $ids
+        | ($filter.types // []) as $types
+        | ($filter.publishers // []) as $publishers
+        | ($filter.summary_contains // []) as $summary_contains
+        | ($filter.since // "") as $since
+        | ($filter.before // "") as $before
+        | (.created_at // "") as $created_at
+        | (.summary // "") as $summary
+        | ((.id // $id) | tostring) as $event_id
+        | ((.type // "") | tostring) as $event_type
+        | ((.publisher // "") | tostring) as $event_publisher
+        | (($ids | length) == 0 or (($ids | index($event_id)) != null))
+        and (($types | length) == 0 or (($types | index($event_type)) != null))
+        and (($publishers | length) == 0 or (($publishers | index($event_publisher)) != null))
+        and (($summary_contains | length) == 0 or all($summary_contains[]; . as $needle | $summary | contains($needle)))
+        and ($since == "" or ($created_at != "" and $created_at >= $since))
+        and ($before == "" or ($created_at != "" and $created_at < $before))
+    ' "$file" >/dev/null 2>&1
+}
+
+runtime_event_select_files() {
+    local project_dir="$1" task_id="$2" filter_json="${3:-}" limit="${4:-}"
+    local pending_dir f selected=0
+    pending_dir="$(runtime_event_pending_dir "$project_dir" "$task_id")"
+    mkdir -p "$pending_dir"
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        runtime_event_filter_matches_file "$f" "$filter_json" || continue
+        printf '%s\n' "$f"
+        selected=$((selected + 1))
+        if [[ -n "$limit" && "$selected" -ge "$limit" ]]; then
+            break
+        fi
+    done < <(find "$pending_dir" -maxdepth 1 -name '*.json' | sort)
+}
+
+runtime_event_count_total() {
+    local project_dir="$1" task_id="$2" filter_json="${3:-}"
+    runtime_event_select_files "$project_dir" "$task_id" "$filter_json" | wc -l | tr -d ' '
+}
+
+runtime_event_counts_text_for_files() {
+    if [[ "$#" -eq 0 ]]; then
         echo ""
         return 0
     fi
-    jq -r '.type // "unknown"' "$pending_dir"/*.json 2>/dev/null \
+    jq -r '.type // "unknown"' "$@" 2>/dev/null \
         | sort \
         | uniq -c \
         | awk '{printf "%s%s:%s", sep, $2, $1; sep=","}'
@@ -386,7 +463,7 @@ runtime_event_counts_text() {
 
 runtime_event_enqueue() {
     local project_dir="$1" task_id="$2" type="$3" summary="$4" payload_file="$5" publisher="${6:-core}"
-    local pending_dir before file now counts pending_after msg consume_file
+    local pending_dir before file event_id now counts pending_after msg consume_file notify_filter files=()
     [[ -f "$payload_file" ]] || { echo "payload_not_found: $payload_file" >&2; return 1; }
     consume_file="$(mktemp)"
     export EVENT_CONSUME_FILE="$consume_file"
@@ -403,21 +480,25 @@ runtime_event_enqueue() {
 
     pending_dir="$(runtime_event_pending_dir "$project_dir" "$task_id")"
     mkdir -p "$pending_dir"
-    before="$(runtime_event_count_total "$pending_dir")"
+    notify_filter="$(runtime_event_notification_filter_get "$project_dir" "$task_id")"
+    before="$(runtime_event_count_total "$project_dir" "$task_id" "$notify_filter")"
     now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     file="$pending_dir/$(date -u '+%Y%m%dT%H%M%S')-$$-$RANDOM.json"
+    event_id="$(basename "$file" .json)"
     jq -n \
+        --arg id "$event_id" \
         --arg task_id "$task_id" \
         --arg type "$type" \
         --arg summary "$summary" \
         --arg created_at "$now" \
         --arg publisher "$publisher" \
         --slurpfile payload "$payload_file" \
-        '{task_id: $task_id, type: $type, summary: $summary, created_at: $created_at, publisher: $publisher, payload: $payload[0]}' > "$file"
+        '{id: $id, task_id: $task_id, type: $type, summary: $summary, created_at: $created_at, publisher: $publisher, payload: $payload[0]}' > "$file"
 
-    pending_after="$(runtime_event_count_total "$pending_dir")"
-    counts="$(runtime_event_counts_text "$pending_dir")"
-    if [[ "$before" == "0" && -z "${RUNTIME_EVENT_SUPPRESS_WAKE:-}" ]]; then
+    mapfile -t files < <(runtime_event_select_files "$project_dir" "$task_id" "$notify_filter")
+    pending_after="${#files[@]}"
+    counts="$(runtime_event_counts_text_for_files "${files[@]}")"
+    if [[ "$before" == "0" && "$pending_after" != "0" && -z "${RUNTIME_EVENT_SUPPRESS_WAKE:-}" ]]; then
         msg="CRAFT_EVENTS task=$task_id pending=$pending_after counts=$counts"
         if command -v craft-mux >/dev/null 2>&1; then
             craft-mux send-task "$task_id" "$msg" >/dev/null 2>&1 || true
@@ -429,35 +510,55 @@ runtime_event_enqueue() {
 }
 
 runtime_event_counts() {
-    local project_dir="$1" task_id="$2"
-    local pending_dir total counts
-    pending_dir="$(runtime_event_pending_dir "$project_dir" "$task_id")"
-    mkdir -p "$pending_dir"
-    total="$(runtime_event_count_total "$pending_dir")"
-    counts="$(runtime_event_counts_text "$pending_dir")"
+    local project_dir="$1" task_id="$2" filter_json="${3:-}"
+    local total counts files=()
+    mapfile -t files < <(runtime_event_select_files "$project_dir" "$task_id" "$filter_json")
+    total="${#files[@]}"
+    counts="$(runtime_event_counts_text_for_files "${files[@]}")"
     printf 'pending=%s counts=%s\n' "$total" "$counts"
 }
 
-runtime_event_take() {
-    local project_dir="$1" task_id="$2" type_filter="${3:-}" limit="${4:-}"
-    local pending_dir files=() f selected=()
-    pending_dir="$(runtime_event_pending_dir "$project_dir" "$task_id")"
-    mkdir -p "$pending_dir"
-    while IFS= read -r f; do
-        [[ -f "$f" ]] || continue
-        if [[ -n "$type_filter" ]]; then
-            [[ "$(jq -r '.type // empty' "$f")" == "$type_filter" ]] || continue
-        fi
-        selected+=("$f")
-        if [[ -n "$limit" && "${#selected[@]}" -ge "$limit" ]]; then
-            break
-        fi
-    done < <(find "$pending_dir" -maxdepth 1 -name '*.json' | sort)
-
-    if [[ "${#selected[@]}" -eq 0 ]]; then
+runtime_event_print_files_json() {
+    local file event_id first=1
+    if [[ "$#" -eq 0 ]]; then
         echo "[]"
         return 0
     fi
-    jq -s '.' "${selected[@]}"
-    rm -f "${selected[@]}"
+    printf '['
+    for file in "$@"; do
+        event_id="$(basename "$file" .json)"
+        if [[ "$first" -eq 0 ]]; then
+            printf ','
+        fi
+        jq -c --arg id "$event_id" '. + {id:(.id // $id)}' "$file"
+        first=0
+    done
+    printf ']\n'
+}
+
+runtime_event_list() {
+    local project_dir="$1" task_id="$2" filter_json="${3:-}" limit="${4:-}"
+    local selected=()
+    mapfile -t selected < <(runtime_event_select_files "$project_dir" "$task_id" "$filter_json" "$limit")
+    runtime_event_print_files_json "${selected[@]}"
+}
+
+runtime_event_ack() {
+    local project_dir="$1" task_id="$2" filter_json="${3:-}" limit="${4:-}"
+    local selected=()
+    mapfile -t selected < <(runtime_event_select_files "$project_dir" "$task_id" "$filter_json" "$limit")
+    if [[ "${#selected[@]}" -gt 0 ]]; then
+        rm -f "${selected[@]}"
+    fi
+    printf 'acked=%s\n' "${#selected[@]}"
+}
+
+runtime_event_take() {
+    local project_dir="$1" task_id="$2" filter_json="${3:-}" limit="${4:-}"
+    local selected=()
+    mapfile -t selected < <(runtime_event_select_files "$project_dir" "$task_id" "$filter_json" "$limit")
+    runtime_event_print_files_json "${selected[@]}"
+    if [[ "${#selected[@]}" -gt 0 ]]; then
+        rm -f "${selected[@]}"
+    fi
 }

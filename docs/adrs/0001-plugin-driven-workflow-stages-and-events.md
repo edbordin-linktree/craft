@@ -210,6 +210,14 @@ Rules:
 - Event payloads include `publisher` or `source_plugin`.
 - Plugins should ignore their own emitted events when needed.
 - Canonical agent-facing local review comments use `local_review.comment`.
+- Task-local agents can inspect events with `craft event list`, consume with
+  `craft event take`, or consume without printing payloads with
+  `craft event ack`. These commands infer the task id from `CRAFT_TASK_ID` or
+  `tasks/<task-id>/`, and accept a shared filter set: `--id`, `--type`,
+  `--publisher`, `--summary-contains`, `--since`, and `--before`.
+- Per-task notification filters narrow which pending events trigger
+  `CRAFT_EVENTS` wake-ups. They do not drop events; they only affect wake-up
+  totals and whether a wake-up is sent.
 - No event audit trail is required initially.
 
 ## Dashboard

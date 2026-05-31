@@ -51,6 +51,7 @@ mkdir -p "$CRAFT_ROOT/bin/lib" "$CRAFT_ROOT/plugins/example/fragments/stages" "$
 mkdir -p "$PROJECT_DIR/tasks/task-123" "$PROJECT_DIR/tasks/task-124" "$QUEUE_DIR"/{drafts,pending,approved,in-progress,waiting,done,blocked,archive}
 ln -s "$REPO_ROOT/bin/lib/queue.sh" "$CRAFT_ROOT/bin/lib/queue.sh"
 ln -s "$REPO_ROOT/bin/lib/plugins.sh" "$CRAFT_ROOT/bin/lib/plugins.sh"
+ln -s "$REPO_ROOT/bin/lib/providers.sh" "$CRAFT_ROOT/bin/lib/providers.sh"
 ln -s "$REPO_ROOT/bin/lib/workflow.sh" "$CRAFT_ROOT/bin/lib/workflow.sh"
 ln -s "$REPO_ROOT/bin/lib/runtime.sh" "$CRAFT_ROOT/bin/lib/runtime.sh"
 ln -s "$REPO_ROOT/workflows" "$CRAFT_ROOT/workflows"

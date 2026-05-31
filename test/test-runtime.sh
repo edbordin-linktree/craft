@@ -180,6 +180,7 @@ assert_true "task resume entrypoint uses craft command" \
 cat > "$TMPDIR/bin/smoke-agent" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" > "$TMPDIR/smoke-agent-args"
+printf 'task=%s\nfile=%s\ndir=%s\n' "\${CRAFT_TASK_ID:-}" "\${CRAFT_TASK_FILE:-}" "\${CRAFT_TASK_DIR:-}" > "$TMPDIR/smoke-agent-env"
 EOF
 chmod +x "$TMPDIR/bin/smoke-agent"
 cat > "$QUEUE_DIR/in-progress/task-run.md" <<'EOF'
@@ -204,6 +205,7 @@ rm -f "$PROJECT_DIR/tasks/task-run/.orchestrator/events/pending/"*.json
     "$REPO_ROOT/bin/craft" task run task-run --prompt "$TMPDIR/run-entry-prompt.txt" --agent smoke-agent
 )
 assert_true "task run entrypoint injects prompt" grep -q 'run entry prompt' "$TMPDIR/smoke-agent-args"
+assert_true "task run entrypoint exports task env" grep -q '^task=task-run$' "$TMPDIR/smoke-agent-env"
 assert_eq "task run entrypoint starts workflow stage" "implement" "$(task_field "$QUEUE_DIR/in-progress/task-run.md" stage)"
 assert_eq "task run entrypoint fires start hook locally" "$((start_hooks_before_run + 1))" "$(grep -c '^on_stage_start ' "$hook_log")"
 assert_eq "task run stage event does not wake agent" "0" "$([[ -f "$FAKE_CMUX_STATE" ]] && jq '.sent | length' "$FAKE_CMUX_STATE" || echo 0)"
@@ -237,11 +239,34 @@ assert_eq "duplicate wake suppressed" "1" "$(jq '.sent | length' "$FAKE_CMUX_STA
 assert_eq "wake is queue summary" "CRAFT_EVENTS task=task-123 pending=1 counts=pr_review:1" "$(jq -r '.sent[0].text' "$FAKE_CMUX_STATE")"
 counts="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event counts task-123)"
 assert_eq "event counts" "pending=2 counts=ci_status:1,pr_review:1" "$counts"
+filtered_counts="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event counts task-123 --type ci_status --publisher cli)"
+assert_eq "event counts filters by type and publisher" "pending=1 counts=ci_status:1" "$filtered_counts"
+listed="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event list task-123 --summary-contains two --limit 1)"
+assert_eq "event list returns matching event" "ci_status" "$(jq -r '.[0].type' <<< "$listed")"
+assert_eq "event list does not delete" "pending=2 counts=ci_status:1,pr_review:1" "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event counts task-123)"
+listed_id="$(jq -r '.[0].id' <<< "$listed")"
+assert_true "event list includes id" test -n "$listed_id"
+assert_eq "event ack by id" "acked=1" "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event ack task-123 --id "$listed_id")"
 taken="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event take task-123 --type pr_review --limit 1)"
 assert_eq "take returns one" "1" "$(jq 'length' <<< "$taken")"
 assert_eq "publisher recorded" "cli" "$(jq -r '.[0].publisher' <<< "$taken")"
 counts_after="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event counts task-123)"
-assert_eq "take deletes" "pending=1 counts=ci_status:1" "$counts_after"
+assert_eq "take deletes" "pending=0 counts=" "$counts_after"
+
+rm -f "$PROJECT_DIR/tasks/task-123/.orchestrator/events/pending/"*.json
+jq '.sent = []' "$FAKE_CMUX_STATE" > "$TMPDIR/cmux-reset.json" && mv "$TMPDIR/cmux-reset.json" "$FAKE_CMUX_STATE"
+(
+    cd "$PROJECT_DIR" || exit 1
+    "$REPO_ROOT/bin/craft" event notify-filter set task-123 --type ci_status >/dev/null
+    "$REPO_ROOT/bin/craft" event enqueue task-123 --type pr_review --summary "muted by filter" --json "$payload1" >/dev/null
+    "$REPO_ROOT/bin/craft" event enqueue task-123 --type ci_status --summary "matching filter" --json "$payload2" >/dev/null
+)
+assert_eq "notification filter stored" "ci_status" "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event notify-filter get task-123 | jq -r '.types[0]')"
+assert_eq "notification filter suppresses unmatched wake" "1" "$(jq '.sent | length' "$FAKE_CMUX_STATE")"
+assert_eq "notification wake uses filtered counts" "CRAFT_EVENTS task=task-123 pending=1 counts=ci_status:1" "$(jq -r '.sent[0].text' "$FAKE_CMUX_STATE")"
+assert_eq "ack by filter removes matching events only" "acked=1" "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event ack task-123 --type ci_status)"
+assert_eq "notification filter clear" "{}" "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event notify-filter clear task-123 && "$REPO_ROOT/bin/craft" event notify-filter get task-123 | jq -c 'del(.ids,.types,.publishers,.summary_contains,.since,.before)')"
+rm -f "$PROJECT_DIR/tasks/task-123/.orchestrator/events/pending/"*.json
 (
     cd "$PROJECT_DIR" || exit 1
     "$REPO_ROOT/bin/craft" task signal task-123 operator_signal --reason "operator requested action" >/dev/null
@@ -249,6 +274,13 @@ assert_eq "take deletes" "pending=1 counts=ci_status:1" "$counts_after"
 signalled="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event take task-123 --type operator_signal --limit 1)"
 assert_eq "task signal enqueues event" "operator_signal" "$(jq -r '.[0].type' <<< "$signalled")"
 assert_eq "task signal reason" "operator requested action" "$(jq -r '.[0].payload.reason' <<< "$signalled")"
+(
+    cd "$PROJECT_DIR/tasks/task-123" || exit 1
+    "$REPO_ROOT/bin/craft" event enqueue --type inferred_task --summary "inferred task" --json "$payload1" >/dev/null
+)
+assert_eq "event commands infer task from cwd" "pending=1 counts=inferred_task:1" "$(cd "$PROJECT_DIR/tasks/task-123" && "$REPO_ROOT/bin/craft" event counts --type inferred_task)"
+assert_eq "event commands accept --task override" "pending=1 counts=inferred_task:1" "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event counts --task task-123 --type inferred_task)"
+assert_eq "event ack infers task from cwd" "acked=1" "$(cd "$PROJECT_DIR/tasks/task-123" && "$REPO_ROOT/bin/craft" event ack --type inferred_task)"
 
 consume_hook="$TMPDIR/consume-hook"
 cat > "$consume_hook" <<'EOF'
