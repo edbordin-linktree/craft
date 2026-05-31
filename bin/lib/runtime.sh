@@ -179,7 +179,7 @@ runtime_stage_set() {
         --arg reason "$reason" \
         --arg workflow "$workflow" \
         '{task_id:$task_id, from:$previous, to:$stage, previous_stage:$previous, stage:$stage, stage_status:$stage_status, reason:$reason, workflow:$workflow}' > "$payload"
-    runtime_event_enqueue "$project_dir" "$task_id" "stage.changed" "stage changed to $stage" "$payload" >/dev/null || true
+    ( RUNTIME_EVENT_SUPPRESS_WAKE=1 runtime_event_enqueue "$project_dir" "$task_id" "stage.changed" "stage changed to $stage" "$payload" >/dev/null ) || true
     rm -f "$payload"
 
     echo "$stage"
@@ -417,7 +417,7 @@ runtime_event_enqueue() {
 
     pending_after="$(runtime_event_count_total "$pending_dir")"
     counts="$(runtime_event_counts_text "$pending_dir")"
-    if [[ "$before" == "0" ]]; then
+    if [[ "$before" == "0" && -z "${RUNTIME_EVENT_SUPPRESS_WAKE:-}" ]]; then
         msg="CRAFT_EVENTS task=$task_id pending=$pending_after counts=$counts"
         if command -v craft-mux >/dev/null 2>&1; then
             craft-mux send-task "$task_id" "$msg" >/dev/null 2>&1 || true

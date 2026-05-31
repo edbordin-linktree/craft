@@ -154,6 +154,9 @@ cmd_task() {
                 runtime_stage_resume "$project_dir" "$task_id" "$reason" >/dev/null
                 cmd="$(provider_task_resume_cmd "$agent" "$prompt_file" "$task_dir" "$agent_model")"
             else
+                if [[ -z "$(runtime_task_stage "$task_file" || true)" ]]; then
+                    runtime_stage_advance "$project_dir" "$task_id" "workflow started" >/dev/null
+                fi
                 cmd="$(provider_task_cmd "$agent" "$prompt_file" "$task_dir" "$agent_model")"
             fi
             eval "$cmd"

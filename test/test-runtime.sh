@@ -182,6 +182,32 @@ cat > "$TMPDIR/bin/smoke-agent" <<EOF
 printf '%s\n' "\$*" > "$TMPDIR/smoke-agent-args"
 EOF
 chmod +x "$TMPDIR/bin/smoke-agent"
+cat > "$QUEUE_DIR/in-progress/task-run.md" <<'EOF'
+---
+id: task-run
+status: in-progress
+depends_on: []
+repos: [craft]
+branch: runtime/run
+---
+
+## Summary
+Task run fixture.
+EOF
+mkdir -p "$PROJECT_DIR/tasks/task-run/.orchestrator"
+printf 'run entry prompt\n' > "$TMPDIR/run-entry-prompt.txt"
+start_hooks_before_run="$(grep -c '^on_stage_start ' "$hook_log")"
+rm -f "$PROJECT_DIR/tasks/task-run/.orchestrator/events/pending/"*.json
+(
+    export CRAFT_HOOK_RUNNER="$hook_runner"
+    cd "$PROJECT_DIR" || exit 1
+    "$REPO_ROOT/bin/craft" task run task-run --prompt "$TMPDIR/run-entry-prompt.txt" --agent smoke-agent
+)
+assert_true "task run entrypoint injects prompt" grep -q 'run entry prompt' "$TMPDIR/smoke-agent-args"
+assert_eq "task run entrypoint starts workflow stage" "implement" "$(task_field "$QUEUE_DIR/in-progress/task-run.md" stage)"
+assert_eq "task run entrypoint fires start hook locally" "$((start_hooks_before_run + 1))" "$(grep -c '^on_stage_start ' "$hook_log")"
+assert_eq "task run stage event does not wake agent" "0" "$([[ -f "$FAKE_CMUX_STATE" ]] && jq '.sent | length' "$FAKE_CMUX_STATE" || echo 0)"
+
 printf 'resume entry prompt\n' > "$TMPDIR/resume-entry-prompt.txt"
 (
     export CRAFT_HOOK_RUNNER="$hook_runner"

@@ -369,7 +369,6 @@ run_task() {
             runtime_stage_set "$PROJECT_DIR" "$tid" blocked "workflow prompt render failed" blocked >/dev/null || true
             return
         fi
-        runtime_stage_advance "$PROJECT_DIR" "$tid" "workflow started" >/dev/null || log "Stage advance failed for $tid"
     fi
 
     # Determine which agent provider to use (task-level override or project default)
