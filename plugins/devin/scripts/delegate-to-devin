@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# delegate-to-devin — Create a Devin session and route its structured_output to a file.
+# delegate-to-devin — Create a Devin session and record it for Craft events.
 #
 # Usage:
 #   delegate-to-devin \
@@ -12,15 +12,15 @@
 #     [--acu-limit N] \
 #     [--title "Short title"] \
 #     [--task-id task-123] \
-#     [--poll-interval SECONDS] \
-#     [--poll-timeout SECONDS]
+#     [--poll-interval SECONDS] \  # accepted for compatibility; no-op
+#     [--poll-timeout SECONDS]     # accepted for compatibility; no-op
 #
 # Env:
 #   DEVIN_API_KEY        — required
 #   DEVIN_ORG_ID         — if set, uses v3 enterprise endpoints
 #   DEVIN_API_BASE       — override (default: https://api.devin.ai)
 #
-# Stdout (on success): a single JSON pointer object — see README.
+# Stdout (on success): a single JSON pointer object.
 # Exits non-zero on any failure with a human-readable stderr message.
 
 set -euo pipefail
@@ -169,14 +169,40 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 # shellcheck source=bin/lib/task-runtime.sh
 source "${CRAFT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}/bin/lib/task-runtime.sh"
 
-open_devin_surface() {
-    local cwd task_id output sid
-    cwd="$(pwd -P)"
-    task_id="$TASK_ID_OVERRIDE"
+find_project_dir() {
+    local d="${1:-$PWD}"
+    while [[ "$d" != "/" ]]; do
+        if [[ -f "$d/craft.conf" ]]; then
+            echo "$d"
+            return 0
+        fi
+        d="$(dirname "$d")"
+    done
+    return 1
+}
+
+abs_path() {
+    local path="$1" dir base
+    dir="$(dirname "$path")"
+    base="$(basename "$path")"
+    mkdir -p "$dir"
+    printf '%s/%s\n' "$(cd "$dir" && pwd -P)" "$base"
+}
+
+resolve_task_context() {
+    local cwd="$1" task_id="$TASK_ID_OVERRIDE"
     if [[ -z "$task_id" ]]; then
         task_id="$(orchestrator_task_id_from_worktree "$cwd" 2>/dev/null || true)"
     fi
-    if [[ -z "$task_id" || "$task_id" == "." || "$task_id" == "/" ]]; then
+    [[ -n "$task_id" && "$task_id" != "." && "$task_id" != "/" ]] || return 1
+    echo "$task_id"
+}
+
+open_devin_surface() {
+    local cwd task_id output sid
+    cwd="$(pwd -P)"
+    task_id="$(resolve_task_context "$cwd" 2>/dev/null || true)"
+    if [[ -z "$task_id" ]]; then
         echo "delegate-to-devin: no task id available; session URL: $SESSION_URL" >&2
         return 0
     fi
@@ -191,106 +217,36 @@ open_devin_surface() {
 
 open_devin_surface
 
-# --- poll until settled ---
-if [[ -n "${DEVIN_ORG_ID:-}" ]]; then
-    GET_URL="$API_BASE/v3/organizations/$DEVIN_ORG_ID/sessions/$SESSION_ID"
-else
-    GET_URL="$API_BASE/v1/sessions/$SESSION_ID"
-fi
-
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-DEADLINE=$(( $(date +%s) + POLL_TIMEOUT ))
-FINAL_STATUS=""
-FINAL_RESP=""
 
-while true; do
-    NOW=$(date +%s)
-    if (( NOW > DEADLINE )); then
-        die "polling timed out after ${POLL_TIMEOUT}s — session $SESSION_ID still running ($SESSION_URL)"
-    fi
-
-    GET_RESP="$(curl -fsS "$GET_URL" "${AUTH_HEADERS[@]}")" || die "GET $GET_URL failed"
-    STATUS="$(echo "$GET_RESP" | jq -r '.status_enum // .status // .status_detail // empty')"
-
-    case "$STATUS" in
-        completed|finished|done|stopped|succeeded|exit)
-            FINAL_STATUS="$STATUS"
-            FINAL_RESP="$GET_RESP"
-            break
-            ;;
-        blocked)
-            if [[ "$(echo "$GET_RESP" | jq -r '.structured_output != null')" == "true" ]]; then
-                FINAL_STATUS="$STATUS"
-                FINAL_RESP="$GET_RESP"
-                break
-            fi
-            die "session $SESSION_ID ended with status=$STATUS — see $SESSION_URL"
-            ;;
-        failed|errored|cancelled|canceled)
-            die "session $SESSION_ID ended with status=$STATUS — see $SESSION_URL"
-            ;;
-        "")
-            die "could not read status from session response: $GET_RESP"
-            ;;
-        *)
-            echo "delegate-to-devin: status=$STATUS — polling again in ${POLL_INTERVAL}s..." >&2
-            sleep "$POLL_INTERVAL"
-            ;;
-    esac
-done
-
-SETTLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-# --- extract structured_output ---
-STRUCTURED="$(echo "$FINAL_RESP" | jq '.structured_output // null')"
-
-if [[ "$STRUCTURED" == "null" ]] || [[ -z "$STRUCTURED" ]]; then
-    die "session $SESSION_ID has no structured_output — check prompt + schema. URL: $SESSION_URL"
-fi
-
-# --- render to file ---
-# Convention:
-#   - If structured_output has a top-level `markdown` string, write it directly.
-#   - Else, write a markdown wrapper with the structured_output as a JSON block.
-
-HAS_MARKDOWN="$(echo "$STRUCTURED" | jq -r 'if type=="object" and has("markdown") then "yes" else "no" end')"
-SUMMARY="$(echo "$STRUCTURED" | jq -r '
-    if type=="object" then
-        (.summary // .Summary // .description // .description_short // empty)
-    else
-        empty
-    end' | head -c 280)"
-[[ -n "$SUMMARY" ]] || SUMMARY="(no summary field in structured_output)"
-
-if [[ "$HAS_MARKDOWN" == "yes" ]]; then
-    echo "$STRUCTURED" | jq -r '.markdown' > "$OUTPUT_FILE"
-else
-    {
-        echo "<!--"
-        echo "Generated by delegate-to-devin"
-        echo "session_id: $SESSION_ID"
-        echo "url: $SESSION_URL"
-        echo "started_at: $STARTED_AT"
-        echo "settled_at: $SETTLED_AT"
-        echo "-->"
-        echo
-        echo "# Devin output — session $SESSION_ID"
-        echo
-        if [[ -n "$SUMMARY" ]] && [[ "$SUMMARY" != "(no summary field in structured_output)" ]]; then
-            echo "**Summary:** $SUMMARY"
-            echo
-        fi
-        echo "## structured_output"
-        echo
-        echo '```json'
-        echo "$STRUCTURED" | jq .
-        echo '```'
-        echo
-        echo "## Session"
-        echo
-        echo "- URL: $SESSION_URL"
-        echo "- Status: $FINAL_STATUS"
-    } > "$OUTPUT_FILE"
+TASK_ID="$(resolve_task_context "$(pwd -P)" 2>/dev/null || true)"
+PROJECT_DIR="$(find_project_dir "$(pwd -P)" 2>/dev/null || true)"
+OUTPUT_FILE="$(abs_path "$OUTPUT_FILE")"
+SESSION_RECORD=""
+if [[ -n "$TASK_ID" && -n "$PROJECT_DIR" ]]; then
+    SESSION_DIR="$PROJECT_DIR/tasks/$TASK_ID/.orchestrator/devin/sessions"
+    mkdir -p "$SESSION_DIR"
+    SESSION_RECORD="$SESSION_DIR/$SESSION_ID.json"
+    jq -n \
+        --arg task_id "$TASK_ID" \
+        --arg session_id "$SESSION_ID" \
+        --arg url "$SESSION_URL" \
+        --arg output_path "$OUTPUT_FILE" \
+        --arg started_at "$STARTED_AT" \
+        --arg title "$TITLE" \
+        --arg tag "$TAG" \
+        --arg api_base "$API_BASE" \
+        '{
+            task_id: $task_id,
+            session_id: $session_id,
+            url: $url,
+            output_path: $output_path,
+            started_at: $started_at,
+            title: $title,
+            tag: $tag,
+            api_base: $api_base,
+            status: "pending"
+        }' > "$SESSION_RECORD"
 fi
 
 # --- print pointer JSON ---
@@ -298,16 +254,17 @@ jq -n \
     --arg session_id "$SESSION_ID" \
     --arg url "$SESSION_URL" \
     --arg output_path "$OUTPUT_FILE" \
-    --arg status "$FINAL_STATUS" \
+    --arg status "pending" \
     --arg started_at "$STARTED_AT" \
-    --arg settled_at "$SETTLED_AT" \
-    --arg summary "$SUMMARY" \
+    --arg session_record "$SESSION_RECORD" \
+    --arg task_id "$TASK_ID" \
     '{
         session_id: $session_id,
         url: $url,
         output_path: $output_path,
         status: $status,
         started_at: $started_at,
-        settled_at: $settled_at,
-        summary: $summary
+        session_record: $session_record,
+        task_id: $task_id,
+        event_type: "devin.session_settled"
     }'

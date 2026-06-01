@@ -220,6 +220,10 @@ Rules:
   totals and whether a wake-up is sent.
 - The orchestrator periodically re-sends the wake-up when matching pending
   events remain unconsumed; the default reminder interval is 15 minutes.
+- Tool-style integrations should use events as their callback path. The `devin`
+  plugin is the reference shape: task agents create a remote session, the
+  plugin checks pending sessions from `on_poll`, and the agent wakes on
+  `devin.session_settled` / `devin.session_failed`.
 - No event audit trail is required initially.
 
 ## Dashboard

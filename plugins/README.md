@@ -153,6 +153,12 @@ Notification filters support the non-time event filters: repeatable `--type`,
 repeatable `--publisher`, and repeatable `--summary-contains`. Notification
 counts reflect only matching pending events.
 
+Long-running tool-style plugins should publish back into the same queue instead
+of asking the task agent to poll. For example, the `devin` plugin records
+pending Devin sessions under the task directory, checks them from `on_poll`,
+and wakes the task with `devin.session_settled` or `devin.session_failed` when
+there is a result to consume.
+
 Generic web surfaces are keyed by stable semantic ids such as `github-pr`, `diffhub-review`, or `buildkite-status`. Under cmux, Craft stores that semantic id and related attributes on the cmux surface metadata, then resolves the current surface ref with the mux provider when focusing or closing. `craft surface open` creates or reuses a browser surface in the task workspace; `craft surface focus` returns `surface_not_found` when no surface metadata matches; `craft surface close` closes the matched surface when present.
 
 ## Queue States

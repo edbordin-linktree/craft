@@ -1,37 +1,31 @@
 ---
 name: delegate-to-devin
-description: Spawn and steer Devin sessions in Devin's cloud for delegated stages of work. Current path is curl against the Devin v1 REST API using an `apk_user_` personal token; the MCP v3 path is the eventual target but requires a `cog_` service-user key we don't have yet. Sessions are persistent and resumable; every supervisor handoff (initial spawn or follow-up) MUST schedule a wake-up so the supervisor returns to read Devin's response. This skill is pure mechanics; the caller decides when to use Devin vs Codex vs Claude.
+description: Spawn Devin cloud sessions for delegated work and consume the result through Craft task events. Use when the task agent wants to hand a bounded research, synthesis, or implementation subtask to Devin without blocking its own terminal.
 ---
 
 # delegate-to-devin
 
-Drive a Devin session from a supervisor Claude session. Devin runs in its own cloud sandbox, so the supervisor must arrange to be re-summoned when Devin replies — there is no "callback" otherwise.
-
-## Why curl + v1 (and not the MCP) right now
-
-The Devin MCP server (`https://mcp.devin.ai/mcp`) is v3-only and rejects `apk_user_` personal tokens for write operations: handshake passes, but `devin_session_interact` returns `403 Forbidden`. The same token works fully against the v1 REST endpoints (`https://api.devin.ai/v1/...`) — session create, send_message, status reads all succeed.
-
-Until someone provisions a `cog_` service-user key in Devin Settings → Service users, we stay on v1. Once we have one, see **Future: MCP migration** at the bottom of this file.
+Drive a Devin session from inside a Craft task. Devin runs in its own cloud sandbox; Craft records the session and the `devin` plugin checks it from the orchestrator poll loop. When Devin settles, Craft writes the configured output file and queues a task event.
 
 ## Hard rules
 
-1. **Always schedule a return.** Every time you hand off to Devin — whether spawning a new session or sending a follow-up message — call `ScheduleWakeup` (or `CronCreate` if you need a persistent recurrence) before yielding. Fire-and-forget is a bug: the supervisor never returns to read the response.
-2. **Never inline-poll.** No `while` loops, no `sleep` chains in the supervisor. The helper script polls internally for its own settlement deadline; that's fine. Anything outside that helper goes through `ScheduleWakeup`.
-3. **Don't paste tokens into shell args.** Use `$DEVIN_API_KEY` from env; never hard-code keys in scripts or commit them.
+1. **Do not poll Devin yourself.** No `while`, no `sleep`, no manual recurring status checks from the task agent.
+2. **Wait on Craft events.** After starting a session, use `craft event list` or `craft event take` for `devin.session_settled` / `devin.session_failed`.
+3. **Do not run background helpers.** The `devin` plugin `on_poll` hook performs settlement checks from the orchestrator.
+4. **Do not paste tokens into shell args.** Use `$DEVIN_API_KEY` from env.
 
 ## Prerequisites
 
-- `DEVIN_API_KEY` in env (`apk_user_…` form is acceptable for v1).
+- `DEVIN_API_KEY` in env (`apk_user_...` works for the current v1 REST path).
 - `curl` and `jq` on `PATH`.
-- Handoff dirs: `.orchestrator/handoff/` and `.orchestrator/schemas/` (created on demand).
-- The `delegate-to-devin` helper at `plugins/devin/scripts/delegate-to-devin` for the initial-spawn case.
-- When run inside Craft with a task worktree (or with `--task-id`), the helper opens or reuses a cmux browser tab for `https://app.devin.ai/sessions/<session_id>` through Craft's `devin-session` surface. Outside Craft, or when cmux/task context is unavailable, it degrades to printing the session URL.
+- The project has the `devin` plugin enabled so its `on_poll` hook can publish settlement events.
+- Handoff dirs such as `.orchestrator/handoff/` and `.orchestrator/schemas/` exist or can be created.
 
-## Workflow A — initial delegation
+## Initial Delegation
 
-1. **Write the prompt** to `.orchestrator/handoff/<stage>-prompt.md`. Tell Devin to keep `structured_output` updated and to conform to the schema below.
+1. Write the prompt to `.orchestrator/handoff/<purpose>-prompt.md`.
 
-2. **Write the JSON schema** for `structured_output` to `.orchestrator/schemas/<stage>.json`. Default research schema:
+2. Write the JSON schema for `structured_output` to `.orchestrator/schemas/<purpose>.json`. Default research schema:
 
    ```json
    {
@@ -56,132 +50,96 @@ Until someone provisions a `cog_` service-user key in Devin Settings → Service
    }
    ```
 
-3. **Create the session.** Two options — the helper is simpler; raw curl is when you need full control over the create payload or a non-blocking spawn.
+3. Create the session:
 
-   *Helper (preferred for one-shot research):*
-   ```
+   ```bash
    plugins/devin/scripts/delegate-to-devin \
-     --prompt-file .orchestrator/handoff/<stage>-prompt.md \
-     --schema-file .orchestrator/schemas/<stage>.json \
-     --output      .orchestrator/handoff/0X-<stage>.md \
-     --tag         <task-id> \
-     [--repos repo1,repo2,...] \
-     [--acu-limit N] \
-     [--task-id <task-id>] \
-     [--title "Short session title"] \
-     [--poll-timeout 60]   # short timeout if you want to ScheduleWakeup yourself rather than block
+     --prompt-file .orchestrator/handoff/<purpose>-prompt.md \
+     --schema-file .orchestrator/schemas/<purpose>.json \
+     --output      .orchestrator/handoff/<purpose>-devin.md \
+     --tag         "$CRAFT_TASK_ID" \
+     --title       "Short session title" \
+     --acu-limit   10
    ```
 
-   *Raw curl (non-blocking spawn):*
-   ```bash
-   curl -fsS -X POST https://api.devin.ai/v1/sessions \
-     -H "Authorization: Bearer $DEVIN_API_KEY" \
-     -H "Content-Type: application/json" \
-     -d "$(jq -n --arg prompt "$(cat .orchestrator/handoff/<stage>-prompt.md)" \
-                  --arg title "<short title>" \
-                  --argjson acu 10 \
-                  '{prompt: $prompt, title: $title, max_acu_limit: $acu, tags: ["<stage>"]}')"
+   The helper returns immediately with JSON like:
+
+   ```json
+   {
+     "session_id": "...",
+     "url": "https://app.devin.ai/sessions/...",
+     "output_path": ".../.orchestrator/handoff/<purpose>-devin.md",
+     "status": "pending",
+     "session_record": ".../.orchestrator/devin/sessions/<id>.json",
+     "event_type": "devin.session_settled"
+   }
    ```
 
-   Capture `session_id` from the response.
-
-4. **Schedule a wake-up.** Pick an interval that respects the prompt cache (`ScheduleWakeup` clamps to [60, 3600]):
-
-   - Targeted follow-up question: 600s (10 min).
-   - Multi-repo research: 1200–1800s (20–30 min) first check, re-schedule if still running.
-   - Long codegen: 1800–3600s.
-
-   The wake-up `prompt` must be self-contained: include the `session_id`, the handoff file path to write to, and the next-step instruction. Future-you needs to act without rebuilding context.
-
-5. **Record the session** in `.orchestrator/devin-sessions.jsonl`:
+4. Continue other work or wait for the event. To inspect without consuming:
 
    ```bash
-   jq -nc \
-     --arg purpose "<stage-or-purpose>" \
-     --arg session_id "<from create response>" \
-     --arg url "https://app.devin.ai/sessions/<id>" \
-     --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-     --arg output_ref ".orchestrator/handoff/0X-<stage>.md" \
-     '{purpose:$purpose, agent:"devin", session_id:$session_id, url:$url, started_at:$started_at, output_ref:$output_ref, status:"pending"}' \
-     >> .orchestrator/devin-sessions.jsonl
+   craft event list --type devin.session_settled --type devin.session_failed
    ```
 
-6. **Operator visibility.** If the helper opened a `devin-session` surface in cmux, treat it as read-only operator inspection. The structured output file and recorded session metadata remain the source of truth for follow-up.
+   To consume the result:
 
-## Workflow B — follow-up question to an existing session
-
-1. **Send via curl:**
    ```bash
-   curl -fsS -X POST "https://api.devin.ai/v1/sessions/<session_id>/message" \
-     -H "Authorization: Bearer $DEVIN_API_KEY" \
-     -H "Content-Type: application/json" \
-     -d "$(jq -n --arg m "<follow-up text>" '{message: $m}')"
+   craft event take --type devin.session_settled --limit 1
    ```
-2. **Immediately schedule a wake-up** (typical: 600s). No exceptions.
-3. On wake-up, follow Workflow C.
 
-## Workflow C — checking on a session
+5. Read the event payload and then read `payload.output_path`. That output file is the source of truth for Devin's structured result.
 
-1. **Get status + messages in one shot:**
-   ```bash
-   curl -fsS "https://api.devin.ai/v1/sessions/<session_id>" \
-     -H "Authorization: Bearer $DEVIN_API_KEY" \
-     -o /tmp/devin-session.json
-   jq '{status, status_enum, last: (.messages[-1] | {type, ts: .timestamp, head: ((.message // "") | .[0:200])})}' /tmp/devin-session.json
-   ```
-   Note the field on each message is `.message` (not `.content`).
+## Event Contract
 
-2. **If still running** (`status_enum` ∈ `working`, `running`, `claimed`): re-schedule another wake-up (typical: 600–1200s). Do NOT block. Do NOT spin.
+`devin.session_settled` payload:
 
-3. **If settled** (`status_enum` ∈ `finished`, `done`, `blocked`, `errored`):
-   - Read the latest assistant message(s): `jq -r '.messages[-1].message' /tmp/devin-session.json`.
-   - If a real `structured_output` is present (`jq '.structured_output' /tmp/devin-session.json` not `null`), render it; otherwise extract the inline brief from the latest message.
-   - Append to the recorded `output_ref` markdown file.
-   - Append a settled record to `.orchestrator/devin-sessions.jsonl` with the same `session_id`, the final status, and `settled_at`.
-   - Surface a short summary to the operator.
+```json
+{
+  "session_id": "...",
+  "url": "https://app.devin.ai/sessions/...",
+  "output_path": ".../.orchestrator/handoff/<purpose>-devin.md",
+  "status": "blocked|completed|finished|done|...",
+  "started_at": "2026-06-01T00:00:00Z",
+  "settled_at": "2026-06-01T00:10:00Z",
+  "summary": "Short summary extracted from structured_output"
+}
+```
 
-4. **If blocked / errored:** check the latest message for the reason. Devin's VM can be unreachable mid-session; Devin will say so and inline the result. Don't treat that as a hard failure — extract whatever Devin actually delivered.
+`devin.session_failed` payload:
 
-## Model selection
+```json
+{
+  "session_id": "...",
+  "url": "https://app.devin.ai/sessions/...",
+  "status": "failed|errored|cancelled",
+  "settled_at": "2026-06-01T00:10:00Z"
+}
+```
 
-Devin's session-create payload accepts an agent/model selector when the API exposes one (the v1 endpoint historically just inherits the org default). Defaults are set at the org level in Devin's UI.
+## Follow-Up Question
 
-- **Research / synthesis / structured-output tasks** → smaller model (Sonnet-equivalent). Cheaper, faster, sufficient.
-- **Novel design / cross-file refactor / hard reasoning** → larger model (Opus-equivalent).
-- When unsure, default smaller and upgrade only if Devin reports it can't make progress.
+For now, send follow-ups with the REST API and then wait for the next Craft event. Do not poll manually:
 
-## Failure modes
+```bash
+curl -fsS -X POST "https://api.devin.ai/v1/sessions/<session_id>/message" \
+  -H "Authorization: Bearer $DEVIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n --arg m "<follow-up text>" '{message: $m}')"
+```
+
+The existing session record remains pending only until the first settlement event. If you need multiple structured follow-ups, start a new `delegate-to-devin` session with a fresh output file.
+
+## Failure Modes
 
 | Symptom | Likely cause | What to do |
 |---|---|---|
-| `status_enum: blocked` and last message says VM unreachable | Devin infra issue; sandbox down | Read the inline answer (Devin often delivers anyway via DeepWiki). Record and move on — not a hard failure. |
-| `status_enum: blocked` and last message asks a question | Devin needs input | Send `POST /v1/sessions/{id}/message` with the answer; schedule wake-up. |
-| `401 Unauthorized` from v1 | Token expired or wrong | Surface to operator; do not silently retry. Confirm `DEVIN_API_KEY` is set and current. |
-| `403 Forbidden` on `/v3/organizations/.../sessions/...` | You accidentally hit the MCP/v3 path with an `apk_user_` token | Stay on v1 (`/v1/sessions/...`). For v3 you'd need a `cog_` service-user key. |
-| Helper exits with "polling timed out" but session still running | Helper's poll deadline reached, Devin still working | This is fine — read the session via curl (Workflow C). The helper's exit code is not a Devin failure. |
-| Wake-up never fires | `ScheduleWakeup` not called | Check immediately — if no wake-up is in flight, schedule one now and apologise to the operator. |
+| No event appears | Orchestrator has not polled yet, plugin not enabled, or `DEVIN_API_KEY` missing from orchestrator env | Check `craft event list --type devin.session_settled --type devin.session_failed`; if empty after a few orchestrator polls, surface to operator. |
+| `devin.session_failed` | Devin returned failed/errored/cancelled or no structured output | Open the Devin URL for context, then decide whether to retry with a clearer prompt. |
+| `401 Unauthorized` from helper | Token expired or wrong | Surface to operator; do not retry with the same token. |
+| `403 Forbidden` on v3/MCP | `apk_user_` token cannot write through v3 | Stay on v1 REST until a `cog_` service-user key exists. |
 
-## Anti-patterns
+## API Notes
 
-- **Fire-and-forget after sending a message.** Always pair `send_message`/`message` with `ScheduleWakeup`.
-- **Polling in a tight loop / sleeping inside the supervisor.** Use `ScheduleWakeup` and let the runtime hand control back.
-- **Re-trying after 401/403 with the same token.** Surface the failure; don't paper over it.
-- **Hard-coding tokens.** Use `$DEVIN_API_KEY`.
-- **Trusting vendor docs about key/endpoint compatibility without verifying.** Confirmed gaps: `apk_user_` tokens work for v1 fully, fail at the v3 write layer despite passing the MCP handshake.
+The Devin MCP server (`https://mcp.devin.ai/mcp`) is v3-only and rejects `apk_user_` personal tokens for write operations. The v1 REST endpoint works with current personal tokens for session creation and status reads.
 
-## Future: MCP migration
-
-Once a `cog_` org-scoped service-user key is minted (Devin Settings → Service users), we move to the MCP path:
-
-1. Update env: `DEVIN_API_KEY=cog_…`.
-2. Re-register the MCP:
-   ```
-   claude mcp remove devin -s user
-   claude mcp add -s user -t http devin https://mcp.devin.ai/mcp \
-     -H "Authorization: Bearer $DEVIN_API_KEY"
-   ```
-   Org-scoped service-user keys resolve org_id automatically — no `X-Org-Id` needed.
-3. Restart Claude Code to pick up the new tool surface.
-4. Verify with `ToolSearch` for `mcp__devin__devin_session_interact`; if present, switch the workflows above to use the MCP tools in place of curl. The hard rules (schedule wake-up, no inline polling) are unchanged.
-
-At that point this skill should be edited to invert: MCP becomes the documented happy path, curl becomes the v1 fallback only when MCP is unreachable.
+When a `cog_` org-scoped service-user key is available, this plugin can move to the MCP/v3 path. The Craft event contract should stay the same.

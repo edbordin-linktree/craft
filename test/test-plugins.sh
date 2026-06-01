@@ -300,7 +300,23 @@ echo ""
 echo "devin helper contract"
 DEVIN_BIN="$TMPDIR/devin-bin"
 DEVIN_WORK="$TMPDIR/devin-work"
-mkdir -p "$DEVIN_BIN" "$DEVIN_WORK/out"
+DEVIN_PROJECT="$TMPDIR/devin-project"
+DEVIN_TASK_DIR="$DEVIN_PROJECT/tasks/task-devin"
+DEVIN_REPO="$DEVIN_TASK_DIR/repo"
+mkdir -p "$DEVIN_BIN" "$DEVIN_WORK/out" "$DEVIN_REPO" "$DEVIN_PROJECT/queue"/{drafts,pending,approved,in-progress,waiting,done,blocked,archive}
+cat > "$DEVIN_PROJECT/craft.conf" <<'EOF'
+PLUGINS=devin
+EOF
+cat > "$DEVIN_PROJECT/queue/in-progress/task-devin.md" <<'EOF'
+---
+id: task-devin
+status: in-progress
+stage: implement
+repos: [craft]
+---
+
+# Devin task
+EOF
 cat > "$DEVIN_BIN/curl" <<'EOF'
 #!/usr/bin/env bash
 args="$*"
@@ -331,9 +347,17 @@ EOF
 cat > "$DEVIN_WORK/schema.json" <<'EOF'
 {"type":"object","required":["summary","markdown"],"properties":{"summary":{"type":"string"},"markdown":{"type":"string"}}}
 EOF
-assert_true "devin accepts blocked response with structured output" bash -c "PATH='$DEVIN_BIN':\$PATH DEVIN_API_KEY=fake CRAFT_TASK_ID=/ '$REPO_ROOT/plugins/devin/scripts/delegate-to-devin' --prompt-file '$DEVIN_WORK/prompt.md' --schema-file '$DEVIN_WORK/schema.json' --output '$DEVIN_WORK/out/result.md' --poll-timeout 1 --poll-interval 1 > '$TMPDIR/devin.out' 2> '$TMPDIR/devin.err'"
+assert_true "devin creates pending session" bash -c "cd '$DEVIN_REPO' && PATH='$DEVIN_BIN':\$PATH DEVIN_API_KEY=fake CRAFT_ROOT='$REPO_ROOT' CRAFT_TASK_ID=task-devin '$REPO_ROOT/plugins/devin/scripts/delegate-to-devin' --prompt-file '$DEVIN_WORK/prompt.md' --schema-file '$DEVIN_WORK/schema.json' --output '$DEVIN_WORK/out/result.md' --poll-timeout 1 --poll-interval 1 > '$TMPDIR/devin.out' 2> '$TMPDIR/devin.err'"
+assert_true "devin prints pending pointer json" bash -c "jq -e '.session_id == \"devin-test\" and .status == \"pending\" and .event_type == \"devin.session_settled\"' '$TMPDIR/devin.out' >/dev/null"
+devin_record="$(jq -r '.session_record' "$TMPDIR/devin.out")"
+assert_true "devin records pending session" bash -c "jq -e '.status == \"pending\" and .task_id == \"task-devin\"' '$devin_record' >/dev/null"
+assert_false "devin helper does not block for output" test -f "$DEVIN_WORK/out/result.md"
+assert_true "devin poll hook settles session" bash -c "PATH='$DEVIN_BIN':\$PATH DEVIN_API_KEY=fake CRAFT_ROOT='$REPO_ROOT' '$REPO_ROOT/plugins/devin/scripts/poll-devin-sessions' --project-dir '$DEVIN_PROJECT'"
 assert_file_contains "devin writes markdown output" "$DEVIN_WORK/out/result.md" "# Smoke complete"
-assert_true "devin prints pointer json" bash -c "jq -e '.session_id == \"devin-test\" and .summary == \"Smoke complete\"' '$TMPDIR/devin.out' >/dev/null"
+assert_true "devin records settled session" bash -c "jq -e '.status == \"settled\" and .summary == \"Smoke complete\"' '$devin_record' >/dev/null"
+devin_event="$(cd "$DEVIN_PROJECT" && CRAFT_ROOT="$REPO_ROOT" "$REPO_ROOT/bin/craft" event take task-devin --type devin.session_settled --limit 1)"
+assert_eq "devin publishes settled event" "devin.session_settled" "$(jq -r '.[0].type' <<< "$devin_event")"
+assert_eq "devin event points at output" "$(cd "$DEVIN_WORK/out" && pwd -P)/result.md" "$(jq -r '.[0].payload.output_path' <<< "$devin_event")"
 
 echo ""
 echo "plugin_queue_states"
