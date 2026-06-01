@@ -14,6 +14,7 @@
 #   craft-mux session                           Print the resolved session name
 #   craft-mux send-task <task-id> <text...>     Send text to a task's agent pane
 #   craft-mux open <task-id> <surface-id> ...   Open/reuse a task web surface
+#   craft-mux open-project-browser --url URL    Open an untracked project browser
 #   craft-mux focus <task-id> <surface-id>      Focus a registered task surface
 #   craft-mux resume <task-id>                  Recreate a missing task agent
 #   craft-mux workspace-state <task-id> [surface-id]
@@ -73,7 +74,7 @@ fi
 
 # --- Dispatch ---
 cmd="${1:-}"
-[[ -n "$cmd" ]] || { echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|resume|workspace-state|close|status ..." >&2; exit 2; }
+[[ -n "$cmd" ]] || { echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|open-project-browser|focus|resume|workspace-state|close|status ..." >&2; exit 2; }
 shift
 
 render_task_resume_prompt() {
@@ -166,6 +167,19 @@ case "$cmd" in
         surface_id="${1:?surface id required}"; shift
         mux_surface_open "$PROJECT_DIR" "$task_id" "$surface_id" "$@"
         ;;
+    open-project-browser)
+        url=""
+        label="browser"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --url) url="${2:-}"; shift 2 ;;
+                --label) label="${2:-}"; shift 2 ;;
+                *) echo "craft-mux open-project-browser: unknown arg: $1" >&2; exit 2 ;;
+            esac
+        done
+        [[ -n "$url" ]] || { echo "craft-mux open-project-browser: --url required" >&2; exit 2; }
+        mux_project_browser_open_untracked "$PROJECT_DIR" "$url" "$label"
+        ;;
     focus)
         task_id="${1:?task id required}"; shift
         surface_id="${1:?surface id required}"
@@ -209,7 +223,7 @@ case "$cmd" in
         ;;
     *)
         echo "craft-mux: unknown subcommand '$cmd'" >&2
-        echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|focus|resume|workspace-state|close|status ..." >&2
+        echo "Usage: $0 [--session SESSION] spawn|send|exists|kill|session|send-task|open|open-project-browser|focus|resume|workspace-state|close|status ..." >&2
         exit 2
         ;;
 esac

@@ -241,9 +241,7 @@ export function focusPrSurface(prUrl: string): FocusResult {
 }
 
 export function openPrSurface(projectDir: string, taskId: string, prUrl: string): FocusResult {
-  let label = "pr";
-  const m = prUrl.match(/github\.com\/[^/]+\/([^/]+)\/pull\/([0-9]+)/);
-  if (m) label = `pr:${m[1]}#${m[2]}`;
+  const label = prSurfaceLabel(prUrl);
 
   const r = craftMux(
     projectDir,
@@ -266,6 +264,20 @@ export function openPrSurface(projectDir: string, taskId: string, prUrl: string)
   return isUiUnavailable(error)
     ? cmuxUiUnavailable(error)
     : { ok: false, error };
+}
+
+export function openProjectPrSurface(projectDir: string, prUrl: string): FocusResult {
+  const r = craftMux(projectDir, "open-project-browser", "--url", prUrl, "--label", prSurfaceLabel(prUrl));
+  if (r.ok) return { ok: true, surfaceRef: r.stdout.trim() || undefined };
+  const error = r.stderr.trim() || r.stdout.trim() || "failed to open project PR surface";
+  return isUiUnavailable(error)
+    ? cmuxUiUnavailable(error)
+    : { ok: false, error };
+}
+
+function prSurfaceLabel(prUrl: string): string {
+  const m = prUrl.match(/github\.com\/[^/]+\/([^/]+)\/pull\/([0-9]+)/);
+  return m ? `pr:${m[1]}#${m[2]}` : "pr";
 }
 
 export function focusDiffhubSurface(projectDir: string, taskId: string): FocusResult {

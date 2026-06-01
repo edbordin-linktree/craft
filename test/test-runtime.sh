@@ -356,6 +356,12 @@ project_architect="$(_cmux_ensure_surface "workspace:project" "architect" "termi
 assert_eq "project dashboard shares orchestrator pane" "pane:50" "$(jq -r '.windows[0].workspaces[] | select(.ref == "workspace:project").panes[] | select(.surfaces[]?.ref == "'"$project_dashboard"'").ref' "$FAKE_CMUX_STATE")"
 assert_eq "project architect opens right pane" "true" "$(jq -r '.windows[0].workspaces[] | select(.ref == "workspace:project").panes[] | select(.surfaces[]?.ref == "'"$project_architect"'").ref != "pane:50"' "$FAKE_CMUX_STATE")"
 assert_eq "project architect uses create command" "echo architect" "$(jq -r '.windows[0].workspaces[] | select(.ref == "workspace:project").panes[].surfaces[] | select(.ref == "'"$project_architect"'").command' "$FAKE_CMUX_STATE")"
+project_pr="$(mux_project_browser_open_untracked "$PROJECT_DIR" "https://github.com/example/repo/pull/9" "pr:repo#9")"
+project_architect_pane="$(jq -r --arg s "$project_architect" '.windows[0].workspaces[] | select(.ref == "workspace:project").panes[] | select(.surfaces[]?.ref == $s).ref' "$FAKE_CMUX_STATE")"
+project_pr_pane="$(jq -r --arg s "$project_pr" '.windows[0].workspaces[] | select(.ref == "workspace:project").panes[] | select(.surfaces[]?.ref == $s).ref' "$FAKE_CMUX_STATE")"
+project_pr_semantic="$(jq -r --arg s "$project_pr" '[.windows[0].workspaces[] | select(.ref == "workspace:project").panes[].surfaces[] | select(.ref == $s) | (.metadata["craft:semantic"] // "null")] | .[0] // "missing"' "$FAKE_CMUX_STATE")"
+assert_eq "project browser opens untracked in right pane" "$project_architect_pane" "$project_pr_pane"
+assert_eq "project browser does not write semantic metadata" "null" "$project_pr_semantic"
 jq '.focused = "surface:previous"' "$FAKE_CMUX_STATE" > "$tmp_json" && mv "$tmp_json" "$FAKE_CMUX_STATE"
 _cmux_ensure_dashboard_surface "workspace:project" "$PROJECT_DIR" "http://127.0.0.1:27434" >/dev/null
 assert_eq "dashboard ensure does not steal focus by default" "surface:previous" "$(jq -r '.focused' "$FAKE_CMUX_STATE")"

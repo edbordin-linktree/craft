@@ -51,6 +51,11 @@
 #     → Manage logical task surfaces. cmux owns browser surfaces; tmux returns
 #       a clean unsupported status.
 #
+#   mux_project_browser_open_untracked <project-dir> <url> [label]
+#     → Open an untracked browser surface in the project/orchestrator workspace.
+#       cmux places it in the right pane and does not write Craft surface
+#       metadata; tmux returns unsupported.
+#
 #   mux_task_status_set <project-name> <task-id> <status> <icon> <color>
 #     → Set a visible task status banner. cmux writes a workspace status pill;
 #       tmux is a no-op.

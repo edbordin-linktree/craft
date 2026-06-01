@@ -1436,6 +1436,12 @@ _cmux_task_workspace_ref_for_project_dir() {
     _cmux_task_workspace_ref "$project_id" "$task_id"
 }
 
+_cmux_project_workspace_ref_for_project_dir() {
+    local project_dir="$1" project_id
+    project_id="$(basename "$project_dir")"
+    _cmux_project_workspace_ref "$project_id"
+}
+
 _cmux_task_workspace_lookup_item_for_project_dir() {
     local project_dir="$1" task_id="$2"
     local project_id
@@ -1517,6 +1523,19 @@ mux_surface_open() {
     _cmux_surface_metadata_set "$ws_ref" "$sid" "craft:owner" "$owner" || true
     _cmux_surface_metadata_set "$ws_ref" "$sid" "craft:stage" "$stage" || true
     _cmux_surface_metadata_set "$ws_ref" "$sid" "craft:url_match" "$url_match" || true
+    _cmux_focus_surface_ui "$ws_ref" "$sid" >/dev/null 2>&1 || true
+    echo "$sid"
+}
+
+mux_project_browser_open_untracked() {
+    local project_dir="$1" url="$2" label="${3:-browser}"
+    local ws_ref sid
+    [[ -n "$url" ]] || { echo "project browser open: url required" >&2; return 2; }
+
+    ws_ref="$(_cmux_project_workspace_ref_for_project_dir "$project_dir" 2>/dev/null || true)"
+    [[ -n "$ws_ref" ]] || { echo "workspace_not_found: $(basename "$project_dir")" >&2; return 1; }
+
+    sid="$(_cmux_create_surface "$ws_ref" "browser" "$label" "$url" "" "down" "right")" || return 1
     _cmux_focus_surface_ui "$ws_ref" "$sid" >/dev/null 2>&1 || true
     echo "$sid"
 }

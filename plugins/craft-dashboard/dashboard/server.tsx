@@ -24,7 +24,7 @@ import { Marked, Renderer } from "marked";
 import { render } from "preact-render-to-string";
 import { Dashboard } from "./views";
 import { scanProject, type Task } from "./queue";
-import { focusTaskSurface, focusDiffhubSurface, focusPrSurface, focusRegisteredSurface, openExternal, openPrSurface, resumeTaskSurface, taskWorkspaceState, type WorkspaceState } from "./cmux";
+import { focusTaskSurface, focusDiffhubSurface, focusPrSurface, focusRegisteredSurface, openExternal, openProjectPrSurface, openPrSurface, resumeTaskSurface, taskWorkspaceState, type WorkspaceState } from "./cmux";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),
@@ -389,6 +389,18 @@ const server = Bun.serve({
       const task = tasks.find(t => t.id === id);
       if (!task) return jsonResponse({ ok: false, error: `task ${id} not in snapshot` }, 404);
       if (!task.pr) return jsonResponse({ ok: false, error: `task ${id} has no pr in frontmatter` }, 400);
+      const state = taskWorkspaceState(projectDir, id);
+      if (!state.attached) {
+        const opened = openProjectPrSurface(projectDir, task.pr);
+        return jsonResponse(
+          {
+            ...opened,
+            fallback: "project-browser",
+            taskWorkspaceState: state,
+          },
+          opened.ok || opened.code === "cmux_ui_unavailable" ? 200 : 502,
+        );
+      }
       const registered = focusRegisteredSurface(projectDir, id, "github-pr");
       if (registered.ok) return jsonResponse(registered);
       const f = focusPrSurface(task.pr);

@@ -154,6 +154,11 @@ mux_surface_open() {
     return 3
 }
 
+mux_project_browser_open_untracked() {
+    echo "surface_unsupported: tmux provider does not manage browser surfaces" >&2
+    return 3
+}
+
 mux_surface_focus() {
     echo "surface_unsupported: tmux provider does not manage browser surfaces" >&2
     return 3
