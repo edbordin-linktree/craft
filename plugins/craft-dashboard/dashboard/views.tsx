@@ -373,7 +373,7 @@ function TaskCard({ task, nested = false, workspaceState }: { task: Task; nested
             data-toast-success={`focused PR ${prLabel(task.pr)}`}
             {...inlineClick("event.preventDefault()")}
             class="pr-pill"
-            title={`Focus the cmux PR tab for ${task.pr} (falls back to your system browser if no tab is open)`}
+            title={`Focus or open the Craft PR browser surface for ${task.pr}`}
           >PR {prLabel(task.pr)}</a>
         )}
       </div>

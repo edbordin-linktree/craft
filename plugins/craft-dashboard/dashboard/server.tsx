@@ -24,7 +24,7 @@ import { Marked, Renderer } from "marked";
 import { render } from "preact-render-to-string";
 import { Dashboard } from "./views";
 import { scanProject, type Task } from "./queue";
-import { focusTaskSurface, focusDiffhubSurface, focusPrSurface, focusRegisteredSurface, openExternal, resumeTaskSurface, taskWorkspaceState, type WorkspaceState } from "./cmux";
+import { focusTaskSurface, focusDiffhubSurface, focusPrSurface, focusRegisteredSurface, openExternal, openPrSurface, resumeTaskSurface, taskWorkspaceState, type WorkspaceState } from "./cmux";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),
@@ -393,17 +393,14 @@ const server = Bun.serve({
       if (registered.ok) return jsonResponse(registered);
       const f = focusPrSurface(task.pr);
       if (f.ok) return jsonResponse(f);
-      // No cmux browser tab open for this PR — fall back to system browser
-      // so the click still does *something* useful for the operator.
-      const o = openExternal(task.pr);
+      const opened = openPrSurface(projectDir, id, task.pr);
       return jsonResponse(
         {
-          ok: o.ok,
-          fallback: "system-browser",
+          ...opened,
+          fallback: "craft-surface-open",
           surfaceLookupError: f.error,
-          ...(o.ok ? { opened: o.opened } : { error: o.error }),
         },
-        o.ok ? 200 : 502,
+        opened.ok || opened.code === "cmux_ui_unavailable" ? 200 : 502,
       );
     }
 

@@ -51,7 +51,10 @@ surface; the dashboard code itself does not create cmux panes.
      shows a resume action instead of relying on the orchestrator to recreate
      it automatically.
    - Diffhub and PR surfaces: focus Craft-registered semantic surfaces
-     (`diffhub-review`, `github-pr`) through `craft-mux focus`.
+     (`diffhub-review`, `github-pr`) through `craft-mux focus`. If no PR
+     surface exists yet, the dashboard creates the `github-pr` browser surface
+     through Craft's mux provider instead of asking the remote host to launch
+     its default browser.
 
 ## Routes
 

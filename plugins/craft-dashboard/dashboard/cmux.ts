@@ -172,10 +172,10 @@ export function resumeTaskSurface(projectDir: string, taskId: string): FocusResu
 }
 
 /**
- * Hand a URL off to the system default browser via macOS `open`. The cmux
- * in-app browser sometimes can't complete corporate SSO redirects, so links
- * to Linear / GitHub / yaml files are routed through this endpoint instead
- * of opening as cmux browser tabs.
+ * Hand a URL off to the system default browser via macOS `open`. This is kept
+ * for generic external links. Task PR links should prefer Craft-managed cmux
+ * surfaces because the dashboard may be running on a remote host where
+ * default-browser launch is not meaningful.
  *
  * Allowlist: http(s) and file://. The dashboard only binds to 127.0.0.1, so
  * the practical attack surface is low, but we still refuse anything outside
@@ -207,8 +207,7 @@ export function openExternal(rawUrl: string): { ok: boolean; opened?: string; er
  * `https://github.com/<org>/<repo>/pull/<n>` prefix — that way path
  * suffixes like `/files` or `#issuecomment-123` still match.
  *
- * Returns `ok: false` with a "not found" error if no such surface exists;
- * the caller (the /focus/pr/:id route) falls back to opening externally.
+ * Returns `ok: false` with a "not found" error if no such surface exists.
  */
 export function focusPrSurface(prUrl: string): FocusResult {
   // Canonical PR base: scheme + host + /org/repo/pull/N
@@ -239,6 +238,34 @@ export function focusPrSurface(prUrl: string): FocusResult {
     }
   }
   return { ok: false, error: `no cmux browser tab open for ${prefix}` };
+}
+
+export function openPrSurface(projectDir: string, taskId: string, prUrl: string): FocusResult {
+  let label = "pr";
+  const m = prUrl.match(/github\.com\/[^/]+\/([^/]+)\/pull\/([0-9]+)/);
+  if (m) label = `pr:${m[1]}#${m[2]}`;
+
+  const r = craftMux(
+    projectDir,
+    "open",
+    taskId,
+    "github-pr",
+    "--url",
+    prUrl,
+    "--label",
+    label,
+    "--owner",
+    "craft-dashboard",
+    "--stage",
+    "pr_review",
+    "--url-match",
+    "prefix",
+  );
+  if (r.ok) return { ok: true, surfaceRef: r.stdout.trim() || undefined };
+  const error = r.stderr.trim() || r.stdout.trim() || `failed to open PR surface for ${taskId}`;
+  return isUiUnavailable(error)
+    ? cmuxUiUnavailable(error)
+    : { ok: false, error };
 }
 
 export function focusDiffhubSurface(projectDir: string, taskId: string): FocusResult {
