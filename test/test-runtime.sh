@@ -170,6 +170,10 @@ assert_true "claude uses continue resume" bash -c "grep -q 'claude --continue' <
 assert_true "codex uses interactive resume --last" bash -c "grep -q 'codex.*resume --last' <<< \"\$1\"" _ "$codex_resume_cmd"
 assert_true "codex disables startup update prompt" \
     bash -c "grep -q -- '-c check_for_update_on_startup=false' <<< \"\$1\"" _ "$codex_resume_cmd"
+assert_true "codex resume disables fast service tier" \
+    bash -c "grep -q -- '-c service_tier=standard' <<< \"\$1\"" _ "$codex_resume_cmd"
+assert_true "codex resume uses high reasoning" \
+    bash -c "grep -q -- '-c model_reasoning_effort=high' <<< \"\$1\"" _ "$codex_resume_cmd"
 assert_true "codex does not pass resume prompt as session id" \
     bash -c 'if grep -Fq "$2" <<< "$1"; then exit 1; fi' _ "$codex_resume_cmd" 'resume --last "$(cat'
 assert_true "task run entrypoint uses craft command" \
@@ -549,6 +553,13 @@ source "$REPO_ROOT/bin/lib/workflow.sh"
 source "$REPO_ROOT/bin/lib/providers.sh"
 assert_true "hyphenated provider env var is safe" bash -c "source '$REPO_ROOT/bin/lib/providers.sh' && SMOKE_AGENT_APPROVAL_MODE=never provider_task_cmd smoke-agent /tmp/prompt /tmp/work >/dev/null"
 assert_true "task agent model becomes provider flag" bash -c "source '$REPO_ROOT/bin/lib/providers.sh' && provider_task_cmd claude /tmp/prompt /tmp/work opus | grep -q -- '--model opus'"
+codex_task_cmd="$(provider_task_cmd codex /tmp/prompt /tmp/work)"
+assert_true "codex task defaults to gpt-5.5" bash -c "grep -q -- '--model gpt-5.5' <<< \"\$1\"" _ "$codex_task_cmd"
+assert_true "codex task defaults to high reasoning" bash -c "grep -q -- '-c model_reasoning_effort=high' <<< \"\$1\"" _ "$codex_task_cmd"
+assert_true "codex task defaults to fast off" bash -c "grep -q -- '-c service_tier=standard' <<< \"\$1\"" _ "$codex_task_cmd"
+assert_true "codex task model override wins" bash -c "source '$REPO_ROOT/bin/lib/providers.sh' && provider_task_cmd codex /tmp/prompt /tmp/work gpt-5 | grep -q -- '--model gpt-5'"
+assert_true "codex service tier override wins" bash -c "source '$REPO_ROOT/bin/lib/providers.sh' && CODEX_SERVICE_TIER=fast provider_task_cmd codex /tmp/prompt /tmp/work | grep -q -- '-c service_tier=fast'"
+assert_true "codex reasoning override wins" bash -c "source '$REPO_ROOT/bin/lib/providers.sh' && CODEX_REASONING_EFFORT=xhigh provider_task_cmd codex /tmp/prompt /tmp/work | grep -q -- '-c model_reasoning_effort=xhigh'"
 DISCOVERY_PROJECT="$TMPDIR/discovery-project"
 mkdir -p "$DISCOVERY_PROJECT/queue"/{approved,pending,in-progress,waiting,done,blocked,archive}
 cat > "$DISCOVERY_PROJECT/craft.conf" <<'EOF'

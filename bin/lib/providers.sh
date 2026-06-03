@@ -16,11 +16,20 @@ provider_flags() {
     local approval="${!approval_var:-}"
     local model_var="${upper}_MODEL"
     local model="${model_override:-${!model_var:-}}"
+    local reasoning_var="${upper}_REASONING_EFFORT"
+    local reasoning_effort="${!reasoning_var:-}"
+    local service_tier_var="${upper}_SERVICE_TIER"
+    local service_tier="${!service_tier_var:-}"
     local flags=""
 
     case "$provider" in
         codex)
+            model="${model_override:-${!model_var:-gpt-5.5}}"
+            reasoning_effort="${reasoning_effort:-high}"
+            service_tier="${service_tier:-standard}"
             flags="-c check_for_update_on_startup=false"
+            flags="$flags -c model_reasoning_effort=$(printf '%q' "$reasoning_effort")"
+            flags="$flags -c service_tier=$(printf '%q' "$service_tier")"
             # bypass:    no approvals, no sandbox (--dangerously-bypass-approvals-and-sandbox)
             # never:     no approvals, sandboxed (-a never)
             # full-auto: model decides when to ask, sandboxed (--full-auto)
