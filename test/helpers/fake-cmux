@@ -12,6 +12,7 @@ if [[ ! -f "$STATE" ]]; then
   "next_surface": 2,
   "focused": "",
   "sent": [],
+  "keys": [],
   "windows": [
     {
       "ref": "window:1",
@@ -517,7 +518,15 @@ case "${1:-}" in
             }
         '
         ;;
-    send-key|workspace-action|move-workspace-to-window|select-workspace|clear-status)
+    send-key)
+        ws="$(workspace_arg "$@")"
+        surface="$(surface_arg "$@")"
+        key="${@: -1}"
+        save --arg ws "$ws" --arg surface "$surface" --arg key "$key" '
+            .keys = ((.keys // []) + [{workspace: $ws, surface: $surface, key: $key}])
+        '
+        ;;
+    workspace-action|move-workspace-to-window|select-workspace|clear-status)
         ;;
     list-status)
         ;;

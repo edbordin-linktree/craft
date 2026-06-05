@@ -391,7 +391,7 @@ _cmux_send_command_to_surface() {
     local ws_ref="$1" surface_id="$2" command="$3"
     [[ -n "$command" ]] || return 0
     cmux send --workspace "$ws_ref" --surface "$surface_id" "$command" >/dev/null 2>&1 || return 1
-    cmux send --workspace "$ws_ref" --surface "$surface_id" $'\n' >/dev/null 2>&1 || return 1
+    cmux send-key --workspace "$ws_ref" --surface "$surface_id" enter >/dev/null 2>&1 || return 1
 }
 
 _cmux_focus_surface_ui() {
@@ -664,7 +664,7 @@ _cmux_send_to_surface() {
         return 2
     }
     cmux send --workspace "$ws_ref" --surface "$sid" "$text" >/dev/null 2>&1 || return 1
-    cmux send --workspace "$ws_ref" --surface "$sid" $'\n' >/dev/null 2>&1
+    cmux send-key --workspace "$ws_ref" --surface "$sid" enter >/dev/null 2>&1
 }
 
 _cmux_close_surface() {
