@@ -239,9 +239,9 @@ printf '{"body":"two"}\n' > "$payload2"
     "$REPO_ROOT/bin/craft" event enqueue task-123 --type pr_review --summary "review one" --json "$payload1" >/dev/null
     "$REPO_ROOT/bin/craft" event enqueue task-123 --type ci_status --summary "ci two" --json "$payload2" >/dev/null
 )
-assert_eq "duplicate wake suppressed" "1" "$(jq '.sent | length' "$FAKE_CMUX_STATE")"
+assert_eq "duplicate wake suppressed" "2" "$(jq '.sent | length' "$FAKE_CMUX_STATE")"
 assert_eq "wake is queue summary" "CRAFT_EVENTS task=task-123 pending=1 counts=pr_review:1" "$(jq -r '.sent[0].text' "$FAKE_CMUX_STATE")"
-assert_eq "wake submits with enter key" "enter" "$(jq -r '.keys[0].key' "$FAKE_CMUX_STATE")"
+assert_eq "wake submits with carriage return" "true" "$(jq -r '.sent[1].text == "\r"' "$FAKE_CMUX_STATE")"
 counts="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event counts task-123)"
 assert_eq "event counts" "pending=2 counts=ci_status:1,pr_review:1" "$counts"
 filtered_counts="$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event counts task-123 --type ci_status --publisher cli)"
@@ -267,16 +267,16 @@ jq '.sent = [] | .keys = []' "$FAKE_CMUX_STATE" > "$TMPDIR/cmux-reset.json" && m
     "$REPO_ROOT/bin/craft" event enqueue task-123 --type ci_status --summary "matching filter" --json "$payload2" >/dev/null
 )
 assert_eq "notification filter stored" "ci_status" "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event notify-filter get task-123 | jq -r '.types[0]')"
-assert_eq "notification filter suppresses unmatched wake" "1" "$(jq '.sent | length' "$FAKE_CMUX_STATE")"
+assert_eq "notification filter suppresses unmatched wake" "2" "$(jq '.sent | length' "$FAKE_CMUX_STATE")"
 assert_eq "notification wake uses filtered counts" "CRAFT_EVENTS task=task-123 pending=1 counts=ci_status:1" "$(jq -r '.sent[0].text' "$FAKE_CMUX_STATE")"
-assert_eq "notification filtered wake submits with enter key" "enter" "$(jq -r '.keys[0].key' "$FAKE_CMUX_STATE")"
+assert_eq "notification filtered wake submits with carriage return" "true" "$(jq -r '.sent[1].text == "\r"' "$FAKE_CMUX_STATE")"
 echo 1 > "$PROJECT_DIR/tasks/task-123/.orchestrator/events/last-notified-at"
 jq '.sent = [] | .keys = []' "$FAKE_CMUX_STATE" > "$TMPDIR/cmux-reset.json" && mv "$TMPDIR/cmux-reset.json" "$FAKE_CMUX_STATE"
 runtime_event_notify_pending "$PROJECT_DIR" task-123 900 >/dev/null
 assert_eq "notification reminder sends stale wake" "CRAFT_EVENTS task=task-123 pending=1 counts=ci_status:1" "$(jq -r '.sent[0].text' "$FAKE_CMUX_STATE")"
-assert_eq "notification reminder submits with enter key" "enter" "$(jq -r '.keys[0].key' "$FAKE_CMUX_STATE")"
+assert_eq "notification reminder submits with carriage return" "true" "$(jq -r '.sent[1].text == "\r"' "$FAKE_CMUX_STATE")"
 runtime_event_notify_pending "$PROJECT_DIR" task-123 900 >/dev/null || true
-assert_eq "notification reminder waits for interval" "1" "$(jq '.sent | length' "$FAKE_CMUX_STATE")"
+assert_eq "notification reminder waits for interval" "2" "$(jq '.sent | length' "$FAKE_CMUX_STATE")"
 assert_eq "ack by filter removes matching events only" "acked=1" "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event ack task-123 --type ci_status)"
 assert_eq "notification filter clear" "{}" "$(cd "$PROJECT_DIR" && "$REPO_ROOT/bin/craft" event notify-filter clear task-123 && "$REPO_ROOT/bin/craft" event notify-filter get task-123 | jq -c 'del(.ids,.types,.publishers,.summary_contains,.since,.before)')"
 rm -f "$PROJECT_DIR/tasks/task-123/.orchestrator/events/pending/"*.json
@@ -537,8 +537,8 @@ assert_eq "remote task metadata records dir" "$PROJECT_DIR/tasks/task-remote" "$
 CMUX_CLOSE_WORKSPACE_SYNC=1 mux_replace_orchestrator_workspace project "$PROJECT_DIR" "CRAFT_INNER_SESSION=1 exec orchestrator" >/dev/null
 assert_eq "orchestrator workspace restart closes old project workspace" "0" "$(jq '[.windows[0].workspaces[] | select(.ref == "workspace:project")] | length' "$FAKE_CMUX_STATE")"
 assert_eq "orchestrator workspace restart creates replacement" "1" "$(jq '[.windows[0].workspaces[] | select(.metadata["craft:project-id"] == "project" and (.metadata["craft:task-id"] // "") == "")] | length' "$FAKE_CMUX_STATE")"
-assert_eq "orchestrator workspace restart sends launch command" "CRAFT_INNER_SESSION=1 exec orchestrator" "$(jq -r '.sent[-1].text' "$FAKE_CMUX_STATE")"
-assert_eq "orchestrator workspace restart submits launch command" "enter" "$(jq -r '.keys[-1].key' "$FAKE_CMUX_STATE")"
+assert_eq "orchestrator workspace restart sends launch command" "CRAFT_INNER_SESSION=1 exec orchestrator" "$(jq -r '.sent[-2].text' "$FAKE_CMUX_STATE")"
+assert_eq "orchestrator workspace restart submits launch command" "true" "$(jq -r '.sent[-1].text == "\r"' "$FAKE_CMUX_STATE")"
 unset CMUX_CLOSE_WORKSPACE_SYNC
 (
     cd "$PROJECT_DIR" || exit 1
